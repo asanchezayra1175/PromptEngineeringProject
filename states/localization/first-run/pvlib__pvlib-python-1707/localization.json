@@ -1,0 +1,217 @@
+{
+  "instance_id": "pvlib__pvlib-python-1707",
+  "status": "success",
+  "attempt": 1,
+  "relevant_files": [
+    "/testbed/pvlib/iam.py"
+  ],
+  "relevant_symbols": [
+    "physical"
+  ],
+  "bug_analysis": "The physical function in iam.py returns nan instead of 0 when n=1 and aoi > 90\u00b0. When n=1 (no reflection), angles greater than 90\u00b0 should return 0 as the incident angle modifier, but the current implementation produces nan values due to mathematical calculations that don't handle this edge case properly.",
+  "exploration_notes": "Import pattern: from pvlib import iam. Usage: iam.physical(aoi, n, K, L). The function takes angle of incidence and physical parameters of glass/coating materials. Test case shows aoi=100, n=1 should return 0.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explore the following repository and produce a localization report identifying where the bug lives.\n\n<instance_id>pvlib__pvlib-python-1707</instance_id>\n\n<problem_statement>\nregression: iam.physical returns nan for aoi > 90\u00b0 when n = 1\n**Describe the bug**\r\nFor pvlib==0.9.5, when n = 1 (no reflection) and aoi > 90\u00b0, we get nan as result.\r\n\r\n**To Reproduce**\r\n```python\r\nimport pvlib\r\npvlib.iam.physical(aoi=100, n=1)\r\n```\r\nreturns `nan`.\r\n\r\n**Expected behavior**\r\nThe result should be `0`, as it was for pvlib <= 0.9.4.\r\n\r\n\r\n**Versions:**\r\n - ``pvlib.__version__``: '0.9.5'\r\n - ``pandas.__version__``:  '1.5.3'\r\n - python: 3.10.4\r\n\n\n</problem_statement>\n\n<hints>\n\n</hints>\n\n<repo>pvlib/pvlib-python</repo>\n<base_commit>40e9e978c170bdde4eeee1547729417665dbc34c</base_commit>\n\n<test_targets>\nThese tests must pass after the fix \u2014 use them to find the relevant module.\n[\n  \"pvlib/tests/test_iam.py::test_physical_n1_L0\"\n]\n</test_targets>\n\n\n\nBegin by reading the problem statement, then grep for the key term. Output the JSON report when you have identified the relevant files and symbols.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the problem statement to identify the bug location. The issue is in the `iam.physical` function when `n=1` and `aoi > 90\u00b0`, which should return `0` but returns `nan`.\n\nLet me start with a targeted search for the `physical` function in the iam module:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DLwND75apoTV8nQoMDRUVj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -r \"def physical\" /testbed --include=\"*.py\" -l"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DLwND75apoTV8nQoMDRUVj",
+          "content": "[exit_code=0]\n/testbed/pvlib/iam.py\n/testbed/pvlib/modelchain.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read the iam.py file to find the `physical` function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YA5vHdGMJ4T386TiWZs1ZP",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YA5vHdGMJ4T386TiWZs1ZP",
+          "content": "[exit_code=0]\nr\"\"\"\nThe ``iam`` module contains functions that implement models for the incidence\nangle modifier (IAM). The IAM quantifies the fraction of direct irradiance on\na module's front surface that is transmitted through the module materials to\nthe cells. Stated differently, the quantity 1 - IAM is the fraction of direct\nirradiance that is reflected away or absorbed by the module's front materials.\nIAM is typically a function of the angle of incidence (AOI) of the direct\nirradiance to the module's surface.\n\"\"\"\n\nimport numpy as np\nimport pandas as pd\nimport functools\nfrom pvlib.tools import cosd, sind\n\n# a dict of required parameter names for each IAM model\n# keys are the function names for the IAM models\n_IAM_MODEL_PARAMS = {\n    'ashrae': {'b'},\n    'physical': {'n', 'K', 'L'},\n    'martin_ruiz': {'a_r'},\n    'sapm': {'B0', 'B1', 'B2', 'B3', 'B4', 'B5'},\n    'interp': set()\n}\n\n\ndef ashrae(aoi, b=0.05):\n    r\"\"\"\n    Determine the incidence angle modifier using the ASHRAE transmission\n    model.\n\n    The ASHRAE (American Society of Heating, Refrigeration, and Air\n    Conditioning Engineers) transmission model is developed in\n    [1]_, and in [2]_. The model has been used in software such as PVSyst [3]_.\n\n    Parameters\n    ----------\n    aoi : numeric\n        The angle of incidence (AOI) between the module normal vector and the\n        sun-beam vector in degrees. Angles of nan will result in nan.\n\n    b : float, default 0.05\n        A parameter to adjust the incidence angle modifier as a function of\n        angle of incidence. Typical values are on the order of 0.05 [3].\n\n    Returns\n    -------\n    iam : numeric\n        The incident angle modifier (IAM). Returns zero for all abs(aoi) >= 90\n        and for all ``iam`` values that would be less than 0.\n\n    Notes\n    -----\n    The incidence angle modifier is calculated as\n\n    .. math::\n\n        IAM = 1 - b (\\sec(aoi) - 1)\n\n    As AOI approaches 90 degrees, the model yields negative values for IAM;\n    negative IAM values are set to zero in this implementation.\n\n    References\n    ----------\n    .. [1] Souka A.F., Safwat H.H., \"Determination of the optimum\n       orientations for the double exposure flat-plate collector and its\n       reflections\". Solar Energy vol .10, pp 170-174. 1966.\n\n    .. [2] ASHRAE standard 93-77\n\n    .. [3] PVsyst Contextual Help.\n       https://files.pvsyst.com/help/index.html?iam_loss.htm retrieved on\n       October 14, 2019\n\n    See Also\n    --------\n    pvlib.iam.physical\n    pvlib.iam.martin_ruiz\n    pvlib.iam.interp\n    \"\"\"\n\n    iam = 1 - b * (1 / np.cos(np.radians(aoi)) - 1)\n    aoi_gte_90 = np.full_like(aoi, False, dtype='bool')\n    np.greater_equal(np.abs(aoi), 90, where=~np.isnan(aoi), out=aoi_gte_90)\n    iam = np.where(aoi_gte_90, 0, iam)\n    iam = np.maximum(0, iam)\n\n    if isinstance(aoi, pd.Series):\n        iam = pd.Series(iam, index=aoi.index)\n\n    return iam\n\n\ndef physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n    r\"\"\"\n    Determine the incidence angle modifier using refractive index ``n``,\n    extinction coefficient ``K``, glazing thickness ``L`` and refractive\n    index ``n_ar`` of an optional anti-reflective coating.\n\n    ``iam.physical`` calculates the incidence angle modifier as described in\n    [1]_, Section 3, with additional support of an anti-reflective coating.\n    The calculation is based on a physical model of reflections, absorption,\n    and transmission through a transparent cover.\n\n    Parameters\n    ----------\n    aoi : numeric\n        The angle of incidence between the module normal vector and the\n        sun-beam vector in degrees. Angles of nan will result in nan.\n\n    n : numeric, default 1.526\n        The effective index of refraction (unitless). Reference [1]_\n        indicates that a value of 1.526 is acceptable for glass.\n\n    K : numeric, default 4.0\n        The glazing extinction coefficient in units of 1/meters.\n        Reference [1] indicates that a value of 4 is reasonable for\n        \"water white\" glass.\n\n    L : numeric, default 0.002\n        The glazing thickness in units of meters. Reference [1]_\n        indicates that 0.002 meters (2 mm) is reasonable for most\n        glass-covered PV panels.\n\n    n_ar : numeric, optional\n        The effective index of refraction of the anti-reflective (AR) coating\n        (unitless). If n_ar is None (default), no AR coating is applied.\n        A typical value for the effective index of an AR coating is 1.29.\n\n    Returns\n    -------\n    iam : numeric\n        The incident angle modifier\n\n    Notes\n    -----\n    The pvlib python authors believe that Eqn. 14 in [1]_ is\n    incorrect, which presents :math:`\\theta_{r} = \\arcsin(n \\sin(AOI))`.\n    Here, :math:`\\theta_{r} = \\arcsin(1/n \\times \\sin(AOI))`\n\n    References\n    ----------\n    .. [1] W. De Soto et al., \"Improvement and validation of a model for\n       photovoltaic array performance\", Solar Energy, vol 80, pp. 78-88,\n       2006.\n\n    .. [2] Duffie, John A. & Beckman, William A.. (2006). Solar En\n...[truncated]...\nopic foreground that is visible from the tilted surface [2]_.\n\n    Parameters\n    ----------\n    surface_tilt : numeric\n        Surface tilt angle measured from horizontal (e.g. surface facing\n        up = 0, surface facing horizon = 90). [degrees]\n\n    Returns\n    -------\n    iam_sky : numeric\n        The incident angle modifier for sky diffuse.\n\n    iam_ground : numeric\n        The incident angle modifier for ground-reflected diffuse.\n\n    References\n    ----------\n    .. [1] Schlick, C. An inexpensive BRDF model for physically-based\n       rendering. Computer graphics forum 13 (1994).\n\n    .. [2] Xie, Y., M. Sengupta, A. Habte, A. Andreas, \"The 'Fresnel Equations'\n       for Diffuse radiation on Inclined photovoltaic Surfaces (FEDIS)\",\n       Renewable and Sustainable Energy Reviews, vol. 161, 112362. June 2022.\n       :doi:`10.1016/j.rser.2022.112362`\n\n    See Also\n    --------\n    pvlib.iam.schlick\n    \"\"\"\n    # these calculations are as in [2]_, but with the refractive index\n    # weighting coefficient w set to 1.0 (so it is omitted)\n\n    # relative transmittance of sky diffuse radiation by PV cover:\n    cosB = cosd(surface_tilt)\n    sinB = sind(surface_tilt)\n    cuk = (2 / (np.pi * (1 + cosB))) * (\n        (30/7)*np.pi - (160/21)*np.radians(surface_tilt) - (10/3)*np.pi*cosB\n        + (160/21)*cosB*sinB - (5/3)*np.pi*cosB*sinB**2 + (20/7)*cosB*sinB**3\n        - (5/16)*np.pi*cosB*sinB**4 + (16/105)*cosB*sinB**5\n    )  # Eq 4 in [2]\n\n    # relative transmittance of ground-reflected radiation by PV cover:\n    with np.errstate(divide='ignore', invalid='ignore'):  # Eq 6 in [2]\n        cug = 40 / (21 * (1 - cosB)) - (1 + cosB) / (1 - cosB) * cuk\n\n    cug = np.where(surface_tilt < 1e-6, 0, cug)\n\n    # respect input types:\n    if np.isscalar(surface_tilt):\n        cuk = cuk.item()\n        cug = cug.item()\n    elif isinstance(surface_tilt, pd.Series):\n        cuk = pd.Series(cuk, surface_tilt.index)\n        cug = pd.Series(cug, surface_tilt.index)\n\n    return cuk, cug"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the `physical` function. Let me look specifically at the test file to understand the expected behavior:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016vEA9TgsM35FCu2896ikZb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '1,30p' /testbed/pvlib/tests/test_iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016vEA9TgsM35FCu2896ikZb",
+          "content": "[exit_code=0]\n\"\"\"\nCreated on Wed Oct  2 10:14:16 2019\n\n@author: cwhanse\n\"\"\"\n\nimport numpy as np\nimport pandas as pd\n\nimport pytest\nfrom .conftest import assert_series_equal\nfrom numpy.testing import assert_allclose\n\nfrom pvlib import iam as _iam\n\n\ndef test_ashrae():\n    thetas = np.array([-90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5, 89., 90.,\n                       np.nan])\n    expected = np.array([0, 0.9193437, 0.97928932, 0.99588039, 1., 0.99588039,\n                         0.97928932, 0.9193437, 0, 0, np.nan])\n    iam = _iam.ashrae(thetas, .05)\n    assert_allclose(iam, expected, equal_nan=True)\n    iam_series = _iam.ashrae(pd.Series(thetas))\n    assert_series_equal(iam_series, pd.Series(expected))\n\n\ndef test_ashrae_scalar():\n    thetas = -45.\n    iam = _iam.ashrae(thetas, .05)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me search for the specific test that's mentioned in the test_targets:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012cFnki8W5uiTCFvzuHYFtQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 10 -B 5 \"test_physical_n1_L0\" /testbed/pvlib/tests/test_iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012cFnki8W5uiTCFvzuHYFtQ",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me look for the physical function test more broadly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XYg8GT3UW7ehPstSipouFC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 20 -B 5 \"def test_physical\" /testbed/pvlib/tests/test_iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XYg8GT3UW7ehPstSipouFC",
+          "content": "[exit_code=0]\niam = _iam.ashrae(thetas, .05)\n    expected = np.nan\n    assert_allclose(iam, expected, equal_nan=True)\n\n\ndef test_physical():\n    aoi = np.array([-90., -67.5, -45., -22.5, 0., 22.5, 45., 67.5, 90.,\n                    np.nan])\n    expected = np.array([0, 0.8893998, 0.98797788, 0.99926198, 1, 0.99926198,\n                         0.98797788, 0.8893998, 0, np.nan])\n    iam = _iam.physical(aoi, 1.526, 0.002, 4)\n    assert_allclose(iam, expected, atol=1e-7, equal_nan=True)\n\n    # GitHub issue 397\n    aoi = pd.Series(aoi)\n    iam = _iam.physical(aoi, 1.526, 0.002, 4)\n    expected = pd.Series(expected)\n    assert_series_equal(iam, expected)\n\n\ndef test_physical_ar():\n    aoi = np.array([0, 22.5, 45, 67.5, 90, 100, np.nan])\n    expected = np.array([1, 0.99944171, 0.9917463, 0.91506158, 0, 0, np.nan])\n    iam = _iam.physical(aoi, n_ar=1.29)\n    assert_allclose(iam, expected, atol=1e-7, equal_nan=True)\n\n\ndef test_physical_noar():\n    aoi = np.array([0, 22.5, 45, 67.5, 90, 100, np.nan])\n    expected = _iam.physical(aoi)\n    iam0 = _iam.physical(aoi, n_ar=1)\n    iam1 = _iam.physical(aoi, n_ar=1.526)\n    assert_allclose(iam0, expected, equal_nan=True)\n    assert_allclose(iam1, expected, equal_nan=True)\n\n\ndef test_physical_scalar():\n    aoi = -45.\n    iam = _iam.physical(aoi, 1.526, 0.002, 4)\n    expected = 0.98797788\n    assert_allclose(iam, expected, equal_nan=True)\n    aoi = np.nan\n    iam = _iam.physical(aoi, 1.526, 0.002, 4)\n    expected = np.nan\n    assert_allclose(iam, expected, equal_nan=True)\n\n\ndef test_martin_ruiz():\n\n    aoi = 45.\n    a_r = 0.16\n    expected = 0.98986965\n\n    # will fail if default values change\n    iam = _iam.martin_ruiz(aoi)\n    assert_allclose(iam, expected)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me search for any test containing \"n1_L0\" or specifically related to n=1:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FE8byyy2pYZjMyTDiZtoD3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"n1_L0\\|n=1\\|n = 1\" /testbed/pvlib/tests/test_iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FE8byyy2pYZjMyTDiZtoD3",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Looking at the physical function in the iam.py file, I can see the issue. The function calculates reflectance and transmittance for angles of incidence. When n=1 (no reflection), the function should handle the special case where aoi > 90\u00b0 should return 0, but it seems to be returning nan instead.\n\nLooking at the physical function implementation, I can see it has complex calculations involving the refractive index and when n=1, some of these calculations may produce nan values for aoi > 90\u00b0. The bug is likely in how the function handles the case when n=1 and aoi > 90\u00b0.\n\n```json\n{\n  \"relevant_files\": [\"/testbed/pvlib/iam.py\"],\n  \"relevant_symbols\": [\"physical\"],\n  \"bug_analysis\": \"The physical function in iam.py returns nan instead of 0 when n=1 and aoi > 90\u00b0. When n=1 (no reflection), angles greater than 90\u00b0 should return 0 as the incident angle modifier, but the current implementation produces nan values due to mathematical calculations that don't handle this edge case properly.\",\n  \"exploration_notes\": \"Import pattern: from pvlib import iam. Usage: iam.physical(aoi, n, K, L). The function takes angle of incidence and physical parameters of glass/coating materials. Test case shows aoi=100, n=1 should return 0.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-10T04:24:09Z"
+}
