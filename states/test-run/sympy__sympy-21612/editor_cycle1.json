@@ -1,0 +1,331 @@
+{
+  "instance_id": "sympy__sympy-21612",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sympy/printing/str.py b/sympy/printing/str.py\nindex c3fdcdd435..3e4b7d1b19 100644\n--- a/sympy/printing/str.py\n+++ b/sympy/printing/str.py\n@@ -333,7 +333,7 @@ def apow(i):\n                     b.append(apow(item))\n                 else:\n                     if (len(item.args[0].args) != 1 and\n-                            isinstance(item.base, Mul)):\n+                            isinstance(item.base, (Mul, Pow))):\n                         # To avoid situations like #14160\n                         pow_paren.append(item)\n                     b.append(item.base)",
+  "implementation_notes": "Modified the isinstance check in the _print_Mul method at line 336 to include Pow objects in addition to Mul objects. This ensures that parentheses are added around complex denominators that are Pow expressions, preventing mathematical ambiguity in division expressions like x/(1/y).",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sympy__sympy-21612</instance_id>\n\n<problem_statement>\nLatex parsing of fractions yields wrong expression due to missing brackets\nProblematic latex expression: `\"\\\\frac{\\\\frac{a^3+b}{c}}{\\\\frac{1}{c^2}}\"`\r\n\r\nis parsed to: `((a**3 + b)/c)/1/(c**2)`.\r\n\r\nExpected is: `((a**3 + b)/c)/(1/(c**2))`. \r\n\r\nThe missing brackets in the denominator result in a wrong expression.\r\n\r\n## Tested on\r\n\r\n- 1.8\r\n- 1.6.2\r\n\r\n## Reproduce:\r\n\r\n```\r\nroot@d31ef1c26093:/# python3\r\nPython 3.6.9 (default, Jan 26 2021, 15:33:00)\r\n[GCC 8.4.0] on linux\r\nType \"help\", \"copyright\", \"credits\" or \"license\" for more information.\r\n>>> from sympy.parsing.latex import parse_latex\r\n>>> parse_latex(\"\\\\frac{\\\\frac{a^3+b}{c}}{\\\\frac{1}{c^2}}\")\r\n((a**3 + b)/c)/1/(c**2)\r\n\r\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _print_Mul method in StrPrinter only checks isinstance(item.base, Mul) when deciding whether to add parentheses around denominators in division expressions. When the base is a Pow object (like 1/y represented as Pow(y, -1)), this check fails and parentheses are not added, causing expressions like x/(1/y) to be printed as x/1/y which is mathematically incorrect.\nExploration notes: The bug is on line 336 in _print_Mul method where isinstance(item.base, Mul) should include Pow as well. The classes Mul and Pow are imported from sympy.core on line 7. The test_Mul function in /testbed/sympy/printing/tests/test_str.py contains the relevant tests. According to the hint, a test case 'assert str(Mul(x, Pow(1/y, -1, evaluate=False), evaluate=False)) == 'x/(1/y)'' should be added to verify the fix.\n</localization_report>\n\n<solution_proposal>\nFix strategy: Pattern PD: The isinstance condition was too specific, only checking for Mul objects. Expanding it to include Pow objects ensures parentheses are added around complex denominators regardless of whether they're multiplication or power expressions.\n\nFiles to modify: [\n  \"/testbed/sympy/printing/str.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sympy/printing/str.py\n  Location: _print_Mul, line 336\n  Change  : REPLACE line 336:\n                            isinstance(item.base, Mul)):\nWITH:\n                            isinstance(item.base, (Mul, Pow))):\n  Rationale: The condition only checked for Mul objects when deciding to add parentheses around denominators, but Pow objects (like 1/y) also need parentheses to avoid mathematical ambiguity. This causes expressions like x/(1/y) to print incorrectly as x/1/y instead of x/(1/y).\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GJpt9A9R99DXEiDjCa2UZ3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -50 sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GJpt9A9R99DXEiDjCa2UZ3",
+          "content": "[exit_code=0]\n\"\"\"\nA Printer for generating readable representation of most sympy classes.\n\"\"\"\n\nfrom typing import Any, Dict\n\nfrom sympy.core import S, Rational, Pow, Basic, Mul, Number\nfrom sympy.core.mul import _keep_coeff\nfrom sympy.core.function import _coeff_isneg\nfrom .printer import Printer, print_function\nfrom sympy.printing.precedence import precedence, PRECEDENCE\n\nfrom mpmath.libmp import prec_to_dps, to_str as mlib_to_str\n\nfrom sympy.utilities import default_sort_key, sift\n\n\nclass StrPrinter(Printer):\n    printmethod = \"_sympystr\"\n    _default_settings = {\n        \"order\": None,\n        \"full_prec\": \"auto\",\n        \"sympy_integers\": False,\n        \"abbrev\": False,\n        \"perm_cyclic\": True,\n        \"min\": None,\n        \"max\": None,\n    }  # type: Dict[str, Any]\n\n    _relationals = dict()  # type: Dict[str, str]\n\n    def parenthesize(self, item, level, strict=False):\n        if (precedence(item) < level) or ((not strict) and precedence(item) <= level):\n            return \"(%s)\" % self._print(item)\n        else:\n            return self._print(item)\n\n    def stringify(self, args, sep, level=0):\n        return sep.join([self.parenthesize(item, level) for item in args])\n\n    def emptyPrinter(self, expr):\n        if isinstance(expr, str):\n            return expr\n        elif isinstance(expr, Basic):\n            return repr(expr)\n        else:\n            return str(expr)\n\n    def _print_Add(self, expr, order=None):\n        terms = self._as_ordered_terms(expr, order=order)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me view the _print_Mul method around line 336:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012aH7UfQEp81N6hzdpnSVWd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '330,350p' sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012aH7UfQEp81N6hzdpnSVWd",
+          "content": "[exit_code=0]\nisinstance(item, Pow) and\n                    bool(item.exp.as_coeff_Mul()[0] < 0)):\n                if item.exp is not S.NegativeOne:\n                    b.append(apow(item))\n                else:\n                    if (len(item.args[0].args) != 1 and\n                            isinstance(item.base, Mul)):\n                        # To avoid situations like #14160\n                        pow_paren.append(item)\n                    b.append(item.base)\n            elif item.is_Rational and item is not S.Infinity:\n                if item.p != 1:\n                    a.append(Rational(item.p))\n                if item.q != 1:\n                    b.append(Rational(item.q))\n            else:\n                a.append(item)\n\n        a = a or [S.One]\n\n        a_str = [self.parenthesize(x, prec, strict=False) for x in a]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get more context around this area to find the exact line mentioned in the proposal:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RKJcp9Khtawsdb6KsQhoND",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && wc -l sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RKJcp9Khtawsdb6KsQhoND",
+          "content": "[exit_code=0]\n997 sympy/printing/str.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_012HsuWYjQRpvXvfVSVBkeYn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"isinstance(item.base, Mul)\" sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012HsuWYjQRpvXvfVSVBkeYn",
+          "content": "[exit_code=0]\n336:                            isinstance(item.base, Mul)):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me view the context around line 336:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011SdSbNyz2bf5yL422tdFmf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '320,350p' sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011SdSbNyz2bf5yL422tdFmf",
+          "content": "[exit_code=0]\nif eargs[0] is S.NegativeOne:\n                eargs = eargs[1:]\n            else:\n                eargs[0] = -eargs[0]\n            e = Mul._from_args(eargs)\n            if isinstance(i, Pow):\n                return i.func(b, e, evaluate=False)\n            return i.func(e, evaluate=False)\n        for item in args:\n            if (item.is_commutative and\n                    isinstance(item, Pow) and\n                    bool(item.exp.as_coeff_Mul()[0] < 0)):\n                if item.exp is not S.NegativeOne:\n                    b.append(apow(item))\n                else:\n                    if (len(item.args[0].args) != 1 and\n                            isinstance(item.base, Mul)):\n                        # To avoid situations like #14160\n                        pow_paren.append(item)\n                    b.append(item.base)\n            elif item.is_Rational and item is not S.Infinity:\n                if item.p != 1:\n                    a.append(Rational(item.p))\n                if item.q != 1:\n                    b.append(Rational(item.q))\n            else:\n                a.append(item)\n\n        a = a or [S.One]\n\n        a_str = [self.parenthesize(x, prec, strict=False) for x in a]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the complete _print_Mul method to understand the full context:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018CBPhJGyyWPn4wCNeMe8pe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '280,380p' sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018CBPhJGyyWPn4wCNeMe8pe",
+          "content": "[exit_code=0]\nfor a in n]\n\n            # don't parenthesize first of denominator unless singleton\n            if len(d) > 1 and _coeff_isneg(d[0]):\n                pre = [str(d.pop(0))]\n            else:\n                pre = []\n            dfactors = pre + [self.parenthesize(a, prec, strict=False)\n                for a in d]\n\n            n = '*'.join(nfactors)\n            d = '*'.join(dfactors)\n            if len(dfactors) > 1:\n                return '%s/(%s)' % (n, d)\n            elif dfactors:\n                return '%s/%s' % (n, d)\n            return n\n\n        c, e = expr.as_coeff_Mul()\n        if c < 0:\n            expr = _keep_coeff(-c, e)\n            sign = \"-\"\n        else:\n            sign = \"\"\n\n        a = []  # items in the numerator\n        b = []  # items that are in the denominator (if any)\n\n        pow_paren = []  # Will collect all pow with more than one base element and exp = -1\n\n        if self.order not in ('old', 'none'):\n            args = expr.as_ordered_factors()\n        else:\n            # use make_args in case expr was something like -x -> x\n            args = Mul.make_args(expr)\n\n        # Gather args for numerator/denominator\n        def apow(i):\n            b, e = i.as_base_exp()\n            eargs = list(Mul.make_args(e))\n            if eargs[0] is S.NegativeOne:\n                eargs = eargs[1:]\n            else:\n                eargs[0] = -eargs[0]\n            e = Mul._from_args(eargs)\n            if isinstance(i, Pow):\n                return i.func(b, e, evaluate=False)\n            return i.func(e, evaluate=False)\n        for item in args:\n            if (item.is_commutative and\n                    isinstance(item, Pow) and\n                    bool(item.exp.as_coeff_Mul()[0] < 0)):\n                if item.exp is not S.NegativeOne:\n                    b.append(apow(item))\n                else:\n                    if (len(item.args[0].args) != 1 and\n                            isinstance(item.base, Mul)):\n                        # To avoid situations like #14160\n                        pow_paren.append(item)\n                    b.append(item.base)\n            elif item.is_Rational and item is not S.Infinity:\n                if item.p != 1:\n                    a.append(Rational(item.p))\n                if item.q != 1:\n                    b.append(Rational(item.q))\n            else:\n                a.append(item)\n\n        a = a or [S.One]\n\n        a_str = [self.parenthesize(x, prec, strict=False) for x in a]\n        b_str = [self.parenthesize(x, prec, strict=False) for x in b]\n\n        # To parenthesize Pow with exp = -1 and having more than one Symbol\n        for item in pow_paren:\n            if item.base in b:\n                b_str[b.index(item.base)] = \"(%s)\" % b_str[b.index(item.base)]\n\n        if not b:\n            return sign + '*'.join(a_str)\n        elif len(b) == 1:\n            return sign + '*'.join(a_str) + \"/\" + b_str[0]\n        else:\n            return sign + '*'.join(a_str) + \"/(%s)\" % '*'.join(b_str)\n\n    def _print_MatMul(self, expr):\n        c, m = expr.as_coeff_mmul()\n\n        sign = \"\"\n        if c.is_number:\n            re, im = c.as_real_imag()\n            if im.is_zero and re.is_negative:\n                expr = _keep_coeff(-c, m)\n                sign = \"-\"\n            elif re.is_zero and im.is_negative:\n                expr = _keep_coeff(-c, m)\n                sign = \"-\"\n\n        return sign + '*'.join(\n            [self.parenthesize(arg, precedence(expr)) for arg in expr.args]\n        )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now I can see the issue. Line 336 is `isinstance(item.base, Mul)` and the proposal is to change it to `isinstance(item.base, (Mul, Pow))`. Let me first check the imports at the top of the file to confirm Pow is imported:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016ycFhDKAer3m3EKyXHp5WA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1,15p' sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016ycFhDKAer3m3EKyXHp5WA",
+          "content": "[exit_code=0]\n\"\"\"\nA Printer for generating readable representation of most sympy classes.\n\"\"\"\n\nfrom typing import Any, Dict\n\nfrom sympy.core import S, Rational, Pow, Basic, Mul, Number\nfrom sympy.core.mul import _keep_coeff\nfrom sympy.core.function import _coeff_isneg\nfrom .printer import Printer, print_function\nfrom sympy.printing.precedence import precedence, PRECEDENCE\n\nfrom mpmath.libmp import prec_to_dps, to_str as mlib_to_str\n\nfrom sympy.utilities import default_sort_key, sift"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Pow is already imported. Now let me make the change to line 336:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BRozgnhSoN9dmGzKuLG4AQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\nimport re\n\n# Read the file\nwith open('sympy/printing/str.py', 'r') as f:\n    content = f.read()\n\n# Replace the specific line\nold_pattern = r'isinstance\\(item\\.base, Mul\\)\\):'\nnew_pattern = 'isinstance(item.base, (Mul, Pow))):'\n\ncontent = re.sub(old_pattern, new_pattern, content)\n\n# Write back\nwith open('sympy/printing/str.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BRozgnhSoN9dmGzKuLG4AQ",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was made correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01W8jzZL3tMFEF6zVMuqg9eD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '330,350p' sympy/printing/str.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01W8jzZL3tMFEF6zVMuqg9eD",
+          "content": "[exit_code=0]\nisinstance(item, Pow) and\n                    bool(item.exp.as_coeff_Mul()[0] < 0)):\n                if item.exp is not S.NegativeOne:\n                    b.append(apow(item))\n                else:\n                    if (len(item.args[0].args) != 1 and\n                            isinstance(item.base, (Mul, Pow))):\n                        # To avoid situations like #14160\n                        pow_paren.append(item)\n                    b.append(item.base)\n            elif item.is_Rational and item is not S.Infinity:\n                if item.p != 1:\n                    a.append(Rational(item.p))\n                if item.q != 1:\n                    b.append(Rational(item.q))\n            else:\n                a.append(item)\n\n        a = a or [S.One]\n\n        a_str = [self.parenthesize(x, prec, strict=False) for x in a]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied. Line 336 now shows `isinstance(item.base, (Mul, Pow))):` instead of just `isinstance(item.base, Mul))):`. Now let me run git diff to verify the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_015XACsD7RJJfCrLr5K79HZk",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015XACsD7RJJfCrLr5K79HZk",
+          "content": "[exit_code=0]\ndiff --git a/sympy/printing/str.py b/sympy/printing/str.py\nindex c3fdcdd435..3e4b7d1b19 100644\n--- a/sympy/printing/str.py\n+++ b/sympy/printing/str.py\n@@ -333,7 +333,7 @@ def apow(i):\n                     b.append(apow(item))\n                 else:\n                     if (len(item.args[0].args) != 1 and\n-                            isinstance(item.base, Mul)):\n+                            isinstance(item.base, (Mul, Pow))):\n                         # To avoid situations like #14160\n                         pow_paren.append(item)\n                     b.append(item.base)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the change that was needed. The modification is minimal and only affects line 336 as specified in the proposal. The change adds `Pow` to the isinstance check so that parentheses are added around both Mul and Pow objects in denominators.\n\n```json\n{\n  \"patch\": \"diff --git a/sympy/printing/str.py b/sympy/printing/str.py\\nindex c3fdcdd435..3e4b7d1b19 100644\\n--- a/sympy/printing/str.py\\n+++ b/sympy/printing/str.py\\n@@ -333,7 +333,7 @@ def apow(i):\\n                     b.append(apow(item))\\n                 else:\\n                     if (len(item.args[0].args) != 1 and\\n-                            isinstance(item.base, Mul)):\\n+                            isinstance(item.base, (Mul, Pow))):\\n                         # To avoid situations like #14160\\n                         pow_paren.append(item)\\n                     b.append(item.base)\",\n  \"implementation_notes\": \"Modified the isinstance check in the _print_Mul method at line 336 to include Pow objects in addition to Mul objects. This ensures that parentheses are added around complex denominators that are Pow expressions, preventing mathematical ambiguity in division expressions like x/(1/y).\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 11,
+  "timestamp": "2026-04-13T23:37:34Z"
+}
