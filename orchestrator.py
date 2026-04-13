@@ -539,9 +539,6 @@ def main():
         instances = [i for i in instances if i["instance_id"] in INSTANCE_IDS_FILTER]
         logger.info(f"Filtered to {len(instances)} instance(s): {INSTANCE_IDS_FILTER}")
 
-    # Run from the 7th instance onwards (limit to 100 total)
-    instances = instances[6:106]
-
     total = len(instances)
     logger.info(f"Running pipeline on {total} instance(s) from '{SPLIT}' split.")
 
