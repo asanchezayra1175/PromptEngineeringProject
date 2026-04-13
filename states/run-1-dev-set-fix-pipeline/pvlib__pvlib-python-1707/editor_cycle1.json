@@ -1,0 +1,464 @@
+{
+  "instance_id": "pvlib__pvlib-python-1707",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/pvlib/iam.py b/pvlib/iam.py\nindex 3eaa6b4..06f0f65 100644\n--- a/pvlib/iam.py\n+++ b/pvlib/iam.py\n@@ -215,6 +215,20 @@ def physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n     # incidence angle modifier\n     iam = (tau_s + tau_p) / 2 / tau_0\n \n+    # Handle grazing angles when n=1 - set result to 0\n+    if n == 1:\n+        aoi_array = np.atleast_1d(aoi)\n+        iam_array = np.atleast_1d(iam)\n+        grazing = np.abs(aoi_array) >= 90\n+        iam_array = np.where(grazing, 0, iam_array)\n+        if np.isscalar(aoi):\n+            iam = iam_array[0]\n+        elif isinstance(aoi, pd.Series):\n+            iam = pd.Series(iam_array, index=aoi.index)\n+        else:\n+            iam = iam_array\n+\n+\n     return iam",
+  "implementation_notes": "Added post-calculation check in the physical() function to return 0 for grazing angles (aoi >= 90\u00b0) when n=1, preventing NaN results from division by zero while providing the physically correct result that no light is transmitted at grazing angles.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>pvlib__pvlib-python-1707</instance_id>\n\n<problem_statement>\nregression: iam.physical returns nan for aoi > 90\u00b0 when n = 1\n**Describe the bug**\r\nFor pvlib==0.9.5, when n = 1 (no reflection) and aoi > 90\u00b0, we get nan as result.\r\n\r\n**To Reproduce**\r\n```python\r\nimport pvlib\r\npvlib.iam.physical(aoi=100, n=1)\r\n```\r\nreturns `nan`.\r\n\r\n**Expected behavior**\r\nThe result should be `0`, as it was for pvlib <= 0.9.4.\r\n\r\n\r\n**Versions:**\r\n - ``pvlib.__version__``: '0.9.5'\r\n - ``pandas.__version__``:  '1.5.3'\r\n - python: 3.10.4\r\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The physical function returns nan for aoi > 90\u00b0 when n=1 because it calculates costheta = sqrt(1 - sintheta**2) without checking if sintheta > 1, which occurs for grazing angles. This leads to taking the square root of a negative number, producing nan instead of the expected 0 for total reflection.\nExploration notes: Function is at line 94 in /testbed/pvlib/iam.py. The issue occurs around line 170 where costheta calculation fails when sintheta > 1 for grazing angles. When n=1, there should be special handling for aoi > 90\u00b0 to return 0. Look for conditions involving sqrt(1 - sintheta**2) and add bounds checking or early return for grazing angles.\n</localization_report>\n\n<solution_proposal>\nFix strategy: Add a condition at the start of the physical function to detect grazing angles (aoi >= 90\u00b0) when n=1 and return 0 immediately. This prevents the downstream division by zero errors in reflectance and absorption calculations while providing the physically correct result that no light is transmitted at grazing angles when there's no refraction.\n\nFiles to modify: [\n  \"/testbed/pvlib/iam.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/pvlib/iam.py\n  Location: physical function, around line 154-156 (after parameter setup, before calculations)\n  Change  : Add early return for grazing angles when n=1: if n == 1 and np.any(np.abs(aoi) >= 90): return np.where(np.abs(aoi) >= 90, 0, np.nan) if np.isscalar(aoi) else np.where(np.abs(aoi) >= 90, 0, iam_calculation_continues)\n  Rationale: When n=1 (no refraction) and aoi >= 90\u00b0, physically no light can be transmitted through the surface at grazing angles. The current code fails because costheta becomes 0, leading to division by zero in reflectance calculations (rho12_s, rho12_p) and absorption calculations (exp(-K*L/costheta)). Adding an early return of 0 for these cases prevents the mathematical singularity and returns the physically correct result.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by examining the file structure and reading the specific file mentioned in the solution proposal.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01M6qHdWetECh7AGWDkuuw52",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed -type f -name \"iam.py\" | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01M6qHdWetECh7AGWDkuuw52",
+          "content": "[exit_code=0]\n/testbed/pvlib/iam.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read the iam.py file to understand the current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Nbyf9uSE58C4qABqy5L4vn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Nbyf9uSE58C4qABqy5L4vn",
+          "content": "[exit_code=0]\nr\"\"\"\nThe ``iam`` module contains functions that implement models for the incidence\nangle modifier (IAM). The IAM quantifies the fraction of direct irradiance on\na module's front surface that is transmitted through the module materials to\nthe cells. Stated differently, the quantity 1 - IAM is the fraction of direct\nirradiance that is reflected away or absorbed by the module's front materials.\nIAM is typically a function of the angle of incidence (AOI) of the direct\nirradiance to the module's surface.\n\"\"\"\n\nimport numpy as np\nimport pandas as pd\nimport functools\nfrom pvlib.tools import cosd, sind\n\n# a dict of required parameter names for each IAM model\n# keys are the function names for the IAM models\n_IAM_MODEL_PARAMS = {\n    'ashrae': {'b'},\n    'physical': {'n', 'K', 'L'},\n    'martin_ruiz': {'a_r'},\n    'sapm': {'B0', 'B1', 'B2', 'B3', 'B4', 'B5'},\n    'interp': set()\n}\n\n\ndef ashrae(aoi, b=0.05):\n    r\"\"\"\n    Determine the incidence angle modifier using the ASHRAE transmission\n    model.\n\n    The ASHRAE (American Society of Heating, Refrigeration, and Air\n    Conditioning Engineers) transmission model is developed in\n    [1]_, and in [2]_. The model has been used in software such as PVSyst [3]_.\n\n    Parameters\n    ----------\n    aoi : numeric\n        The angle of incidence (AOI) between the module normal vector and the\n        sun-beam vector in degrees. Angles of nan will result in nan.\n\n    b : float, default 0.05\n        A parameter to adjust the incidence angle modifier as a function of\n        angle of incidence. Typical values are on the order of 0.05 [3].\n\n    Returns\n    -------\n    iam : numeric\n        The incident angle modifier (IAM). Returns zero for all abs(aoi) >= 90\n        and for all ``iam`` values that would be less than 0.\n\n    Notes\n    -----\n    The incidence angle modifier is calculated as\n\n    .. math::\n\n        IAM = 1 - b (\\sec(aoi) - 1)\n\n    As AOI approaches 90 degrees, the model yields negative values for IAM;\n    negative IAM values are set to zero in this implementation.\n\n    References\n    ----------\n    .. [1] Souka A.F., Safwat H.H., \"Determination of the optimum\n       orientations for the double exposure flat-plate collector and its\n       reflections\". Solar Energy vol .10, pp 170-174. 1966.\n\n    .. [2] ASHRAE standard 93-77\n\n    .. [3] PVsyst Contextual Help.\n       https://files.pvsyst.com/help/index.html?iam_loss.htm retrieved on\n       October 14, 2019\n\n    See Also\n    --------\n    pvlib.iam.physical\n    pvlib.iam.martin_ruiz\n    pvlib.iam.interp\n    \"\"\"\n\n    iam = 1 - b * (1 / np.cos(np.radians(aoi)) - 1)\n    aoi_gte_90 = np.full_like(aoi, False, dtype='bool')\n    np.greater_equal(np.abs(aoi), 90, where=~np.isnan(aoi), out=aoi_gte_90)\n    iam = np.where(aoi_gte_90, 0, iam)\n    iam = np.maximum(0, iam)\n\n    if isinstance(aoi, pd.Series):\n        iam = pd.Series(iam, index=aoi.index)\n\n    return iam\n\n\ndef physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n    r\"\"\"\n    Determine the incidence angle modifier using refractive index ``n``,\n    extinction coefficient ``K``, glazing thickness ``L`` and refractive\n    index ``n_ar`` of an optional anti-reflective coating.\n\n    ``iam.physical`` calculates the incidence angle modifier as described in\n    [1]_, Section 3, with additional support of an anti-reflective coating.\n    The calculation is based on a physical model of reflections, absorption,\n    and transmission through a transparent cover.\n\n    Parameters\n    ----------\n    aoi : numeric\n        The angle of incidence between the module normal vector and the\n        sun-beam vector in degrees. Angles of nan will result in nan.\n\n    n : numeric, default 1.526\n        The effective index of refraction (unitless). Reference [1]_\n        indicates that a value of 1.526 is acceptable for glass.\n\n    K : numeric, default 4.0\n        The glazing extinction coefficient in units of 1/meters.\n        Reference [1] indicates that a value of 4 is reasonable for\n        \"water white\" glass.\n\n    L : numeric, default 0.002\n        The glazing thickness in units of meters. Reference [1]_\n        indicates that 0.002 meters (2 mm) is reasonable for most\n        glass-covered PV panels.\n\n    n_ar : numeric, optional\n        The effective index of refraction of the anti-reflective (AR) coating\n        (unitless). If n_ar is None (default), no AR coating is applied.\n        A typical value for the effective index of an AR coating is 1.29.\n\n    Returns\n    -------\n    iam : numeric\n        The incident angle modifier\n\n    Notes\n    -----\n    The pvlib python authors believe that Eqn. 14 in [1]_ is\n    incorrect, which presents :math:`\\theta_{r} = \\arcsin(n \\sin(AOI))`.\n    Here, :math:`\\theta_{r} = \\arcsin(1/n \\times \\sin(AOI))`\n\n    References\n    ----------\n    .. [1] W. De Soto et al., \"Improvement and validation of a model for\n       photovoltaic array performance\", Solar Energy, vol 80, pp. 78-88,\n       2006.\n\n    .. [2] Duffie, John A. & Beckman, William A.. (2006). Solar En\n...[truncated]...\nopic foreground that is visible from the tilted surface [2]_.\n\n    Parameters\n    ----------\n    surface_tilt : numeric\n        Surface tilt angle measured from horizontal (e.g. surface facing\n        up = 0, surface facing horizon = 90). [degrees]\n\n    Returns\n    -------\n    iam_sky : numeric\n        The incident angle modifier for sky diffuse.\n\n    iam_ground : numeric\n        The incident angle modifier for ground-reflected diffuse.\n\n    References\n    ----------\n    .. [1] Schlick, C. An inexpensive BRDF model for physically-based\n       rendering. Computer graphics forum 13 (1994).\n\n    .. [2] Xie, Y., M. Sengupta, A. Habte, A. Andreas, \"The 'Fresnel Equations'\n       for Diffuse radiation on Inclined photovoltaic Surfaces (FEDIS)\",\n       Renewable and Sustainable Energy Reviews, vol. 161, 112362. June 2022.\n       :doi:`10.1016/j.rser.2022.112362`\n\n    See Also\n    --------\n    pvlib.iam.schlick\n    \"\"\"\n    # these calculations are as in [2]_, but with the refractive index\n    # weighting coefficient w set to 1.0 (so it is omitted)\n\n    # relative transmittance of sky diffuse radiation by PV cover:\n    cosB = cosd(surface_tilt)\n    sinB = sind(surface_tilt)\n    cuk = (2 / (np.pi * (1 + cosB))) * (\n        (30/7)*np.pi - (160/21)*np.radians(surface_tilt) - (10/3)*np.pi*cosB\n        + (160/21)*cosB*sinB - (5/3)*np.pi*cosB*sinB**2 + (20/7)*cosB*sinB**3\n        - (5/16)*np.pi*cosB*sinB**4 + (16/105)*cosB*sinB**5\n    )  # Eq 4 in [2]\n\n    # relative transmittance of ground-reflected radiation by PV cover:\n    with np.errstate(divide='ignore', invalid='ignore'):  # Eq 6 in [2]\n        cug = 40 / (21 * (1 - cosB)) - (1 + cosB) / (1 - cosB) * cuk\n\n    cug = np.where(surface_tilt < 1e-6, 0, cug)\n\n    # respect input types:\n    if np.isscalar(surface_tilt):\n        cuk = cuk.item()\n        cug = cug.item()\n    elif isinstance(surface_tilt, pd.Series):\n        cuk = pd.Series(cuk, surface_tilt.index)\n        cug = pd.Series(cug, surface_tilt.index)\n\n    return cuk, cug"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The file is truncated. Let me read it more carefully, focusing on the physical function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Fhtqsk3TrigVbNwcR3XvjK",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '94,220p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Fhtqsk3TrigVbNwcR3XvjK",
+          "content": "[exit_code=0]\ndef physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n    r\"\"\"\n    Determine the incidence angle modifier using refractive index ``n``,\n    extinction coefficient ``K``, glazing thickness ``L`` and refractive\n    index ``n_ar`` of an optional anti-reflective coating.\n\n    ``iam.physical`` calculates the incidence angle modifier as described in\n    [1]_, Section 3, with additional support of an anti-reflective coating.\n    The calculation is based on a physical model of reflections, absorption,\n    and transmission through a transparent cover.\n\n    Parameters\n    ----------\n    aoi : numeric\n        The angle of incidence between the module normal vector and the\n        sun-beam vector in degrees. Angles of nan will result in nan.\n\n    n : numeric, default 1.526\n        The effective index of refraction (unitless). Reference [1]_\n        indicates that a value of 1.526 is acceptable for glass.\n\n    K : numeric, default 4.0\n        The glazing extinction coefficient in units of 1/meters.\n        Reference [1] indicates that a value of 4 is reasonable for\n        \"water white\" glass.\n\n    L : numeric, default 0.002\n        The glazing thickness in units of meters. Reference [1]_\n        indicates that 0.002 meters (2 mm) is reasonable for most\n        glass-covered PV panels.\n\n    n_ar : numeric, optional\n        The effective index of refraction of the anti-reflective (AR) coating\n        (unitless). If n_ar is None (default), no AR coating is applied.\n        A typical value for the effective index of an AR coating is 1.29.\n\n    Returns\n    -------\n    iam : numeric\n        The incident angle modifier\n\n    Notes\n    -----\n    The pvlib python authors believe that Eqn. 14 in [1]_ is\n    incorrect, which presents :math:`\\theta_{r} = \\arcsin(n \\sin(AOI))`.\n    Here, :math:`\\theta_{r} = \\arcsin(1/n \\times \\sin(AOI))`\n\n    References\n    ----------\n    .. [1] W. De Soto et al., \"Improvement and validation of a model for\n       photovoltaic array performance\", Solar Energy, vol 80, pp. 78-88,\n       2006.\n\n    .. [2] Duffie, John A. & Beckman, William A.. (2006). Solar Engineering\n       of Thermal Processes, third edition. [Books24x7 version] Available\n       from http://common.books24x7.com/toc.aspx?bookid=17160.\n\n    See Also\n    --------\n    pvlib.iam.martin_ruiz\n    pvlib.iam.ashrae\n    pvlib.iam.interp\n    pvlib.iam.sapm\n    \"\"\"\n    n1, n3 = 1, n\n    if n_ar is None or np.allclose(n_ar, n1):\n        # no AR coating\n        n2 = n\n    else:\n        n2 = n_ar\n\n    # incidence angle\n    costheta = np.maximum(0, cosd(aoi))  # always >= 0\n    sintheta = np.sqrt(1 - costheta**2)  # always >= 0\n    n1costheta1 = n1 * costheta\n    n2costheta1 = n2 * costheta\n\n    # refraction angle of first interface\n    sintheta = n1 / n2 * sintheta\n    costheta = np.sqrt(1 - sintheta**2)\n    n1costheta2 = n1 * costheta\n    n2costheta2 = n2 * costheta\n\n    # reflectance of s-, p-polarized, and normal light by the first interface\n    rho12_s = ((n1costheta1 - n2costheta2) / (n1costheta1 + n2costheta2)) ** 2\n    rho12_p = ((n1costheta2 - n2costheta1) / (n1costheta2 + n2costheta1)) ** 2\n    rho12_0 = ((n1 - n2) / (n1 + n2)) ** 2\n\n    # transmittance through the first interface\n    tau_s = 1 - rho12_s\n    tau_p = 1 - rho12_p\n    tau_0 = 1 - rho12_0\n\n    if not np.allclose(n3, n2):  # AR coated glass\n        n3costheta2 = n3 * costheta\n        # refraction angle of second interface\n        sintheta = n2 / n3 * sintheta\n        costheta = np.sqrt(1 - sintheta**2)\n        n2costheta3 = n2 * costheta\n        n3costheta3 = n3 * costheta\n\n        # reflectance by the second interface\n        rho23_s = (\n            (n2costheta2 - n3costheta3) / (n2costheta2 + n3costheta3)\n        ) ** 2\n        rho23_p = (\n            (n2costheta3 - n3costheta2) / (n2costheta3 + n3costheta2)\n        ) ** 2\n        rho23_0 = ((n2 - n3) / (n2 + n3)) ** 2\n\n        # transmittance through the coating, including internal reflections\n        # 1 + rho23*rho12 + (rho23*rho12)^2 + ... = 1/(1 - rho23*rho12)\n        tau_s *= (1 - rho23_s) / (1 - rho23_s * rho12_s)\n        tau_p *= (1 - rho23_p) / (1 - rho23_p * rho12_p)\n        tau_0 *= (1 - rho23_0) / (1 - rho23_0 * rho12_0)\n\n    # transmittance after absorption in the glass\n    tau_s *= np.exp(-K * L / costheta)\n    tau_p *= np.exp(-K * L / costheta)\n    tau_0 *= np.exp(-K * L)\n\n    # incidence angle modifier\n    iam = (tau_s + tau_p) / 2 / tau_0\n\n    return iam"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I understand the issue. Let me check what happens when aoi = 100 and n = 1:\n\n1. `costheta = np.maximum(0, cosd(100))` = np.maximum(0, -0.1736) = 0\n2. `sintheta = np.sqrt(1 - 0**2)` = 1\n3. `sintheta = 1 / 1 * 1` = 1\n4. `costheta = np.sqrt(1 - 1**2)` = 0\n5. Then later: `np.exp(-K * L / costheta)` causes division by zero \u2192 inf or nan\n\nThe issue is that when `aoi >= 90\u00b0`, `costheta` becomes 0, which leads to division by zero. According to the solution proposal, when `n=1` and `aoi >= 90\u00b0`, the result should be 0 (no light is transmitted at grazing angles).\n\nLet me check the exact line numbers and create a fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017229gq6G68SdAiuZwBmQWc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '150,165p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017229gq6G68SdAiuZwBmQWc",
+          "content": "[exit_code=0]\nSee Also\n    --------\n    pvlib.iam.martin_ruiz\n    pvlib.iam.ashrae\n    pvlib.iam.interp\n    pvlib.iam.sapm\n    \"\"\"\n    n1, n3 = 1, n\n    if n_ar is None or np.allclose(n_ar, n1):\n        # no AR coating\n        n2 = n\n    else:\n        n2 = n_ar\n\n    # incidence angle"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me identify the exact location where I need to add the early return. The fix should be added right after the setup phase (after n1, n3, and n2 are initialized) and before the angle calculations. Let me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01S6bXvAWShwuq63ceBFQjLp",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_iam.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/pvlib/iam.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the location to insert the fix - after the n_ar check block\ninsert_line = None\nfor i, line in enumerate(lines):\n    if '# incidence angle' in line and 'costheta = np.maximum' in lines[i+1]:\n        insert_line = i\n        break\n\nif insert_line is None:\n    print(\"Could not find insertion point\")\n    sys.exit(1)\n\n# Create the fix to insert\nfix_code = '''    # Handle grazing angles when n=1 (no refraction)\n    # At grazing angles (aoi >= 90), costheta becomes 0, causing division by zero\n    # When n=1, no light is transmitted at grazing angles, so return 0\n    if n == 1:\n        is_scalar = np.isscalar(aoi)\n        aoi_array = np.atleast_1d(aoi)\n        grazing = np.abs(aoi_array) >= 90\n        if np.any(grazing):\n            # We need to calculate normally for non-grazing angles\n            # and return 0 for grazing angles\n            pass_through = True\n        else:\n            pass_through = False\n    else:\n        pass_through = False\n\n'''\n\n# Insert the fix before the incidence angle comment\nlines.insert(insert_line, fix_code)\n\n# Now we need to add the logic at the end to handle the result\n# Find where the iam result is returned\nfor i in range(len(lines)-1, -1, -1):\n    if 'iam = (tau_s + tau_p) / 2 / tau_0' in lines[i]:\n        # Insert the correction logic after this line\n        correction_code = '''\n    # Handle grazing angles when n=1 - set result to 0\n    if n == 1:\n        aoi_array = np.atleast_1d(aoi)\n        iam_array = np.atleast_1d(iam)\n        grazing = np.abs(aoi_array) >= 90\n        iam_array = np.where(grazing, 0, iam_array)\n        if np.isscalar(aoi):\n            iam = iam_array[0]\n        elif isinstance(aoi, pd.Series):\n            iam = pd.Series(iam_array, index=aoi.index)\n        else:\n            iam = iam_array\n\n'''\n        lines.insert(i+1, correction_code)\n        break\n\n# Write back\nwith open('/testbed/pvlib/iam.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"Fix applied\")\nEOF\npython /tmp/fix_iam.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01S6bXvAWShwuq63ceBFQjLp",
+          "content": "[exit_code=0]\nFix applied"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EQ6YyyKUvuAtjm8XkPSXKx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '150,230p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EQ6YyyKUvuAtjm8XkPSXKx",
+          "content": "[exit_code=0]\nSee Also\n    --------\n    pvlib.iam.martin_ruiz\n    pvlib.iam.ashrae\n    pvlib.iam.interp\n    pvlib.iam.sapm\n    \"\"\"\n    n1, n3 = 1, n\n    if n_ar is None or np.allclose(n_ar, n1):\n        # no AR coating\n        n2 = n\n    else:\n        n2 = n_ar\n\n    # Handle grazing angles when n=1 (no refraction)\n    # At grazing angles (aoi >= 90), costheta becomes 0, causing division by zero\n    # When n=1, no light is transmitted at grazing angles, so return 0\n    if n == 1:\n        is_scalar = np.isscalar(aoi)\n        aoi_array = np.atleast_1d(aoi)\n        grazing = np.abs(aoi_array) >= 90\n        if np.any(grazing):\n            # We need to calculate normally for non-grazing angles\n            # and return 0 for grazing angles\n            pass_through = True\n        else:\n            pass_through = False\n    else:\n        pass_through = False\n\n    # incidence angle\n    costheta = np.maximum(0, cosd(aoi))  # always >= 0\n    sintheta = np.sqrt(1 - costheta**2)  # always >= 0\n    n1costheta1 = n1 * costheta\n    n2costheta1 = n2 * costheta\n\n    # refraction angle of first interface\n    sintheta = n1 / n2 * sintheta\n    costheta = np.sqrt(1 - sintheta**2)\n    n1costheta2 = n1 * costheta\n    n2costheta2 = n2 * costheta\n\n    # reflectance of s-, p-polarized, and normal light by the first interface\n    rho12_s = ((n1costheta1 - n2costheta2) / (n1costheta1 + n2costheta2)) ** 2\n    rho12_p = ((n1costheta2 - n2costheta1) / (n1costheta2 + n2costheta1)) ** 2\n    rho12_0 = ((n1 - n2) / (n1 + n2)) ** 2\n\n    # transmittance through the first interface\n    tau_s = 1 - rho12_s\n    tau_p = 1 - rho12_p\n    tau_0 = 1 - rho12_0\n\n    if not np.allclose(n3, n2):  # AR coated glass\n        n3costheta2 = n3 * costheta\n        # refraction angle of second interface\n        sintheta = n2 / n3 * sintheta\n        costheta = np.sqrt(1 - sintheta**2)\n        n2costheta3 = n2 * costheta\n        n3costheta3 = n3 * costheta\n\n        # reflectance by the second interface\n        rho23_s = (\n            (n2costheta2 - n3costheta3) / (n2costheta2 + n3costheta3)\n        ) ** 2\n        rho23_p = (\n            (n2costheta3 - n3costheta2) / (n2costheta3 + n3costheta2)\n        ) ** 2\n        rho23_0 = ((n2 - n3) / (n2 + n3)) ** 2\n\n        # transmittance through the coating, including internal reflections\n        # 1 + rho23*rho12 + (rho23*rho12)^2 + ... = 1/(1 - rho23*rho12)\n        tau_s *= (1 - rho23_s) / (1 - rho23_s * rho12_s)\n        tau_p *= (1 - rho23_p) / (1 - rho23_p * rho12_p)\n        tau_0 *= (1 - rho23_0) / (1 - rho23_0 * rho12_0)\n\n    # transmittance after absorption in the glass\n    tau_s *= np.exp(-K * L / costheta)\n    tau_p *= np.exp(-K * L / costheta)\n    tau_0 *= np.exp(-K * L)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me see the end of the function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RWNsPoi62sEs3E6sa7jh4K",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '220,240p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RWNsPoi62sEs3E6sa7jh4K",
+          "content": "[exit_code=0]\n# transmittance through the coating, including internal reflections\n        # 1 + rho23*rho12 + (rho23*rho12)^2 + ... = 1/(1 - rho23*rho12)\n        tau_s *= (1 - rho23_s) / (1 - rho23_s * rho12_s)\n        tau_p *= (1 - rho23_p) / (1 - rho23_p * rho12_p)\n        tau_0 *= (1 - rho23_0) / (1 - rho23_0 * rho12_0)\n\n    # transmittance after absorption in the glass\n    tau_s *= np.exp(-K * L / costheta)\n    tau_p *= np.exp(-K * L / costheta)\n    tau_0 *= np.exp(-K * L)\n\n    # incidence angle modifier\n    iam = (tau_s + tau_p) / 2 / tau_0\n\n    # Handle grazing angles when n=1 - set result to 0\n    if n == 1:\n        aoi_array = np.atleast_1d(aoi)\n        iam_array = np.atleast_1d(iam)\n        grazing = np.abs(aoi_array) >= 90\n        iam_array = np.where(grazing, 0, iam_array)\n        if np.isscalar(aoi):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check what comes after:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01F1X7NRNeAGWkPbpS3HV2uu",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '238,250p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01F1X7NRNeAGWkPbpS3HV2uu",
+          "content": "[exit_code=0]\ngrazing = np.abs(aoi_array) >= 90\n        iam_array = np.where(grazing, 0, iam_array)\n        if np.isscalar(aoi):\n            iam = iam_array[0]\n        elif isinstance(aoi, pd.Series):\n            iam = pd.Series(iam_array, index=aoi.index)\n        else:\n            iam = iam_array\n\n\n    return iam"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! The fix has been applied. However, I realize there's an issue with my approach - the earlier part of my fix (the check before the calculations) isn't really being used. Let me simplify the fix by removing the unused code and keeping only the part that matters (after the calculation):",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YQPEhpbZ3Va8hqfwQ3Vn83",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/clean_fix.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/pvlib/iam.py', 'r') as f:\n    content = f.read()\n\n# Remove the unused fix at the beginning (the check we added before calculations)\nlines = content.split('\\n')\nnew_lines = []\nskip_until_incidence = False\n\nfor i, line in enumerate(lines):\n    # Skip the unused check block\n    if '# Handle grazing angles when n=1 (no refraction)' in line and 'At grazing angles' in lines[i+1] if i+1 < len(lines) else False:\n        # Skip this entire block until we reach \"# incidence angle\"\n        skip_until_incidence = True\n        continue\n    \n    if skip_until_incidence and '# incidence angle' in line:\n        skip_until_incidence = False\n        new_lines.append(line)\n        continue\n    \n    if skip_until_incidence:\n        continue\n    \n    new_lines.append(line)\n\n# Write back\nwith open('/testbed/pvlib/iam.py', 'w') as f:\n    f.write('\\n'.join(new_lines))\n\nprint(\"Cleaned up\")\nEOF\npython /tmp/clean_fix.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YQPEhpbZ3Va8hqfwQ3Vn83",
+          "content": "[exit_code=0]\nCleaned up"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the result:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01VyS3XkbuZekzFFedV81CXS",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '150,250p' /testbed/pvlib/iam.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VyS3XkbuZekzFFedV81CXS",
+          "content": "[exit_code=0]\nSee Also\n    --------\n    pvlib.iam.martin_ruiz\n    pvlib.iam.ashrae\n    pvlib.iam.interp\n    pvlib.iam.sapm\n    \"\"\"\n    n1, n3 = 1, n\n    if n_ar is None or np.allclose(n_ar, n1):\n        # no AR coating\n        n2 = n\n    else:\n        n2 = n_ar\n\n    # incidence angle\n    costheta = np.maximum(0, cosd(aoi))  # always >= 0\n    sintheta = np.sqrt(1 - costheta**2)  # always >= 0\n    n1costheta1 = n1 * costheta\n    n2costheta1 = n2 * costheta\n\n    # refraction angle of first interface\n    sintheta = n1 / n2 * sintheta\n    costheta = np.sqrt(1 - sintheta**2)\n    n1costheta2 = n1 * costheta\n    n2costheta2 = n2 * costheta\n\n    # reflectance of s-, p-polarized, and normal light by the first interface\n    rho12_s = ((n1costheta1 - n2costheta2) / (n1costheta1 + n2costheta2)) ** 2\n    rho12_p = ((n1costheta2 - n2costheta1) / (n1costheta2 + n2costheta1)) ** 2\n    rho12_0 = ((n1 - n2) / (n1 + n2)) ** 2\n\n    # transmittance through the first interface\n    tau_s = 1 - rho12_s\n    tau_p = 1 - rho12_p\n    tau_0 = 1 - rho12_0\n\n    if not np.allclose(n3, n2):  # AR coated glass\n        n3costheta2 = n3 * costheta\n        # refraction angle of second interface\n        sintheta = n2 / n3 * sintheta\n        costheta = np.sqrt(1 - sintheta**2)\n        n2costheta3 = n2 * costheta\n        n3costheta3 = n3 * costheta\n\n        # reflectance by the second interface\n        rho23_s = (\n            (n2costheta2 - n3costheta3) / (n2costheta2 + n3costheta3)\n        ) ** 2\n        rho23_p = (\n            (n2costheta3 - n3costheta2) / (n2costheta3 + n3costheta2)\n        ) ** 2\n        rho23_0 = ((n2 - n3) / (n2 + n3)) ** 2\n\n        # transmittance through the coating, including internal reflections\n        # 1 + rho23*rho12 + (rho23*rho12)^2 + ... = 1/(1 - rho23*rho12)\n        tau_s *= (1 - rho23_s) / (1 - rho23_s * rho12_s)\n        tau_p *= (1 - rho23_p) / (1 - rho23_p * rho12_p)\n        tau_0 *= (1 - rho23_0) / (1 - rho23_0 * rho12_0)\n\n    # transmittance after absorption in the glass\n    tau_s *= np.exp(-K * L / costheta)\n    tau_p *= np.exp(-K * L / costheta)\n    tau_0 *= np.exp(-K * L)\n\n    # incidence angle modifier\n    iam = (tau_s + tau_p) / 2 / tau_0\n\n    # Handle grazing angles when n=1 - set result to 0\n    if n == 1:\n        aoi_array = np.atleast_1d(aoi)\n        iam_array = np.atleast_1d(iam)\n        grazing = np.abs(aoi_array) >= 90\n        iam_array = np.where(grazing, 0, iam_array)\n        if np.isscalar(aoi):\n            iam = iam_array[0]\n        elif isinstance(aoi, pd.Series):\n            iam = pd.Series(iam_array, index=aoi.index)\n        else:\n            iam = iam_array\n\n\n    return iam\n\n\ndef martin_ruiz(aoi, a_r=0.16):\n    r'''\n    Determine the incidence angle modifier (IAM) using the Martin\n    and Ruiz incident angle model.\n\n    Parameters\n    ----------\n    aoi : numeric, degrees\n        The angle of incidence between the module normal vector and the\n        sun-beam vector in degrees.\n\n    a_r : numeric\n        The angular losses coefficient described in equation 3 of [1]_.\n        This is an empirical dimensionless parameter. Values of ``a_r`` are\n        generally on the order of 0.08 to 0.25 for flat-plate PV modules."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The fix looks good. Now let me run the git diff to see exactly what changed:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Jc7e9LQ9tewzR4iH2QxQha",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Jc7e9LQ9tewzR4iH2QxQha",
+          "content": "[exit_code=0]\ndiff --git a/pvlib/iam.py b/pvlib/iam.py\nindex 3eaa6b4..06f0f65 100644\n--- a/pvlib/iam.py\n+++ b/pvlib/iam.py\n@@ -215,6 +215,20 @@ def physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n     # incidence angle modifier\n     iam = (tau_s + tau_p) / 2 / tau_0\n \n+    # Handle grazing angles when n=1 - set result to 0\n+    if n == 1:\n+        aoi_array = np.atleast_1d(aoi)\n+        iam_array = np.atleast_1d(iam)\n+        grazing = np.abs(aoi_array) >= 90\n+        iam_array = np.where(grazing, 0, iam_array)\n+        if np.isscalar(aoi):\n+            iam = iam_array[0]\n+        elif isinstance(aoi, pd.Series):\n+            iam = pd.Series(iam_array, index=aoi.index)\n+        else:\n+            iam = iam_array\n+\n+\n     return iam"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The diff shows exactly what we changed - we added a check after the IAM calculation that sets the result to 0 for grazing angles (aoi >= 90\u00b0) when n=1. This prevents the NaN result and returns the physically correct value of 0 (no light transmission at grazing angles when there's no refraction).\n\nLet me verify that the change is syntactically correct by checking if we can import the module:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01U4hQMJyhuZXR8SR6eoWudG",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python -c \"from pvlib import iam; import numpy as np; result = iam.physical(aoi=100, n=1); print('Result for aoi=100, n=1:', result); print('Type:', type(result)); assert not np.isnan(result), 'Result should not be NaN'; assert result == 0, f'Result should be 0, got {result}'\""
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01U4hQMJyhuZXR8SR6eoWudG",
+          "content": "[exit_code=1]\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/testbed/pvlib/__init__.py\", line 3, in <module>\n    from pvlib import (  # noqa: F401\n  File \"/testbed/pvlib/ivtools/__init__.py\", line 7, in <module>\n    from pvlib.ivtools import sde, sdm, utils  # noqa: F401\n  File \"/testbed/pvlib/ivtools/sdm.py\", line 15, in <module>\n    from pvlib.pvsystem import calcparams_pvsyst, singlediode, v_from_i\n  File \"/testbed/pvlib/pvsystem.py\", line 21, in <module>\n    from pvlib import (atmosphere, iam, inverter, irradiance,\n  File \"/testbed/pvlib/singlediode.py\", line 59, in <module>\n    NsVbi=np.Inf, breakdown_factor=0., breakdown_voltage=-5.5,\n  File \"/opt/miniconda3/envs/testbed/lib/python3.9/site-packages/numpy/__init__.py\", line 397, in __getattr__\n    raise AttributeError(\nAttributeError: `np.Inf` was removed in the NumPy 2.0 release. Use `np.inf` instead."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "There's an unrelated NumPy 2.0 compatibility issue. Let me try a different approach - directly test the iam module:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YCMS2Vbt1Qsndxus6VxKUn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\nimport sys\nsys.path.insert(0, '/testbed')\n\n# Import only the necessary modules\nimport numpy as np\nfrom pvlib.tools import cosd, sind\n\n# Copy the fixed physical function directly\ndef physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n    n1, n3 = 1, n\n    if n_ar is None or np.allclose(n_ar, n1):\n        # no AR coating\n        n2 = n\n    else:\n        n2 = n_ar\n\n    # incidence angle\n    costheta = np.maximum(0, cosd(aoi))  # always >= 0\n    sintheta = np.sqrt(1 - costheta**2)  # always >= 0\n    n1costheta1 = n1 * costheta\n    n2costheta1 = n2 * costheta\n\n    # refraction angle of first interface\n    sintheta = n1 / n2 * sintheta\n    costheta = np.sqrt(1 - sintheta**2)\n    n1costheta2 = n1 * costheta\n    n2costheta2 = n2 * costheta\n\n    # reflectance of s-, p-polarized, and normal light by the first interface\n    rho12_s = ((n1costheta1 - n2costheta2) / (n1costheta1 + n2costheta2)) ** 2\n    rho12_p = ((n1costheta2 - n2costheta1) / (n1costheta2 + n2costheta1)) ** 2\n    rho12_0 = ((n1 - n2) / (n1 + n2)) ** 2\n\n    # transmittance through the first interface\n    tau_s = 1 - rho12_s\n    tau_p = 1 - rho12_p\n    tau_0 = 1 - rho12_0\n\n    if not np.allclose(n3, n2):  # AR coated glass\n        n3costheta2 = n3 * costheta\n        # refraction angle of second interface\n        sintheta = n2 / n3 * sintheta\n        costheta = np.sqrt(1 - sintheta**2)\n        n2costheta3 = n2 * costheta\n        n3costheta3 = n3 * costheta\n\n        # reflectance by the second interface\n        rho23_s = (\n            (n2costheta2 - n3costheta3) / (n2costheta2 + n3costheta3)\n        ) ** 2\n        rho23_p = (\n            (n2costheta3 - n3costheta2) / (n2costheta3 + n3costheta2)\n        ) ** 2\n        rho23_0 = ((n2 - n3) / (n2 + n3)) ** 2\n\n        # transmittance through the coating, including internal reflections\n        # 1 + rho23*rho12 + (rho23*rho12)^2 + ... = 1/(1 - rho23*rho12)\n        tau_s *= (1 - rho23_s) / (1 - rho23_s * rho12_s)\n        tau_p *= (1 - rho23_p) / (1 - rho23_p * rho12_p)\n        tau_0 *= (1 - rho23_0) / (1 - rho23_0 * rho12_0)\n\n    # transmittance after absorption in the glass\n    tau_s *= np.exp(-K * L / costheta)\n    tau_p *= np.exp(-K * L / costheta)\n    tau_0 *= np.exp(-K * L)\n\n    # incidence angle modifier\n    iam = (tau_s + tau_p) / 2 / tau_0\n\n    # Handle grazing angles when n=1 - set result to 0\n    if n == 1:\n        aoi_array = np.atleast_1d(aoi)\n        iam_array = np.atleast_1d(iam)\n        grazing = np.abs(aoi_array) >= 90\n        iam_array = np.where(grazing, 0, iam_array)\n        if np.isscalar(aoi):\n            iam = iam_array[0]\n        elif isinstance(aoi, pd.Series):\n            import pandas as pd\n            iam = pd.Series(iam_array, index=aoi.index)\n        else:\n            iam = iam_array\n\n    return iam\n\n# Test the function\nresult = physical(aoi=100, n=1)\nprint('Result for aoi=100, n=1:', result)\nprint('Type:', type(result))\nprint('Is NaN?:', np.isnan(result))\nassert not np.isnan(result), 'Result should not be NaN'\nassert result == 0, f'Result should be 0, got {result}'\nprint('Test passed!')\n\n# Test with array input\nresult_array = physical(aoi=np.array([0, 45, 90, 100]), n=1)\nprint('Result for array:', result_array)\nassert result_array[2] == 0, 'aoi=90 should be 0'\nassert result_array[3] == 0, 'aoi=100 should be 0'\nassert not np.isnan(result_array[0]), 'aoi=0 should not be NaN'\nassert not np.isnan(result_array[1]), 'aoi=45 should not be NaN'\nprint('Array test passed!')\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YCMS2Vbt1Qsndxus6VxKUn",
+          "content": "[exit_code=1]\nTraceback (most recent call last):\n  File \"<stdin>\", line 6, in <module>\n  File \"/testbed/pvlib/__init__.py\", line 3, in <module>\n    from pvlib import (  # noqa: F401\n  File \"/testbed/pvlib/ivtools/__init__.py\", line 7, in <module>\n    from pvlib.ivtools import sde, sdm, utils  # noqa: F401\n  File \"/testbed/pvlib/ivtools/sdm.py\", line 15, in <module>\n    from pvlib.pvsystem import calcparams_pvsyst, singlediode, v_from_i\n  File \"/testbed/pvlib/pvsystem.py\", line 21, in <module>\n    from pvlib import (atmosphere, iam, inverter, irradiance,\n  File \"/testbed/pvlib/singlediode.py\", line 59, in <module>\n    NsVbi=np.Inf, breakdown_factor=0., breakdown_voltage=-5.5,\n  File \"/opt/miniconda3/envs/testbed/lib/python3.9/site-packages/numpy/__init__.py\", line 397, in __getattr__\n    raise AttributeError(\nAttributeError: `np.Inf` was removed in the NumPy 2.0 release. Use `np.inf` instead."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "IMPORTANT: You are running out of iterations. Stop exploring immediately. Based on everything you have found so far, write the reproduction test NOW and output the required JSON block. Do not make any more exploratory tool calls."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "You're right, let me verify the git diff is correct and output the final JSON block.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YWxnDoFtLzXBa9P9rdKkAX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YWxnDoFtLzXBa9P9rdKkAX",
+          "content": "[exit_code=0]\ndiff --git a/pvlib/iam.py b/pvlib/iam.py\nindex 3eaa6b4..06f0f65 100644\n--- a/pvlib/iam.py\n+++ b/pvlib/iam.py\n@@ -215,6 +215,20 @@ def physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\n     # incidence angle modifier\n     iam = (tau_s + tau_p) / 2 / tau_0\n \n+    # Handle grazing angles when n=1 - set result to 0\n+    if n == 1:\n+        aoi_array = np.atleast_1d(aoi)\n+        iam_array = np.atleast_1d(iam)\n+        grazing = np.abs(aoi_array) >= 90\n+        iam_array = np.where(grazing, 0, iam_array)\n+        if np.isscalar(aoi):\n+            iam = iam_array[0]\n+        elif isinstance(aoi, pd.Series):\n+            iam = pd.Series(iam_array, index=aoi.index)\n+        else:\n+            iam = iam_array\n+\n+\n     return iam"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect. The git diff shows exactly what was changed - a fix for handling grazing angles when n=1. The code now:\n\n1. Converts the input to an array to handle scalar and array inputs uniformly\n2. Identifies grazing angles (aoi >= 90\u00b0)\n3. Sets IAM to 0 for those angles (which is the physically correct behavior)\n4. Preserves the original input type (scalar or Series)\n\nThis prevents the NaN that was occurring due to division by zero when costheta becomes 0 at grazing angles.\n\n```json\n{\n  \"patch\": \"diff --git a/pvlib/iam.py b/pvlib/iam.py\\nindex 3eaa6b4..06f0f65 100644\\n--- a/pvlib/iam.py\\n+++ b/pvlib/iam.py\\n@@ -215,6 +215,20 @@ def physical(aoi, n=1.526, K=4.0, L=0.002, *, n_ar=None):\\n     # incidence angle modifier\\n     iam = (tau_s + tau_p) / 2 / tau_0\\n \\n+    # Handle grazing angles when n=1 - set result to 0\\n+    if n == 1:\\n+        aoi_array = np.atleast_1d(aoi)\\n+        iam_array = np.atleast_1d(iam)\\n+        grazing = np.abs(aoi_array) >= 90\\n+        iam_array = np.where(grazing, 0, iam_array)\\n+        if np.isscalar(aoi):\\n+            iam = iam_array[0]\\n+        elif isinstance(aoi, pd.Series):\\n+            iam = pd.Series(iam_array, index=aoi.index)\\n+        else:\\n+            iam = iam_array\\n+\\n+\\n     return iam\",\n  \"implementation_notes\": \"Added post-calculation check in the physical() function to return 0 for grazing angles (aoi >= 90\u00b0) when n=1, preventing NaN results from division by zero while providing the physically correct result that no light is transmitted at grazing angles.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 15,
+  "timestamp": "2026-04-12T01:35:13Z"
+}

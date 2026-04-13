@@ -1,0 +1,303 @@
+{
+  "instance_id": "pvlib__pvlib-python-1072",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PE \u2014 Missing type conversion",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>pvlib__pvlib-python-1072</instance_id>\n\n<problem_statement>\ntemperature.fuentes errors when given tz-aware inputs on pandas>=1.0.0\n**Describe the bug**\r\nWhen the weather timeseries inputs to `temperature.fuentes` have tz-aware index, an internal call to `np.diff(index)` returns an array of `Timedelta` objects instead of an array of nanosecond ints, throwing an error immediately after.  The error only happens when using pandas>=1.0.0; using 0.25.3 runs successfully, but emits the warning:\r\n\r\n```\r\n  /home/kevin/anaconda3/envs/pvlib-dev/lib/python3.7/site-packages/numpy/lib/function_base.py:1243: FutureWarning: Converting timezone-aware DatetimeArray to timezone-naive ndarray with 'datetime64[ns]' dtype. In the future, this will return an ndarray with 'object' dtype where each element is a 'pandas.Timestamp' with the correct 'tz'.\r\n  \tTo accept the future behavior, pass 'dtype=object'.\r\n  \tTo keep the old behavior, pass 'dtype=\"datetime64[ns]\"'.\r\n    a = asanyarray(a)\r\n```\r\n\r\n**To Reproduce**\r\n```python\r\nIn [1]: import pvlib\r\n   ...: import pandas as pd\r\n   ...: \r\n   ...: index_naive = pd.date_range('2019-01-01', freq='h', periods=3)\r\n   ...: \r\n   ...: kwargs = {\r\n   ...:     'poa_global': pd.Series(1000, index_naive),\r\n   ...:     'temp_air': pd.Series(20, index_naive),\r\n   ...:     'wind_speed': pd.Series(1, index_naive),\r\n   ...:     'noct_installed': 45\r\n   ...: }\r\n   ...: \r\n\r\nIn [2]: print(pvlib.temperature.fuentes(**kwargs))\r\n2019-01-01 00:00:00    47.85\r\n2019-01-01 01:00:00    50.85\r\n2019-01-01 02:00:00    50.85\r\nFreq: H, Name: tmod, dtype: float64\r\n\r\nIn [3]: kwargs['poa_global'].index = index_naive.tz_localize('UTC')\r\n   ...: print(pvlib.temperature.fuentes(**kwargs))\r\n   ...: \r\nTraceback (most recent call last):\r\n\r\n  File \"<ipython-input-3-ff99badadc91>\", line 2, in <module>\r\n    print(pvlib.temperature.fuentes(**kwargs))\r\n\r\n  File \"/home/kevin/anaconda3/lib/python3.7/site-packages/pvlib/temperature.py\", line 602, in fuentes\r\n    timedelta_hours = np.diff(poa_global.index).astype(float) / 1e9 / 60 / 60\r\n\r\nTypeError: float() argument must be a string or a number, not 'Timedelta'\r\n```\r\n\r\n**Expected behavior**\r\n`temperature.fuentes` should work with both tz-naive and tz-aware inputs.\r\n\r\n\r\n**Versions:**\r\n - ``pvlib.__version__``: 0.8.0\r\n - ``pandas.__version__``: 1.0.0+\r\n - python: 3.7.4 (default, Aug 13 2019, 20:35:49) \\n[GCC 7.3.0]\r\n\r\n\n\n</problem_statement>\n\n<localization_report>\nRelevant files: [\"/testbed/pvlib/temperature.py\"]\nBug analysis: The fuentes function calculates time differences between index values using np.diff(poa_global.index).astype(float). When poa_global has a timezone-aware index in pandas >= 1.0.0, np.diff returns an array of Timedelta objects instead of nanosecond integers. The subsequent .astype(float) call fails because Timedelta objects cannot be cast directly to float, raising TypeError: float() argument must be a string or a number, not 'Timedelta'.\nExploration notes: The problematic code is at line 602: timedelta_hours = np.diff(poa_global.index).astype(float) / 1e9 / 60 / 60. The function is located at lines 477-650 in temperature.py. The calculation converts nanoseconds to hours by dividing by 1e9 / 60 / 60. Test coverage exists in test_temperature.py with test_fuentes function starting at line 161.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PE - Missing type conversion: Wrap poa_global.index with .values to extract underlying numpy array before np.diff, ensuring consistent numeric output regardless of timezone awareness. Single line change, works for both timezone-naive and timezone-aware inputs.\nProposed changes: [\n  {\n    \"file\": \"/testbed/pvlib/temperature.py\",\n    \"location\": \"fuentes, line 602\",\n    \"change\": \"REPLACE line 602:\\n    timedelta_hours = np.diff(poa_global.index).astype(float) / 1e9 / 60 / 60\\nWITH:\\n    timedelta_hours = np.diff(poa_global.index.values).astype(float) / 1e9 / 60 / 60\",\n    \"rationale\": \"In pandas >= 1.0.0, np.diff() on timezone-aware DatetimeIndex returns Timedelta objects instead of nanosecond integers, causing TypeError when cast to float. Adding .values extracts the underlying numpy datetime64 array, which np.diff can process to return nanosecond integers that convert to float correctly. This matches the pattern used in pvlib's clearsky.py for similar datetime calculations.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/pvlib/temperature.py b/pvlib/temperature.py\nindex 1d98736..ccc60a6 100644\n--- a/pvlib/temperature.py\n+++ b/pvlib/temperature.py\n@@ -599,7 +599,7 @@ def fuentes(poa_global, temp_air, wind_speed, noct_installed, module_height=5,\n     # n.b. the way Fuentes calculates the first timedelta makes it seem like\n     # the value doesn't matter -- rather than recreate it here, just assume\n     # it's the same as the second timedelta:\n-    timedelta_hours = np.diff(poa_global.index).astype(float) / 1e9 / 60 / 60\n+    timedelta_hours = np.diff(poa_global.index.values).astype(float) / 1e9 / 60 / 60\n     timedelta_hours = np.append([timedelta_hours[0]], timedelta_hours)\n \n     tamb_array = temp_air + 273.15\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll review this patch systematically.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01AfwwPVzn5u8UHK5doAjnA3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"timedelta_hours\" pvlib/temperature.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01AfwwPVzn5u8UHK5doAjnA3",
+          "content": "[exit_code=0]\n602:    timedelta_hours = np.diff(poa_global.index.values).astype(float) / 1e9 / 60 / 60\n603:    timedelta_hours = np.append([timedelta_hours[0]], timedelta_hours)\n620:                   timedelta_hours)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Lvi1J268zzTw2VmoQdnSnV",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '595,615p' pvlib/temperature.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Lvi1J268zzTw2VmoQdnSnV",
+          "content": "[exit_code=0]\n# iterate through timeseries inputs\n    sun0 = 0\n    tmod0 = 293.15\n\n    # n.b. the way Fuentes calculates the first timedelta makes it seem like\n    # the value doesn't matter -- rather than recreate it here, just assume\n    # it's the same as the second timedelta:\n    timedelta_hours = np.diff(poa_global.index.values).astype(float) / 1e9 / 60 / 60\n    timedelta_hours = np.append([timedelta_hours[0]], timedelta_hours)\n\n    tamb_array = temp_air + 273.15\n    sun_array = poa_global * absorp\n\n    # Two of the calculations are easily vectorized, so precalculate them:\n    # sky temperature -- Equation 24\n    tsky_array = 0.68 * (0.0552 * tamb_array**1.5) + 0.32 * tamb_array\n    # wind speed at module height -- Equation 22\n    # not sure why the 1e-4 factor is included -- maybe the equations don't\n    # behave well if wind == 0?\n    windmod_array = wind_speed * (module_height/wind_height)**0.2 + 1e-4"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01KbQa6HQ8agJmWCueVB4HG3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"index.values\\|np.diff\" pvlib/clearsky.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KbQa6HQ8agJmWCueVB4HG3",
+          "content": "[exit_code=0]\n698:    deltas = np.diff(times.values) / np.timedelta64(1, '60s')\n724:    meas_diff = np.diff(measured[H], n=1, axis=0)\n725:    meas_slope = np.diff(measured[H], n=1, axis=0) / sample_interval\n735:    clear_diff = np.diff(clearsky[H], n=1, axis=0)\n736:    clear_slope = np.diff(clearsky[H], n=1, axis=0) / sample_interval"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01K2jPymSWurbpWkyHyX6n5w",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"test_fuentes\" pvlib/tests/test_temperature.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01K2jPymSWurbpWkyHyX6n5w",
+          "content": "[exit_code=0]\n161:def test_fuentes(filename, inoct):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01URWaC7Ezh7M8HGcRXp1J38",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '155,220p' pvlib/tests/test_temperature.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01URWaC7Ezh7M8HGcRXp1J38",
+          "content": "[exit_code=0]\n@pytest.mark.parametrize('filename,inoct', [\n    ('pvwatts_8760_rackmount.csv', 45),\n    ('pvwatts_8760_roofmount.csv', 49),\n])\ndef test_fuentes(filename, inoct):\n    # Test against data exported from pvwatts.nrel.gov\n    data = _read_pvwatts_8760(DATA_DIR / filename)\n    data = data.iloc[:24*7, :]  # just use one week\n    inputs = {\n        'poa_global': data['Plane of Array Irradiance (W/m^2)'],\n        'temp_air': data['Ambient Temperature (C)'],\n        'wind_speed': data['Wind Speed (m/s)'],\n        'noct_installed': inoct,\n    }\n    expected_tcell = data['Cell Temperature (C)']\n    expected_tcell.name = 'tmod'\n    actual_tcell = temperature.fuentes(**inputs)\n    # the SSC implementation of PVWatts diverges from the Fuentes model at\n    # at night by setting Tcell=Tamb when POA=0. This not only means that\n    # nighttime values are slightly different (Fuentes models cooling to sky\n    # at night), but because of the thermal inertia, there is a transient\n    # error after dawn as well. Test each case separately:\n    is_night = inputs['poa_global'] == 0\n    is_dawn = is_night.shift(1) & ~is_night\n    is_daytime = (inputs['poa_global'] > 0) & ~is_dawn\n    # the accuracy is probably higher than 3 digits here, but the PVWatts\n    # export data has low precision so can only test up to 3 digits\n    assert_series_equal(expected_tcell[is_daytime].round(3),\n                        actual_tcell[is_daytime].round(3))\n    # use lower precision for dawn times to accommodate the dawn transient\n    error = actual_tcell[is_dawn] - expected_tcell[is_dawn]\n    assert (error.abs() < 0.1).all()\n    # sanity check on night values -- Fuentes not much lower than PVWatts\n    night_difference = expected_tcell[is_night] - actual_tcell[is_night]\n    assert night_difference.max() < 6\n    assert night_difference.min() > 0"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Xty8HhrXVCdGEpNtR5uuKU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"tz_localize\\|timezone\\|tz_aware\\|tz-aware\" pvlib/tests/test_temperature.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Xty8HhrXVCdGEpNtR5uuKU",
+          "content": "[exit_code=0]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Cwv3EFctEGrPPXCkcFMiBW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python --version && python -c \"import pandas; print(pandas.__version__)\""
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Cwv3EFctEGrPPXCkcFMiBW",
+          "content": "[exit_code=0]\nPython 3.9.25\n2.3.3"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01SU2wfB9Yqq2fFXnytHj9q7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python -c \"\nimport pandas as pd\nimport numpy as np\n\n# Test with tz-naive index\nindex_naive = pd.date_range('2019-01-01', freq='h', periods=3)\nresult = np.diff(index_naive.values).astype(float)\nprint('tz-naive result:', result)\nprint('In hours:', result / 1e9 / 60 / 60)\n\n# Test with tz-aware index\nindex_aware = index_naive.tz_localize('UTC')\nresult2 = np.diff(index_aware.values).astype(float)\nprint('tz-aware result:', result2)\nprint('In hours:', result2 / 1e9 / 60 / 60)\n\" 2>&1"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SU2wfB9Yqq2fFXnytHj9q7",
+          "content": "[exit_code=0]\ntz-naive result: [3.6e+12 3.6e+12]\nIn hours: [1. 1.]\ntz-aware result: [3.6e+12 3.6e+12]\nIn hours: [1. 1.]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The fix works correctly for both tz-naive and tz-aware indexes.\n\n<think>\nLet me analyze the patch:\n\n1. **Problem**: `np.diff(poa_global.index)` on a tz-aware DatetimeIndex in pandas >= 1.0.0 returns `Timedelta` objects instead of nanosecond integers, causing `TypeError` when `.astype(float)` is called.\n\n2. **Fix pattern**: PE \u2014 Missing type conversion. The fix adds `.values` to extract the underlying numpy array before calling `np.diff`.\n\n3. **The patch**: Changes `np.diff(poa_global.index)` to `np.diff(poa_global.index.values)`.\n\n4. **Correctness**: \n   - For tz-naive DatetimeIndex, `.values` returns `numpy.datetime64[ns]` array, and `np.diff` gives `timedelta64[ns]` values convertible to float (nanoseconds).\n   - For tz-aware DatetimeIndex in pandas >= 1.0.0, `.values` returns `DatetimeTZDtype` array (or similar), but let me verify that `.values` on a tz-aware index in pandas 2.x...\n\nWait, I ran the code above and it actually works. Let me check what `.values` returns for tz-aware index.\n\nActually, looking at the output: both tz-naive and tz-aware return the same numeric result (3.6e+12 nanoseconds for 1 hour). So the fix is correct.\n\n5. **Completeness**: The fix is at the only occurrence of `np.diff(poa_global.index)` in the codebase. There is only one such call.\n\n6. **Alignment**: The fix exactly matches what the Architect proposed.\n\n7. **Safety**: The change is minimal - just adds `.values` before `np.diff`. It doesn't change behavior for tz-naive indexes and fixes tz-aware indexes.\n\nThe fix is correct, complete, aligned with the proposal, and safe.\n</think>\n\nThe patch looks correct. Let me verify there are no other occurrences of the same pattern and check that `.values` behaves consistently for both tz-naive and tz-aware inputs.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XF4fCT4xGuWX6XJJ9tLjtj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"np.diff(poa_global\" pvlib/temperature.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XF4fCT4xGuWX6XJJ9tLjtj",
+          "content": "[exit_code=0]\n602:    timedelta_hours = np.diff(poa_global.index.values).astype(float) / 1e9 / 60 / 60"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_012ePJoGfpvNb4yvCHuZGe3F",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python -c \"\nimport pandas as pd\nimport numpy as np\n\n# verify what .values returns for tz-aware index in pandas 2.x\nindex_aware = pd.date_range('2019-01-01', freq='h', periods=3).tz_localize('UTC')\nprint('type of index_aware.values:', type(index_aware.values))\nprint('dtype of index_aware.values:', index_aware.values.dtype)\ndiff = np.diff(index_aware.values)\nprint('type of diff elements:', type(diff[0]))\nprint('diff result:', diff)\n\" 2>&1"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012ePJoGfpvNb4yvCHuZGe3F",
+          "content": "[exit_code=0]\ntype of index_aware.values: <class 'numpy.ndarray'>\ndtype of index_aware.values: datetime64[ns]\ntype of diff elements: <class 'numpy.timedelta64'>\ndiff result: [3600000000000 3600000000000]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The fix is correct. For both tz-naive and tz-aware DatetimeIndex, `.values` returns a `numpy.ndarray` with `datetime64[ns]` dtype, and `np.diff` on that returns `timedelta64[ns]` values that can be directly `.astype(float)` converted to nanoseconds.\n\nThe single-line change at line 602 (`np.diff(poa_global.index)` \u2192 `np.diff(poa_global.index.values)`) is:\n- **Correct**: Addresses the root cause \u2014 in pandas >= 1.0.0, `np.diff` on a tz-aware DatetimeIndex returns `Timedelta` objects, but on the extracted `.values` numpy array it returns `timedelta64[ns]` integers.\n- **Complete**: Only one occurrence of this pattern in the function.\n- **Aligned**: Exactly matches the Architect's proposal.\n- **Safe**: Minimal change, verified to work identically for both tz-naive and tz-aware inputs.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PE \u2014 Missing type conversion\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 11,
+  "timestamp": "2026-04-13T00:03:18Z"
+}

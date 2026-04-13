@@ -1,0 +1,274 @@
+{
+  "instance_id": "pvlib__pvlib-python-1606",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/pvlib/tools.py b/pvlib/tools.py\nindex 991568f..69e1ee7 100644\n--- a/pvlib/tools.py\n+++ b/pvlib/tools.py\n@@ -348,6 +348,16 @@ def _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\n     df['VH'] = upper\n     df['VL'] = lower\n \n+    # Check if upper and lower bounds are equal (no range to search)\n+    if np.allclose(upper, lower, atol=atol):\n+        try:\n+            func_result = func(params, 'VL')\n+            x = np.where(np.isnan(func_result), np.nan, lower)\n+        except KeyError:\n+            func_result = np.full_like(upper, np.nan)\n+            x = func_result.copy()\n+        return func_result, x\n+\n     converged = False\n     iterations = 0",
+  "implementation_notes": "Added an early return condition in _golden_sect_DataFrame to handle the case where upper and lower bounds are equal, preventing the divide-by-zero error in iterlimit calculation and returning the function value at the bound directly.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>pvlib__pvlib-python-1606</instance_id>\n\n<problem_statement>\ngolden-section search fails when upper and lower bounds are equal\n**Describe the bug**\r\nI was using pvlib for sometime now and until now I was always passing a big dataframe containing readings of a long period. Because of some changes in our software architecture, I need to pass the weather readings as a single reading (a dataframe with only one row) and I noticed that for readings that GHI-DHI are zero pvlib fails to calculate the output and returns below error while the same code executes correctly with weather information that has non-zero GHI-DHI:\r\n```python\r\nimport os\r\nimport pathlib\r\nimport time\r\nimport json\r\nfrom datetime import datetime\r\nfrom time import mktime, gmtime\r\n\r\nimport pandas as pd\r\n\r\nfrom pvlib import pvsystem\r\nfrom pvlib import location as pvlocation\r\nfrom pvlib import modelchain\r\nfrom pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS as PARAMS # not used -- to remove\r\nfrom pvlib.bifacial.pvfactors import pvfactors_timeseries\r\nfrom pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS\r\n\r\nclass PV:\r\n    def pv_transform_time(self, val):\r\n        # tt = gmtime(val / 1000)\r\n        tt = gmtime(val)\r\n        dd = datetime.fromtimestamp(mktime(tt))\r\n        timestamp = pd.Timestamp(dd)\r\n        return timestamp\r\n\r\n    def __init__(self, model: str, inverter: str, latitude: float, longitude: float, **kwargs):\r\n        # super().__init__(**kwargs)\r\n\r\n        temperature_model_parameters = TEMPERATURE_MODEL_PARAMETERS[\"sapm\"][\r\n            \"open_rack_glass_glass\"\r\n        ]\r\n        # Load the database of CEC module model parameters\r\n        modules = pvsystem.retrieve_sam(\"cecmod\")\r\n        # Load the database of CEC inverter model parameters\r\n        inverters = pvsystem.retrieve_sam(\"cecinverter\")\r\n\r\n\r\n        # A bare bone PV simulator\r\n\r\n        # Load the database of CEC module model parameters\r\n        modules = pvsystem.retrieve_sam('cecmod')\r\n        inverters = pvsystem.retrieve_sam('cecinverter')\r\n        module_parameters = modules[model]\r\n        inverter_parameters = inverters[inverter]\r\n\r\n        location = pvlocation.Location(latitude=latitude, longitude=longitude)\r\n        system = pvsystem.PVSystem(module_parameters=module_parameters, inverter_parameters=inverter_parameters, temperature_model_parameters=temperature_model_parameters)\r\n        self.modelchain = modelchain.ModelChain(system, location, aoi_model='no_loss', spectral_model=\"no_loss\")\r\n\r\n    def process(self, data):\r\n        weather = pd.read_json(data)\r\n        # print(f\"raw_weather: {weather}\")\r\n        weather.drop('time.1', axis=1, inplace=True)\r\n        weather['time'] = pd.to_datetime(weather['time']).map(datetime.timestamp) # --> this works for the new process_weather code and also the old weather file\r\n        weather[\"time\"] = weather[\"time\"].apply(self.pv_transform_time)\r\n        weather.index = weather[\"time\"]\r\n        # print(f\"weather: {weather}\")\r\n        # print(weather.dtypes)\r\n        # print(weather['ghi'][0])\r\n        # print(type(weather['ghi'][0]))\r\n\r\n        # simulate\r\n        self.modelchain.run_model(weather)\r\n        # print(self.modelchain.results.ac.to_frame().to_json())\r\n        print(self.modelchain.results.ac)\r\n\r\n\r\n# good data\r\ngood_data = \"{\\\"time\\\":{\\\"12\\\":\\\"2010-01-01 13:30:00+00:00\\\"},\\\"ghi\\\":{\\\"12\\\":36},\\\"dhi\\\":{\\\"12\\\":36},\\\"dni\\\":{\\\"12\\\":0},\\\"Tamb\\\":{\\\"12\\\":8.0},\\\"WindVel\\\":{\\\"12\\\":5.0},\\\"WindDir\\\":{\\\"12\\\":270},\\\"time.1\\\":{\\\"12\\\":\\\"2010-01-01 13:30:00+00:00\\\"}}\"\r\n\r\n# data that causes error\r\ndata = \"{\\\"time\\\":{\\\"4\\\":\\\"2010-01-01 05:30:00+00:00\\\"},\\\"ghi\\\":{\\\"4\\\":0},\\\"dhi\\\":{\\\"4\\\":0},\\\"dni\\\":{\\\"4\\\":0},\\\"Tamb\\\":{\\\"4\\\":8.0},\\\"WindVel\\\":{\\\"4\\\":4.0},\\\"WindDir\\\":{\\\"4\\\":240},\\\"time.1\\\":{\\\"4\\\":\\\"2010-01-01 05:30:00+00:00\\\"}}\"\r\np1 = PV(model=\"Trina_Solar_TSM_300DEG5C_07_II_\", inverter=\"ABB__MICRO_0_25_I_OUTD_US_208__208V_\", latitude=51.204483, longitude=5.265472)\r\np1.process(good_data)\r\nprint(\"=====\")\r\np1.process(data)\r\n```\r\nError:\r\n```log\r\n$ python3 ./tmp-pv.py \r\ntime\r\n2010-01-01 13:30:00    7.825527\r\ndtype: float64\r\n=====\r\n/home/user/.local/lib/python3.10/site-packages/pvlib/tools.py:340: RuntimeWarning: divide by zero encountered in divide\r\n  np.trunc(np.log(atol / (df['VH'] - df['VL'])) / np.log(phim1)))\r\nTraceback (most recent call last):\r\n  File \"/home/user/workspace/enorch/simulator/simulator_processor/src/pv/./tmp-pv.py\", line 88, in <module>\r\n    p1.process(data)\r\n  File \"/home/user/workspace/enorch/simulator/simulator_processor/src/pv/./tmp-pv.py\", line 75, in process\r\n    self.modelchain.run_model(weather)\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/modelchain.py\", line 1770, in run_model\r\n    self._run_from_effective_irrad(weather)\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/modelchain.py\", line 1858, in _run_from_effective_irrad\r\n    self.dc_model()\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/modelchain.py\", line 790, in cec\r\n    return self._singlediode(self.system.calcparams_cec)\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/modelchain.py\", line 772, in _singlediode\r\n    self.results.dc = tuple(itertools.starmap(\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/pvsystem.py\", line 931, in singlediode\r\n    return singlediode(photocurrent, saturation_current,\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/pvsystem.py\", line 2826, in singlediode\r\n    out = _singlediode._lambertw(\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/singlediode.py\", line 651, in _lambertw\r\n    p_mp, v_mp = _golden_sect_DataFrame(params, 0., v_oc * 1.14,\r\n  File \"/home/user/.local/lib/python3.10/site-packages/pvlib/tools.py\", line 364, in _golden_sect_DataFrame\r\n    raise Exception(\"Iterations exceeded maximum. Check that func\",\r\nException: ('Iterations exceeded maximum. Check that func', ' is not NaN in (lower, upper)')\r\n```\r\n\r\nI have to mention that for now the workaround that I am using is to pass the weather data as a dataframe with two rows, the first row is a good weather data that pvlib can process and the second row is the incoming weather reading (I can also post that code if you want).\r\n\r\n**Expected behavior**\r\nPVlib should have consistent behavior and regardless of GHI-DHI readings.\r\n\r\n**Versions:**\r\n```python\r\n>>> import pvlib\r\n>>> import pandas\r\n>>> pvlib.__version__\r\n'0.9.1'\r\n>>> pandas.__version__\r\n'1.4.3'\r\n``` \r\n - python: 3.10.6\r\n- OS: Ubuntu 22.04.1 LTS\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The golden-section search fails when upper and lower bounds are equal because the iterlimit calculation involves division by zero (df['VH'] - df['VL'] = 0), resulting in iterlimit becoming -infinity. This causes the while loop to never execute and immediately triggers the 'Iterations exceeded maximum' exception.\nExploration notes: The bug is in lines 358-360 of _golden_sect_DataFrame where iterlimit = 1 + np.nanmax(np.trunc(np.log(atol / (df['VH'] - df['VL'])) / np.log(phim1))). When df['VH'] == df['VL'], the division by zero creates -infinity for iterlimit. The fix should handle the case where upper == lower bounds by either returning the bound value directly or setting a reasonable iterlimit.\n</localization_report>\n\n<solution_proposal>\nFix strategy: Add an early return condition to handle the edge case where upper and lower bounds are equal. When bounds are equal, the optimal point is trivially the bound value, eliminating the need for golden section search and avoiding the divide-by-zero error in iterlimit calculation. This fix is minimal, safe, and maintains the existing function contract.\n\nFiles to modify: [\n  \"/testbed/pvlib/tools.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/pvlib/tools.py\n  Location: _golden_sect_DataFrame, around line 352\n  Change  : 1. Add early return check for equal bounds: # Check if upper and lower bounds are equal (no range to search)\n    if np.allclose(upper, lower, atol=atol):\n        try:\n            func_result = func(params, 'VL' if 'VL' in params else 'VH')\n            x = np.where(np.isnan(func_result), np.nan, lower)\n        except KeyError:\n            func_result = np.full_like(upper, np.nan)\n            x = func_result.copy()\n        return func_result, x\n  Rationale: When upper and lower bounds are equal, there is no range to search over, so the optimal point is obviously the bound value itself. This prevents the divide-by-zero error in the iterlimit calculation and provides a meaningful result. The early return maintains the same contract as the normal return path: (func_result, x) tuple where func_result is the function value at the optimal point and x is the optimal point itself.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal by modifying the `/testbed/pvlib/tools.py` file. Let me start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01781zC8DVJMGUkUJHouLXS8",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -n 400 pvlib/tools.py | tail -n 100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01781zC8DVJMGUkUJHouLXS8",
+          "content": "[exit_code=0]\n# criteria\ndef _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\n    \"\"\"\n    Vectorized golden section search for finding maximum of a function of a\n    single variable.\n\n    Parameters\n    ----------\n    params : dict of numeric\n        Parameters to be passed to `func`. Each entry must be of the same\n        length.\n\n    lower: numeric\n        Lower bound for the optimization. Must be the same length as each\n        entry of params.\n\n    upper: numeric\n        Upper bound for the optimization. Must be the same length as each\n        entry of params.\n\n    func: function\n        Function to be optimized. Must be in the form\n        result = f(dict or DataFrame, str), where result is a dict or DataFrame\n        that also contains the function output, and str is the key\n        corresponding to the function's input variable.\n\n    Returns\n    -------\n    numeric\n        function evaluated at the optimal points\n\n    numeric\n        optimal points\n\n    Notes\n    -----\n    This function will find the points where the function is maximized.\n    Returns nan where lower or upper is nan, or where func evaluates to nan.\n\n    See also\n    --------\n    pvlib.singlediode._pwr_optfcn\n    \"\"\"\n\n    phim1 = (np.sqrt(5) - 1) / 2\n\n    df = params\n    df['VH'] = upper\n    df['VL'] = lower\n\n    converged = False\n    iterations = 0\n\n    # handle all NaN case gracefully\n    with warnings.catch_warnings():\n        warnings.filterwarnings(action='ignore',\n                                message='All-NaN slice encountered')\n        iterlimit = 1 + np.nanmax(\n            np.trunc(np.log(atol / (df['VH'] - df['VL'])) / np.log(phim1)))\n\n    while not converged and (iterations <= iterlimit):\n\n        phi = phim1 * (df['VH'] - df['VL'])\n        df['V1'] = df['VL'] + phi\n        df['V2'] = df['VH'] - phi\n\n        df['f1'] = func(df, 'V1')\n        df['f2'] = func(df, 'V2')\n        df['SW_Flag'] = df['f1'] > df['f2']\n\n        df['VL'] = df['V2']*df['SW_Flag'] + df['VL']*(~df['SW_Flag'])\n        df['VH'] = df['V1']*~df['SW_Flag'] + df['VH']*(df['SW_Flag'])\n\n        err = abs(df['V2'] - df['V1'])\n\n        # works with single value because err is np.float64\n        converged = (err[~np.isnan(err)] < atol).all()\n        # err will be less than atol before iterations hit the limit\n        # but just to be safe\n        iterations += 1\n\n    if iterations > iterlimit:\n        raise Exception(\"Iterations exceeded maximum. Check that func\",\n                        \" is not NaN in (lower, upper)\")  # pragma: no cover\n\n    try:\n        func_result = func(df, 'V1')\n        x = np.where(np.isnan(func_result), np.nan, df['V1'])\n    except KeyError:\n        func_result = np.full_like(upper, np.nan)\n        x = func_result.copy()\n\n    return func_result, x\n\n\ndef _get_sample_intervals(times, win_length):\n    \"\"\" Calculates time interval and samples per window for Reno-style clear\n    sky detection functions\n    \"\"\"\n    deltas = np.diff(times.values) / np.timedelta64(1, '60s')"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read the complete function to understand its structure better:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_015oCpWMkirTYajpsrgzxtTm",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"_golden_sect_DataFrame\" pvlib/tools.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015oCpWMkirTYajpsrgzxtTm",
+          "content": "[exit_code=0]\n302:def _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read the full function from line 302 onwards:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CfxLPjgZb4S7cqhBFvamtE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '302,385p' pvlib/tools.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CfxLPjgZb4S7cqhBFvamtE",
+          "content": "[exit_code=0]\ndef _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\n    \"\"\"\n    Vectorized golden section search for finding maximum of a function of a\n    single variable.\n\n    Parameters\n    ----------\n    params : dict of numeric\n        Parameters to be passed to `func`. Each entry must be of the same\n        length.\n\n    lower: numeric\n        Lower bound for the optimization. Must be the same length as each\n        entry of params.\n\n    upper: numeric\n        Upper bound for the optimization. Must be the same length as each\n        entry of params.\n\n    func: function\n        Function to be optimized. Must be in the form\n        result = f(dict or DataFrame, str), where result is a dict or DataFrame\n        that also contains the function output, and str is the key\n        corresponding to the function's input variable.\n\n    Returns\n    -------\n    numeric\n        function evaluated at the optimal points\n\n    numeric\n        optimal points\n\n    Notes\n    -----\n    This function will find the points where the function is maximized.\n    Returns nan where lower or upper is nan, or where func evaluates to nan.\n\n    See also\n    --------\n    pvlib.singlediode._pwr_optfcn\n    \"\"\"\n\n    phim1 = (np.sqrt(5) - 1) / 2\n\n    df = params\n    df['VH'] = upper\n    df['VL'] = lower\n\n    converged = False\n    iterations = 0\n\n    # handle all NaN case gracefully\n    with warnings.catch_warnings():\n        warnings.filterwarnings(action='ignore',\n                                message='All-NaN slice encountered')\n        iterlimit = 1 + np.nanmax(\n            np.trunc(np.log(atol / (df['VH'] - df['VL'])) / np.log(phim1)))\n\n    while not converged and (iterations <= iterlimit):\n\n        phi = phim1 * (df['VH'] - df['VL'])\n        df['V1'] = df['VL'] + phi\n        df['V2'] = df['VH'] - phi\n\n        df['f1'] = func(df, 'V1')\n        df['f2'] = func(df, 'V2')\n        df['SW_Flag'] = df['f1'] > df['f2']\n\n        df['VL'] = df['V2']*df['SW_Flag'] + df['VL']*(~df['SW_Flag'])\n        df['VH'] = df['V1']*~df['SW_Flag'] + df['VH']*(df['SW_Flag'])\n\n        err = abs(df['V2'] - df['V1'])\n\n        # works with single value because err is np.float64\n        converged = (err[~np.isnan(err)] < atol).all()\n        # err will be less than atol before iterations hit the limit\n        # but just to be safe\n        iterations += 1\n\n    if iterations > iterlimit:\n        raise Exception(\"Iterations exceeded maximum. Check that func\",\n                        \" is not NaN in (lower, upper)\")  # pragma: no cover"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me continue reading:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XrvdufFYEM41V7jaeNDovQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '380,395p' pvlib/tools.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XrvdufFYEM41V7jaeNDovQ",
+          "content": "[exit_code=0]\niterations += 1\n\n    if iterations > iterlimit:\n        raise Exception(\"Iterations exceeded maximum. Check that func\",\n                        \" is not NaN in (lower, upper)\")  # pragma: no cover\n\n    try:\n        func_result = func(df, 'V1')\n        x = np.where(np.isnan(func_result), np.nan, df['V1'])\n    except KeyError:\n        func_result = np.full_like(upper, np.nan)\n        x = func_result.copy()\n\n    return func_result, x"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I understand the function. Let me implement the fix. I'll add an early return check right after the initial setup and before the iterlimit calculation. Here's the strategy:\n\n1. Check if upper and lower bounds are equal using `np.allclose`\n2. If they are equal, evaluate the function at the bound and return immediately\n\nLet me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QeAJ3dJtSPYn6H1Bv7eEC3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('pvlib/tools.py', 'r') as f:\n    content = f.read()\n\n# Find the start of the function and its docstring\nimport_section = content[:content.index('def _golden_sect_DataFrame')]\n\n# Find the line numbers\nlines = content.split('\\n')\nstart_line = None\nfor i, line in enumerate(lines):\n    if 'def _golden_sect_DataFrame' in line:\n        start_line = i\n        break\n\nprint(f\"Function starts at line {start_line + 1}\")\n\n# Let's find the docstring end and where params are set up\nfor i in range(start_line, start_line + 50):\n    print(f\"{i+1}: {lines[i]}\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QeAJ3dJtSPYn6H1Bv7eEC3",
+          "content": "[exit_code=0]\nFunction starts at line 302\n302: def _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\n303:     \"\"\"\n304:     Vectorized golden section search for finding maximum of a function of a\n305:     single variable.\n306: \n307:     Parameters\n308:     ----------\n309:     params : dict of numeric\n310:         Parameters to be passed to `func`. Each entry must be of the same\n311:         length.\n312: \n313:     lower: numeric\n314:         Lower bound for the optimization. Must be the same length as each\n315:         entry of params.\n316: \n317:     upper: numeric\n318:         Upper bound for the optimization. Must be the same length as each\n319:         entry of params.\n320: \n321:     func: function\n322:         Function to be optimized. Must be in the form\n323:         result = f(dict or DataFrame, str), where result is a dict or DataFrame\n324:         that also contains the function output, and str is the key\n325:         corresponding to the function's input variable.\n326: \n327:     Returns\n328:     -------\n329:     numeric\n330:         function evaluated at the optimal points\n331: \n332:     numeric\n333:         optimal points\n334: \n335:     Notes\n336:     -----\n337:     This function will find the points where the function is maximized.\n338:     Returns nan where lower or upper is nan, or where func evaluates to nan.\n339: \n340:     See also\n341:     --------\n342:     pvlib.singlediode._pwr_optfcn\n343:     \"\"\"\n344: \n345:     phim1 = (np.sqrt(5) - 1) / 2\n346: \n347:     df = params\n348:     df['VH'] = upper\n349:     df['VL'] = lower\n350: \n351:     converged = False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I'll apply the fix by adding the early return condition right after setting `df['VL'] = lower` and before the iterlimit calculation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BCSXBtSmur8WhLJ9BQAUza",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('pvlib/tools.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the insertion point (right after df['VL'] = lower)\ninsert_line = None\nfor i, line in enumerate(lines):\n    if \"df['VL'] = lower\" in line:\n        insert_line = i + 1\n        break\n\nif insert_line is None:\n    print(\"Could not find insertion point\")\n    exit(1)\n\nprint(f\"Will insert at line {insert_line + 1} (0-indexed: {insert_line})\")\n\n# Create the new lines to insert\nnew_lines = [\n    \"\\n\",\n    \"    # Check if upper and lower bounds are equal (no range to search)\\n\",\n    \"    if np.allclose(upper, lower, atol=atol):\\n\",\n    \"        try:\\n\",\n    \"            func_result = func(params, 'VL')\\n\",\n    \"            x = np.where(np.isnan(func_result), np.nan, lower)\\n\",\n    \"        except KeyError:\\n\",\n    \"            func_result = np.full_like(upper, np.nan)\\n\",\n    \"            x = func_result.copy()\\n\",\n    \"        return func_result, x\\n\",\n]\n\n# Insert the new lines\nmodified_lines = lines[:insert_line] + new_lines + lines[insert_line:]\n\n# Write back the file\nwith open('pvlib/tools.py', 'w') as f:\n    f.writelines(modified_lines)\n\nprint(\"File modified successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BCSXBtSmur8WhLJ9BQAUza",
+          "content": "[exit_code=0]\nWill insert at line 350 (0-indexed: 349)\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let's verify the change looks correct:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01X5WHYXeL42t3bo3CrJerRx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '345,375p' pvlib/tools.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01X5WHYXeL42t3bo3CrJerRx",
+          "content": "[exit_code=0]\nphim1 = (np.sqrt(5) - 1) / 2\n\n    df = params\n    df['VH'] = upper\n    df['VL'] = lower\n\n    # Check if upper and lower bounds are equal (no range to search)\n    if np.allclose(upper, lower, atol=atol):\n        try:\n            func_result = func(params, 'VL')\n            x = np.where(np.isnan(func_result), np.nan, lower)\n        except KeyError:\n            func_result = np.full_like(upper, np.nan)\n            x = func_result.copy()\n        return func_result, x\n\n    converged = False\n    iterations = 0\n\n    # handle all NaN case gracefully\n    with warnings.catch_warnings():\n        warnings.filterwarnings(action='ignore',\n                                message='All-NaN slice encountered')\n        iterlimit = 1 + np.nanmax(\n            np.trunc(np.log(atol / (df['VH'] - df['VL'])) / np.log(phim1)))\n\n    while not converged and (iterations <= iterlimit):\n\n        phi = phim1 * (df['VH'] - df['VL'])\n        df['V1'] = df['VL'] + phi\n        df['V2'] = df['VH'] - phi"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The modification looks good. Now let's run git diff to verify the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Bj9jarJGWxNhp2DkFjAPmL",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Bj9jarJGWxNhp2DkFjAPmL",
+          "content": "[exit_code=0]\ndiff --git a/pvlib/tools.py b/pvlib/tools.py\nindex 991568f..69e1ee7 100644\n--- a/pvlib/tools.py\n+++ b/pvlib/tools.py\n@@ -348,6 +348,16 @@ def _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\n     df['VH'] = upper\n     df['VL'] = lower\n \n+    # Check if upper and lower bounds are equal (no range to search)\n+    if np.allclose(upper, lower, atol=atol):\n+        try:\n+            func_result = func(params, 'VL')\n+            x = np.where(np.isnan(func_result), np.nan, lower)\n+        except KeyError:\n+            func_result = np.full_like(upper, np.nan)\n+            x = func_result.copy()\n+        return func_result, x\n+\n     converged = False\n     iterations = 0"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The patch is exactly what we need. The git diff shows:\n1. The change is in the correct file (`pvlib/tools.py`)\n2. The modification is placed right after setting `df['VL'] = lower` (around line 349)\n3. The new code adds an early return condition that checks if upper and lower bounds are equal\n4. When they are equal, it evaluates the function at the lower bound and returns immediately, avoiding the divide-by-zero error in the iterlimit calculation\n\n```json\n{\n  \"patch\": \"diff --git a/pvlib/tools.py b/pvlib/tools.py\\nindex 991568f..69e1ee7 100644\\n--- a/pvlib/tools.py\\n+++ b/pvlib/tools.py\\n@@ -348,6 +348,16 @@ def _golden_sect_DataFrame(params, lower, upper, func, atol=1e-8):\\n     df['VH'] = upper\\n     df['VL'] = lower\\n \\n+    # Check if upper and lower bounds are equal (no range to search)\\n+    if np.allclose(upper, lower, atol=atol):\\n+        try:\\n+            func_result = func(params, 'VL')\\n+            x = np.where(np.isnan(func_result), np.nan, lower)\\n+        except KeyError:\\n+            func_result = np.full_like(upper, np.nan)\\n+            x = func_result.copy()\\n+        return func_result, x\\n+\\n     converged = False\\n     iterations = 0\",\n  \"implementation_notes\": \"Added an early return condition in _golden_sect_DataFrame to handle the case where upper and lower bounds are equal, preventing the divide-by-zero error in iterlimit calculation and returning the function value at the bound directly.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-12T00:31:25Z"
+}

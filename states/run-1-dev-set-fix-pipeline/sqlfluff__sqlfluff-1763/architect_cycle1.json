@@ -1,0 +1,229 @@
+{
+  "instance_id": "sqlfluff__sqlfluff-1763",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/src/sqlfluff/core/linter/linted_file.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/src/sqlfluff/core/linter/linted_file.py",
+      "location": "imports section, around line 8",
+      "change": "Add import tempfile and import shutil after the existing import os line",
+      "rationale": "Need tempfile.NamedTemporaryFile for safe temporary file creation and shutil.move for atomic file replacement"
+    },
+    {
+      "file": "/testbed/src/sqlfluff/core/linter/linted_file.py",
+      "location": "LintedFile.persist_tree method, around line 635",
+      "change": "Replace the file writing block: 1. with open(fname, \"w\", encoding=self.encoding) as f: f.write(write_buff) with safe atomic replacement: import tempfile; import shutil at top, then: try: with tempfile.NamedTemporaryFile(mode='w', encoding=self.encoding, delete=False, dir=os.path.dirname(fname)) as temp_file: temp_file.write(write_buff); temp_file.flush(); shutil.move(temp_file.name, fname) except (UnicodeEncodeError, OSError) as e: # Clean up temp file if it exists; if 'temp_file' in locals() and os.path.exists(temp_file.name): os.unlink(temp_file.name); linter_logger.error(f\"Failed to write file {fname}: {e}\"); return False",
+      "rationale": "This implements safe atomic file replacement that prevents data loss. The temporary file is written first, and only if successful is it moved to replace the original. If encoding or other write errors occur, the original file remains untouched and the temporary file is cleaned up."
+    }
+  ],
+  "fix_strategy": "Replace the unsafe direct file write with atomic file replacement using a temporary file. This ensures the original file is never truncated until we know the write operation will succeed, preventing data loss when Unicode encoding errors occur.",
+  "full_response": "Now I have enough information to propose a solution. The issue is that the current `persist_tree` method opens the file in write mode ('w') which immediately truncates it, and then if the write operation fails due to encoding issues, the original file is lost.\n\n<think>\n1. Root cause check:\n   The buggy lines are:\n   ```python\n   # Actually write the file.\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   ```\n   This exactly matches the bug analysis - file opened in 'w' mode truncates immediately, then write can fail with UnicodeEncodeError.\n\n2. Downstream contract check:\n   The 5 lines after the buggy line are:\n   ```python\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   return success\n   ```\n   Actually there are only 2 lines total, then return. No variables are used downstream, so changing the write mechanism won't affect any downstream code. The function still returns the same `success` boolean.\n\n3. Simplicity check:\n   The minimal solution is to use atomic file replacement - write to a temporary file first, then only move it to replace the original if the write succeeds. This requires importing `tempfile` and `shutil`.\n\n4. Completeness check:\n   The lines that need to change are:\n   1. Add imports for tempfile and shutil at the top\n   2. Replace the `with open(fname, \"w\", encoding=self.encoding) as f:` line\n   3. Replace the `f.write(write_buff)` line\n   4. Add error handling and atomic replacement logic\n</think>\n\n```json\n{\n  \"files_to_modify\": [\n    \"/testbed/src/sqlfluff/core/linter/linted_file.py\"\n  ],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/src/sqlfluff/core/linter/linted_file.py\",\n      \"location\": \"imports section, around line 8\",\n      \"change\": \"Add import tempfile and import shutil after the existing import os line\",\n      \"rationale\": \"Need tempfile.NamedTemporaryFile for safe temporary file creation and shutil.move for atomic file replacement\"\n    },\n    {\n      \"file\": \"/testbed/src/sqlfluff/core/linter/linted_file.py\", \n      \"location\": \"LintedFile.persist_tree method, around line 635\",\n      \"change\": \"Replace the file writing block: 1. with open(fname, \\\"w\\\", encoding=self.encoding) as f: f.write(write_buff) with safe atomic replacement: import tempfile; import shutil at top, then: try: with tempfile.NamedTemporaryFile(mode='w', encoding=self.encoding, delete=False, dir=os.path.dirname(fname)) as temp_file: temp_file.write(write_buff); temp_file.flush(); shutil.move(temp_file.name, fname) except (UnicodeEncodeError, OSError) as e: # Clean up temp file if it exists; if 'temp_file' in locals() and os.path.exists(temp_file.name): os.unlink(temp_file.name); linter_logger.error(f\\\"Failed to write file {fname}: {e}\\\"); return False\",\n      \"rationale\": \"This implements safe atomic file replacement that prevents data loss. The temporary file is written first, and only if successful is it moved to replace the original. If encoding or other write errors occur, the original file remains untouched and the temporary file is cleaned up.\"\n    }\n  ],\n  \"fix_strategy\": \"Replace the unsafe direct file write with atomic file replacement using a temporary file. This ensures the original file is never truncated until we know the write operation will succeed, preventing data loss when Unicode encoding errors occur.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>sqlfluff__sqlfluff-1763</instance_id>\n\n<problem_statement>\ndbt postgres fix command errors with UnicodeEncodeError and also wipes the .sql file\n_If this is a parsing or linting issue, please include a minimal SQL example which reproduces the issue, along with the `sqlfluff parse` output, `sqlfluff lint` output and `sqlfluff fix` output when relevant._\r\n\r\n## Expected Behaviour\r\nViolation failure notice at a minimum, without wiping the file. Would like a way to ignore the known error at a minimum as --noqa is not getting past this. Actually would expect --noqa to totally ignore this.\r\n\r\n## Observed Behaviour\r\nReported error: `UnicodeEncodeError: 'charmap' codec can't encode character '\\u2192' in position 120: character maps to <undefined>`\r\n\r\n## Steps to Reproduce\r\nSQL file:\r\n```sql\r\nSELECT\r\n    reacted_table_name_right.descendant_id AS category_id,\r\n    string_agg(redacted_table_name_left.name, ' \u2192 ' ORDER BY reacted_table_name_right.generations DESC) AS breadcrumbs -- noqa\r\nFROM {{ ref2('redacted_schema_name', 'redacted_table_name_left') }} AS redacted_table_name_left\r\nINNER JOIN {{ ref2('redacted_schema_name', 'reacted_table_name_right') }} AS reacted_table_name_right\r\n    ON redacted_table_name_left.id = order_issue_category_hierarchies.ancestor_id\r\nGROUP BY reacted_table_name_right.descendant_id\r\n```\r\nRunning `sqlfluff fix --ignore templating,parsing,lexing -vvvv` and accepting proposed fixes for linting violations.\r\n\r\n## Dialect\r\n`postgres`, with `dbt` templater\r\n\r\n## Version\r\n`python 3.7.12`\r\n`sqlfluff 0.7.0`\r\n`sqlfluff-templater-dbt 0.7.0`\r\n\r\n## Configuration\r\nI've tried a few, here's one:\r\n```\r\n[sqlfluff]\r\nverbose = 2\r\ndialect = postgres\r\ntemplater = dbt\r\nexclude_rules = None\r\noutput_line_length = 80\r\nrunaway_limit = 10\r\nignore_templated_areas = True\r\nprocesses = 3\r\n# Comma separated list of file extensions to lint.\r\n\r\n# NB: This config will only apply in the root folder.\r\nsql_file_exts = .sql\r\n\r\n[sqlfluff:indentation]\r\nindented_joins = False\r\nindented_using_on = True\r\ntemplate_blocks_indent = True\r\n\r\n[sqlfluff:templater]\r\nunwrap_wrapped_queries = True\r\n\r\n[sqlfluff:templater:jinja]\r\napply_dbt_builtins = True\r\n\r\n[sqlfluff:templater:jinja:macros]\r\n# Macros provided as builtins for dbt projects\r\ndbt_ref = {% macro ref(model_ref) %}{{model_ref}}{% endmacro %}\r\ndbt_source = {% macro source(source_name, table) %}{{source_name}}_{{table}}{% endmacro %}\r\ndbt_config = {% macro config() %}{% for k in kwargs %}{% endfor %}{% endmacro %}\r\ndbt_var = {% macro var(variable, default='') %}item{% endmacro %}\r\ndbt_is_incremental = {% macro is_incremental() %}True{% endmacro %}\r\n\r\n# Common config across rules\r\n[sqlfluff:rules]\r\ntab_space_size = 4\r\nindent_unit = space\r\nsingle_table_references = consistent\r\nunquoted_identifiers_policy = all\r\n\r\n# L001 - Remove trailing whitespace (fix)\r\n# L002 - Single section of whitespace should not contain both tabs and spaces (fix)\r\n# L003 - Keep consistent indentation (fix)\r\n# L004 - We use 4 spaces for indentation just for completeness (fix)\r\n# L005 - Remove space before commas (fix)\r\n# L006 - Operators (+, -, *, /) will be wrapped by a single space each side (fix)\r\n\r\n# L007 - Operators should not be at the end of a line\r\n[sqlfluff:rules:L007]  # Keywords\r\noperator_new_lines = after\r\n\r\n# L008 - Always use a single whitespace after a comma (fix)\r\n# L009 - Files will always end with a trailing newline\r\n\r\n# L010 - All keywords will use full upper case (fix)\r\n[sqlfluff:rules:L010]  # Keywords\r\ncapitalisation_policy = upper\r\n\r\n# L011 - Always explicitly alias tables (fix)\r\n[sqlfluff:rules:L011]  # Aliasing\r\naliasing = explicit\r\n\r\n# L012 - Do not have to explicitly alias all columns\r\n[sqlfluff:rules:L012]  # Aliasing\r\naliasing = explicit\r\n\r\n# L013 - Always explicitly alias a column with an expression in it (fix)\r\n[sqlfluff:rules:L013]  # Aliasing\r\nallow_scalar = False\r\n\r\n# L014 - Always user full lower case for 'quoted identifiers' -> column refs. without an alias (fix)\r\n[sqlfluff:rules:L014]  # Unquoted identifiers\r\nextended_capitalisation_policy = lower\r\n\r\n# L015 - Always remove parenthesis when using DISTINCT to be clear that DISTINCT applies to all columns (fix)\r\n\r\n# L016 - Lines should be 120 characters of less. Comment lines should not be ignored (fix)\r\n[sqlfluff:rules:L016]\r\nignore_comment_lines = False\r\nmax_line_length = 120\r\n\r\n# L017 - There should not be whitespace between function name and brackets (fix)\r\n# L018 - Always align closing bracket of WITH to the WITH keyword (fix)\r\n\r\n# L019 - Always use trailing commas / commas at the end of the line (fix)\r\n[sqlfluff:rules:L019]\r\ncomma_style = trailing\r\n\r\n# L020 - Table aliases will always be unique per statement\r\n# L021 - Remove any use of ambiguous DISTINCT and GROUP BY combinations. Lean on removing the GROUP BY.\r\n# L022 - Add blank lines after common table expressions (CTE) / WITH.\r\n# L023 - Always add a single whitespace after AS in a WITH clause (fix)\r\n\r\n[sqlfluff:rules:L026]\r\nforce_enable = False\r\n\r\n# L027 - Always add references if more than one referenced table or view is used\r\n\r\n[sqlfluff:rules:L028]\r\nforce_enable = False\r\n\r\n[sqlfluff:rules:L029]  # Keyword identifiers\r\nunquoted_identifiers_policy = aliases\r\n\r\n[sqlfluff:rules:L030]  # Function names\r\ncapitalisation_policy = upper\r\n\r\n# L032 - We prefer use of join keys rather than USING\r\n# L034 - We prefer ordering of columns in select statements as (fix):\r\n# 1. wildcards\r\n# 2. single identifiers\r\n# 3. calculations and aggregates\r\n\r\n# L035 - Omit 'else NULL'; it is redundant (fix)\r\n# L036 - Move select targets / identifiers onto new lines each (fix)\r\n# L037 - When using ORDER BY, make the direction explicit (fix)\r\n\r\n# L038 - Never use trailing commas at the end of the SELECT clause\r\n[sqlfluff:rules:L038]\r\nselect_clause_trailing_comma = forbid\r\n\r\n# L039 - Remove unnecessary whitespace (fix)\r\n\r\n[sqlfluff:rules:L040]  # Null & Boolean Literals\r\ncapitalisation_policy = upper\r\n\r\n# L042 - Join clauses should not contain subqueries. Use common tables expressions (CTE) instead.\r\n[sqlfluff:rules:L042]\r\n# By default, allow subqueries in from clauses, but not join clauses.\r\nforbid_subquery_in = join\r\n\r\n# L043 - Reduce CASE WHEN conditions to COALESCE (fix)\r\n# L044 - Prefer a known number of columns along the path to the source data\r\n# L045 - Remove unused common tables expressions (CTE) / WITH statements (fix)\r\n# L046 - Jinja tags should have a single whitespace on both sides\r\n\r\n# L047 - Use COUNT(*) instead of COUNT(0) or COUNT(1) alternatives (fix)\r\n[sqlfluff:rules:L047]  # Consistent syntax to count all rows\r\nprefer_count_1 = False\r\nprefer_count_0 = False\r\n\r\n# L048 - Quoted literals should be surrounded by a single whitespace (fix)\r\n# L049 - Always use IS or IS NOT for comparisons with NULL (fix)\r\n```\r\n\n\n</problem_statement>\n\n<hints>\nI get a dbt-related error -- can you provide your project file as well? Also, what operating system are you running this on? I tested a simplified (non-dbt) version of your file on my Mac, and it worked okay.\r\n\r\n```\r\ndbt.exceptions.DbtProjectError: Runtime Error\r\n  no dbt_project.yml found at expected path /Users/bhart/dev/sqlfluff/dbt_project.yml\r\n```\nNever mind the questions above -- I managed to reproduce the error in a sample dbt project. Taking a look now...\n@Tumble17: Have you tried setting the `encoding` parameter in `.sqlfluff`? Do you know what encoding you're using? The default is `autodetect`, and SQLFluff \"thinks\" the file uses \"Windows-1252\" encoding, which I assume is incorrect -- that's why SQLFluff is unable to write out the updated file.\nI added this line to the first section of your `.sqlfluff`, and now it seems to work. I'll look into changing the behavior of `sqlfluff fix` so it doesn't erase the file when it fails.\r\n\r\n```\r\nencoding = utf-8\r\n```\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/src/sqlfluff/core/linter/linted_file.py\"\n]\nRelevant symbols: [\n  \"LintedFile.persist_tree\"\n]\nBug analysis: The persist_tree method opens files in write mode without safely handling encoding errors. When chardet incorrectly detects encoding as Windows-1252 but the file contains Unicode characters like '\u2192', the write operation fails with UnicodeEncodeError after already truncating the original file.\nExploration notes: The encoding detection happens in get_encoding() from file_helpers.py using chardet.detect(). The fix should implement safe file replacement that doesn't truncate the original until the write operation succeeds, similar to the test_safe_create_replace_file pattern mentioned in test targets.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Looking at this problem, I need to understand what's happening when SQLFluff tries to fix a file but encounters a Unicode encoding error.\n\n<think>\n1. What is the code SUPPOSED to do? \n   The `persist_tree` method should save the corrected SQL file back to disk after SQLFluff has applied fixes. It should detect the correct encoding and write the file safely without data loss.\n\n2. What goes wrong and under what condition?\n   When chardet incorrectly detects the encoding as Windows-1252 but the file contains Unicode characters like '\u2192', the write operation fails with UnicodeEncodeError. However, since the file was already opened in write mode ('w'), the original file gets truncated/wiped even though the write operation fails.\n\n3. The problem statement and hints indicate:\n   - The file gets wiped when the Unicode error occurs\n   - The encoding detection is faulty (chardet thinks it's Windows-1252 when it should be UTF-8)\n   - A workaround is to manually set encoding=utf-8 in .sqlfluff config\n   - The fix should prevent file erasure when write fails\n\n4. The localization report points to `LintedFile.persist_tree` method and mentions the need for \"safe file replacement that doesn't truncate the original until the write operation succeeds.\"\n\nThis matches my understanding - the issue is that the file is opened in write mode ('w') which truncates immediately, but then the write fails due to encoding issues, leaving an empty file.\n</think>\n\nLet me read the relevant source file to understand the current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WvNC6SPBeZiXwuKnzF6B5A",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/src/sqlfluff/core/linter/linted_file.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WvNC6SPBeZiXwuKnzF6B5A",
+          "content": "[exit_code=0]\n\"\"\"Defines the LintedFile class.\n\nThis holds linting results for a single file, and also\ncontains all of the routines to apply fixes to that file\npost linting.\n\"\"\"\n\nimport os\nimport logging\nfrom typing import (\n    Any,\n    Iterable,\n    List,\n    NamedTuple,\n    Optional,\n    Tuple,\n    Union,\n    cast,\n    Type,\n)\n\nfrom sqlfluff.core.errors import (\n    SQLBaseError,\n    SQLLintError,\n    CheckTuple,\n)\nfrom sqlfluff.core.string_helpers import findall\nfrom sqlfluff.core.templaters import TemplatedFile\n\n# Classes needed only for type checking\nfrom sqlfluff.core.parser.segments.base import BaseSegment, FixPatch\n\nfrom sqlfluff.core.linter.common import NoQaDirective, EnrichedFixPatch\n\n# Instantiate the linter logger\nlinter_logger: logging.Logger = logging.getLogger(\"sqlfluff.linter\")\n\n\nclass LintedFile(NamedTuple):\n    \"\"\"A class to store the idea of a linted file.\"\"\"\n\n    path: str\n    violations: List[SQLBaseError]\n    time_dict: dict\n    tree: Optional[BaseSegment]\n    ignore_mask: List[NoQaDirective]\n    templated_file: TemplatedFile\n    encoding: str\n\n    def check_tuples(self, raise_on_non_linting_violations=True) -> List[CheckTuple]:\n        \"\"\"Make a list of check_tuples.\n\n        This assumes that all the violations found are\n        linting violations (and therefore implement `check_tuple()`).\n        If they don't then this function raises that error.\n        \"\"\"\n        vs: List[CheckTuple] = []\n        v: SQLLintError\n        for v in self.get_violations():\n            if hasattr(v, \"check_tuple\"):\n                vs.append(v.check_tuple())\n            elif raise_on_non_linting_violations:\n                raise v\n        return vs\n\n    def get_violations(\n        self,\n        rules: Optional[Union[str, Tuple[str, ...]]] = None,\n        types: Optional[Union[Type[SQLBaseError], Iterable[Type[SQLBaseError]]]] = None,\n        filter_ignore: bool = True,\n        fixable: bool = None,\n    ) -> list:\n        \"\"\"Get a list of violations, respecting filters and ignore options.\n\n        Optionally now with filters.\n        \"\"\"\n        violations = self.violations\n        # Filter types\n        if types:\n            # If it's a singular type, make it a single item in a tuple\n            # otherwise coerce to tuple normally so that we can use it with\n            # isinstance.\n            if isinstance(types, type) and issubclass(types, SQLBaseError):\n                types = (types,)\n            else:\n                types = tuple(types)  # pragma: no cover TODO?\n            violations = [v for v in violations if isinstance(v, types)]\n        # Filter rules\n        if rules:\n            if isinstance(rules, str):\n                rules = (rules,)\n            else:\n                rules = tuple(rules)\n            violations = [v for v in violations if v.rule_code() in rules]\n        # Filter fixable\n        if fixable is not None:\n            # Assume that fixable is true or false if not None\n            violations = [v for v in violations if v.fixable is fixable]\n        # Filter ignorable violations\n        if filter_ignore:\n            violations = [v for v in violations if not v.ignore]\n            # Ignore any rules in the ignore mask\n            if self.ignore_mask:\n                violations = self.ignore_masked_violations(violations, self.ignore_mask)\n        return violations\n\n    @staticmethod\n    def _ignore_masked_violations_single_line(\n        violations: List[SQLBaseError], ignore_mask: List[NoQaDirective]\n    ):\n        \"\"\"Returns whether to ignore error for line-specific directives.\n\n        The \"ignore\" list is assumed to ONLY contain NoQaDirectives with\n        action=None.\n        \"\"\"\n        for ignore in ignore_mask:\n            violations = [\n                v\n                for v in violations\n                if not (\n                    v.line_no == ignore.line_no\n                    and (ignore.rules is None or v.rule_code() in ignore.rules)\n                )\n            ]\n        return violations\n\n    @staticmethod\n    def _should_ignore_violation_line_range(\n        line_no: int, ignore_rule: List[NoQaDirective]\n    ):\n        \"\"\"Returns whether to ignore a violation at line_no.\"\"\"\n        # Loop through the NoQaDirectives to find the state of things at\n        # line_no. Assumptions about \"ignore_rule\":\n        # - Contains directives for only ONE RULE, i.e. the rule that was\n        #   violated at line_no\n        # - Sorted in ascending order by line number\n        disable = False\n        for ignore in ignore_rule:\n            if ignore.line_no > line_no:\n                break\n            disable = ignore.action == \"disable\"\n        return disable\n\n    @classmethod\n    def _ignore_masked_violations_line_range(\n        cls, violations: List[SQLBaseError], ignore_mask: List[NoQaDirective]\n    ):\n        \"\"\"Returns whether to ignore error for line-range directives.\n\n        The \"ignore\" list is assumed to ONLY contain NoQaDirectives where\n        action is \"enable\" or \"disable\".\n\n...[truncated]...\n_idx = patch.source_slice.stop\n        # Add a tail slice.\n        if source_idx < len(self.templated_file.source_str):\n            slice_buff.append(slice(source_idx, len(self.templated_file.source_str)))\n\n        linter_logger.debug(\"Final slice buffer: %s\", slice_buff)\n\n        # Iterate through the patches, building up the new string.\n        str_buff = \"\"\n        for source_slice in slice_buff:\n            # Is it one in the patch buffer:\n            for patch in filtered_source_patches:\n                if patch.source_slice == source_slice:\n                    # Use the patched version\n                    linter_logger.debug(\n                        \"%-30s    %s    %r > %r\",\n                        f\"Appending {patch.patch_category} Patch:\",\n                        patch.source_slice,\n                        patch.source_str,\n                        patch.fixed_raw,\n                    )\n                    str_buff += patch.fixed_raw\n                    break\n            else:\n                # Use the raw string\n                linter_logger.debug(\n                    \"Appending Raw:                    %s     %r\",\n                    source_slice,\n                    self.templated_file.source_str[source_slice],\n                )\n                str_buff += self.templated_file.source_str[source_slice]\n\n        # The success metric here is whether anything ACTUALLY changed.\n        return str_buff, str_buff != original_source\n\n    def persist_tree(self, suffix: str = \"\") -> bool:\n        \"\"\"Persist changes to the given path.\"\"\"\n        write_buff, success = self.fix_string()\n\n        if success:\n            fname = self.path\n            # If there is a suffix specified, then use it.s\n            if suffix:\n                root, ext = os.path.splitext(fname)\n                fname = root + suffix + ext\n            # Actually write the file.\n            with open(fname, \"w\", encoding=self.encoding) as f:\n                f.write(write_buff)\n        return success"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the issue. Let me look at the `persist_tree` method more closely. The problem is in the last few lines where the file is opened with 'w' mode, which truncates the file immediately, and then the write operation can fail with a Unicode error.\n\n<think>\n1. Root cause check:\n   The buggy lines are:\n   ```python\n   # Actually write the file.\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   ```\n   This matches the bug analysis exactly - the file is opened in write mode which truncates immediately, then write fails due to encoding issues.\n\n2. Downstream contract check:\n   Looking at the 5 lines after the buggy lines:\n   ```python\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   return success\n   ```\n   There are only 2 lines after, then the function returns. No variables are used downstream from this write operation, so changing the write mechanism shouldn't affect anything downstream.\n\n3. Simplicity check:\n   The minimal fix would be to use a temporary file approach - write to a temporary file first, then only replace the original if the write succeeds. This is the standard safe file replacement pattern.\n\n4. Completeness check:\n   Only the file writing section needs to change - the `with open(fname, \"w\", encoding=self.encoding) as f:` and `f.write(write_buff)` lines need to be replaced with a safe file replacement approach.\n</think>\n\nLet me also check if there are any imports I need to understand for implementing a safe file replacement:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KXgNqaNWd7kajxA1tpNvNv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"import.*tempfile\\|import.*shutil\" /testbed/src/sqlfluff/core/linter/linted_file.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KXgNqaNWd7kajxA1tpNvNv",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check what imports are available at the top of the file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012vypK6b2LBHt8bqMSS5iXG",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 20 \"^import\\|^from\" /testbed/src/sqlfluff/core/linter/linted_file.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012vypK6b2LBHt8bqMSS5iXG",
+          "content": "[exit_code=0]\nimport os\nimport logging\nfrom typing import (\n    Any,\n    Iterable,\n    List,\n    NamedTuple,\n    Optional,\n    Tuple,\n    Union,\n    cast,\n    Type,\n)\n\nfrom sqlfluff.core.errors import (\n    SQLBaseError,\n    SQLLintError,\n    CheckTuple,\n)\nfrom sqlfluff.core.string_helpers import findall\nfrom sqlfluff.core.templaters import TemplatedFile\n\n# Classes needed only for type checking\nfrom sqlfluff.core.parser.segments.base import BaseSegment, FixPatch\n\nfrom sqlfluff.core.linter.common import NoQaDirective, EnrichedFixPatch\n\n# Instantiate the linter logger\nlinter_logger: logging.Logger = logging.getLogger(\"sqlfluff.linter\")"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check if there are any existing safe file handling patterns in the codebase:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014M6Ze7RCa1bpaWZvxmkVXa",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -r \"tempfile\\|NamedTemporaryFile\" /testbed/src/sqlfluff --include=\"*.py\" | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014M6Ze7RCa1bpaWZvxmkVXa",
+          "content": "[exit_code=0]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check for any file handling utilities:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Kv41o8r2s11VM4GX7eBJDJ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed/src/sqlfluff -name \"*file*\" -type f | grep -v __pycache__ | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Kv41o8r2s11VM4GX7eBJDJ",
+          "content": "[exit_code=0]\n/testbed/src/sqlfluff/core/file_helpers.py\n/testbed/src/sqlfluff/core/linter/linted_file.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check the file_helpers.py to see if there are existing safe file handling utilities:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BariKmXsFvwjmE3iF7BYHw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 10 -B 5 \"def.*write\\|def.*save\\|def.*persist\" /testbed/src/sqlfluff/core/file_helpers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BariKmXsFvwjmE3iF7BYHw",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I have enough information to propose a solution. The issue is that the current `persist_tree` method opens the file in write mode ('w') which immediately truncates it, and then if the write operation fails due to encoding issues, the original file is lost.\n\n<think>\n1. Root cause check:\n   The buggy lines are:\n   ```python\n   # Actually write the file.\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   ```\n   This exactly matches the bug analysis - file opened in 'w' mode truncates immediately, then write can fail with UnicodeEncodeError.\n\n2. Downstream contract check:\n   The 5 lines after the buggy line are:\n   ```python\n   with open(fname, \"w\", encoding=self.encoding) as f:\n       f.write(write_buff)\n   return success\n   ```\n   Actually there are only 2 lines total, then return. No variables are used downstream, so changing the write mechanism won't affect any downstream code. The function still returns the same `success` boolean.\n\n3. Simplicity check:\n   The minimal solution is to use atomic file replacement - write to a temporary file first, then only move it to replace the original if the write succeeds. This requires importing `tempfile` and `shutil`.\n\n4. Completeness check:\n   The lines that need to change are:\n   1. Add imports for tempfile and shutil at the top\n   2. Replace the `with open(fname, \"w\", encoding=self.encoding) as f:` line\n   3. Replace the `f.write(write_buff)` line\n   4. Add error handling and atomic replacement logic\n</think>\n\n```json\n{\n  \"files_to_modify\": [\n    \"/testbed/src/sqlfluff/core/linter/linted_file.py\"\n  ],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/src/sqlfluff/core/linter/linted_file.py\",\n      \"location\": \"imports section, around line 8\",\n      \"change\": \"Add import tempfile and import shutil after the existing import os line\",\n      \"rationale\": \"Need tempfile.NamedTemporaryFile for safe temporary file creation and shutil.move for atomic file replacement\"\n    },\n    {\n      \"file\": \"/testbed/src/sqlfluff/core/linter/linted_file.py\", \n      \"location\": \"LintedFile.persist_tree method, around line 635\",\n      \"change\": \"Replace the file writing block: 1. with open(fname, \\\"w\\\", encoding=self.encoding) as f: f.write(write_buff) with safe atomic replacement: import tempfile; import shutil at top, then: try: with tempfile.NamedTemporaryFile(mode='w', encoding=self.encoding, delete=False, dir=os.path.dirname(fname)) as temp_file: temp_file.write(write_buff); temp_file.flush(); shutil.move(temp_file.name, fname) except (UnicodeEncodeError, OSError) as e: # Clean up temp file if it exists; if 'temp_file' in locals() and os.path.exists(temp_file.name): os.unlink(temp_file.name); linter_logger.error(f\\\"Failed to write file {fname}: {e}\\\"); return False\",\n      \"rationale\": \"This implements safe atomic file replacement that prevents data loss. The temporary file is written first, and only if successful is it moved to replace the original. If encoding or other write errors occur, the original file remains untouched and the temporary file is cleaned up.\"\n    }\n  ],\n  \"fix_strategy\": \"Replace the unsafe direct file write with atomic file replacement using a temporary file. This ensures the original file is never truncated until we know the write operation will succeed, preventing data loss when Unicode encoding errors occur.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-12T00:23:40Z"
+}
