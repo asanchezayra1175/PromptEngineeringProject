@@ -1,0 +1,269 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-14092",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py\nindex 1d278b6e1..146edbb74 100644\n--- a/sklearn/neighbors/nca.py\n+++ b/sklearn/neighbors/nca.py\n@@ -10,6 +10,7 @@ Neighborhood Component Analysis\n from __future__ import print_function\n \n from warnings import warn\n+import numbers\n import numpy as np\n import sys\n import time\n@@ -299,7 +300,7 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n \n         # Check the preferred dimensionality of the projected space\n         if self.n_components is not None:\n-            check_scalar(self.n_components, 'n_components', int, 1)\n+            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n \n             if self.n_components > X.shape[1]:\n                 raise ValueError('The preferred dimensionality of the '\n@@ -318,9 +319,9 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n                                  .format(X.shape[1],\n                                          self.components_.shape[1]))\n \n-        check_scalar(self.max_iter, 'max_iter', int, 1)\n-        check_scalar(self.tol, 'tol', float, 0.)\n-        check_scalar(self.verbose, 'verbose', int, 0)\n+        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n+        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n+        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n \n         if self.callback is not None:\n             if not callable(self.callback):",
+  "implementation_notes": "Added import numbers module and replaced strict type checks (int, float) with flexible numeric abstract base classes (numbers.Integral, numbers.Real) in the _validate_params method of NeighborhoodComponentsAnalysis. This allows the estimator to accept compatible numeric types from GridSearch (e.g., numpy.int64, int where float is expected) while maintaining validation constraints.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>scikit-learn__scikit-learn-14092</instance_id>\n\n<problem_statement>\nNCA fails in GridSearch due to too strict parameter checks\nNCA checks its parameters to have a specific type, which can easily fail in a GridSearch due to how param grid is made.\r\n\r\nHere is an example:\r\n```python\r\nimport numpy as np\r\n\r\nfrom sklearn.pipeline import Pipeline\r\nfrom sklearn.model_selection import GridSearchCV\r\nfrom sklearn.neighbors import NeighborhoodComponentsAnalysis\r\nfrom sklearn.neighbors import KNeighborsClassifier\r\n\r\nX = np.random.random_sample((100, 10))\r\ny = np.random.randint(2, size=100)\r\n\r\nnca = NeighborhoodComponentsAnalysis()\r\nknn = KNeighborsClassifier()\r\n\r\npipe = Pipeline([('nca', nca),\r\n                 ('knn', knn)])\r\n                \r\nparams = {'nca__tol': [0.1, 0.5, 1],\r\n          'nca__n_components': np.arange(1, 10)}\r\n          \r\ngs = GridSearchCV(estimator=pipe, param_grid=params, error_score='raise')\r\ngs.fit(X,y)\r\n```\r\n\r\nThe issue is that for `tol`: 1 is not a float, and for  `n_components`: np.int64 is not int\r\n\r\nBefore proposing a fix for this specific situation, I'd like to have your general opinion about parameter checking.  \r\nI like this idea of common parameter checking tool introduced with the NCA PR. What do you think about extending it across the code-base (or at least for new or recent estimators) ?\r\n\r\nCurrently parameter checking is not always done or often partially done, and is quite redundant. For instance, here is the input validation of lda:\r\n```python\r\ndef _check_params(self):\r\n        \"\"\"Check model parameters.\"\"\"\r\n        if self.n_components <= 0:\r\n            raise ValueError(\"Invalid 'n_components' parameter: %r\"\r\n                             % self.n_components)\r\n\r\n        if self.total_samples <= 0:\r\n            raise ValueError(\"Invalid 'total_samples' parameter: %r\"\r\n                             % self.total_samples)\r\n\r\n        if self.learning_offset < 0:\r\n            raise ValueError(\"Invalid 'learning_offset' parameter: %r\"\r\n                             % self.learning_offset)\r\n\r\n        if self.learning_method not in (\"batch\", \"online\"):\r\n            raise ValueError(\"Invalid 'learning_method' parameter: %r\"\r\n                             % self.learning_method)\r\n```\r\nmost params aren't checked and for those who are there's a lot of duplicated code.\r\n\r\nA propose to be upgrade the new tool to be able to check open/closed intervals (currently only closed) and list membership.\r\n\r\nThe api would be something like that:\r\n```\r\ncheck_param(param, name, valid_options)\r\n```\r\nwhere valid_options would be a dict of `type: constraint`. e.g for the `beta_loss` param of `NMF`, it can be either a float or a string in a list, which would give\r\n```\r\nvalid_options = {numbers.Real: None,  # None for no constraint\r\n                 str: ['frobenius', 'kullback-leibler', 'itakura-saito']}\r\n```\r\nSometimes a parameter can only be positive or within a given interval, e.g. `l1_ratio` of `LogisticRegression` must be between 0 and 1, which would give\r\n```\r\nvalid_options = {numbers.Real: Interval(0, 1, closed='both')}\r\n```\r\npositivity of e.g. `max_iter` would be `numbers.Integral: Interval(left=1)`.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _validate_params method in NeighborhoodComponentsAnalysis uses check_scalar with strict type checking that requires exact type matches. When GridSearch passes parameters like tol=1 (int instead of float) or n_components=np.int64(5) (numpy int instead of Python int), the isinstance checks in check_scalar fail and raise TypeError exceptions.\nExploration notes: The problematic calls are at lines 302 (n_components), 321 (max_iter), and 322 (tol) in nca.py. Each uses check_scalar from sklearn.utils.validation which performs strict isinstance(x, target_type) checks. The check_scalar function is defined in sklearn/utils/validation.py around line 944. GridSearch creates parameter grids that may contain compatible but not identical numeric types, causing these strict checks to fail.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Replace strict built-in type checks (int, float) with flexible numeric abstract base classes (numbers.Integral, numbers.Real) to accept compatible numeric types from GridSearch while maintaining the same validation logic\n\nFiles to modify: [\n  \"/testbed/sklearn/neighbors/nca.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sklearn/neighbors/nca.py\n  Location: _validate_params method, import section\n  Change  : REPLACE line 14:\n  from warnings import warn\nWITH:\n  from warnings import warn\n  import numbers\n  Rationale: Add numbers module import to use numbers.Integral and numbers.Real for more flexible numeric type checking\n\nChange 2:\n  File    : /testbed/sklearn/neighbors/nca.py\n  Location: _validate_params method, line 302\n  Change  : REPLACE line 302:\n            check_scalar(self.n_components, 'n_components', int, 1)\nWITH:\n            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n  Rationale: Use numbers.Integral instead of int to accept compatible integer types like numpy.int64\n\nChange 3:\n  File    : /testbed/sklearn/neighbors/nca.py\n  Location: _validate_params method, line 321\n  Change  : REPLACE line 321:\n        check_scalar(self.max_iter, 'max_iter', int, 1)\nWITH:\n        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n  Rationale: Use numbers.Integral instead of int to accept compatible integer types from GridSearch\n\nChange 4:\n  File    : /testbed/sklearn/neighbors/nca.py\n  Location: _validate_params method, line 322\n  Change  : REPLACE line 322:\n        check_scalar(self.tol, 'tol', float, 0.)\nWITH:\n        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n  Rationale: Use numbers.Real instead of float to accept compatible numeric types like int from GridSearch\n\nChange 5:\n  File    : /testbed/sklearn/neighbors/nca.py\n  Location: _validate_params method, line 323\n  Change  : REPLACE line 323:\n        check_scalar(self.verbose, 'verbose', int, 0)\nWITH:\n        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n  Rationale: Use numbers.Integral instead of int to accept compatible integer types from GridSearch\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the proposed changes to fix the NCA parameter validation issue. Let me start by reading the file.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01ACQ7YyDs6Lk85SJYka2W4q",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ACQ7YyDs6Lk85SJYka2W4q",
+          "content": "[exit_code=0]\n# coding: utf-8\n\"\"\"\nNeighborhood Component Analysis\n\"\"\"\n\n# Authors: William de Vazelhes <wdevazelhes@gmail.com>\n#          John Chiotellis <ioannis.chiotellis@in.tum.de>\n# License: BSD 3 clause\n\nfrom __future__ import print_function\n\nfrom warnings import warn\nimport numpy as np\nimport sys\nimport time\nfrom scipy.optimize import minimize\nfrom ..utils.extmath import softmax\nfrom ..metrics import pairwise_distances\nfrom ..base import BaseEstimator, TransformerMixin\nfrom ..preprocessing import LabelEncoder\nfrom ..decomposition import PCA\nfrom ..utils.multiclass import check_classification_targets\nfrom ..utils.random import check_random_state\nfrom ..utils.validation import (check_is_fitted, check_array, check_X_y,\n                                check_scalar)\nfrom ..exceptions import ConvergenceWarning\n\n\nclass NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n    \"\"\"Neighborhood Components Analysis\n\n    Neighborhood Component Analysis (NCA) is a machine learning algorithm for\n    metric learning. It learns a linear transformation in a supervised fashion\n    to improve the classification accuracy of a stochastic nearest neighbors\n    rule in the transformed space.\n\n    Read more in the :ref:`User Guide <nca>`.\n\n    Parameters\n    ----------\n    n_components : int, optional (default=None)\n        Preferred dimensionality of the projected space.\n        If None it will be set to ``n_features``.\n\n    init : string or numpy array, optional (default='auto')\n        Initialization of the linear transformation. Possible options are\n        'auto', 'pca', 'lda', 'identity', 'random', and a numpy array of shape\n        (n_features_a, n_features_b).\n\n        'auto'\n            Depending on ``n_components``, the most reasonable initialization\n            will be chosen. If ``n_components <= n_classes`` we use 'lda', as\n            it uses labels information. If not, but\n            ``n_components < min(n_features, n_samples)``, we use 'pca', as\n            it projects data in meaningful directions (those of higher\n            variance). Otherwise, we just use 'identity'.\n\n        'pca'\n            ``n_components`` principal components of the inputs passed\n            to :meth:`fit` will be used to initialize the transformation.\n            (See `decomposition.PCA`)\n\n        'lda'\n            ``min(n_components, n_classes)`` most discriminative\n            components of the inputs passed to :meth:`fit` will be used to\n            initialize the transformation. (If ``n_components > n_classes``,\n            the rest of the components will be zero.) (See\n            `discriminant_analysis.LinearDiscriminantAnalysis`)\n\n        'identity'\n            If ``n_components`` is strictly smaller than the\n            dimensionality of the inputs passed to :meth:`fit`, the identity\n            matrix will be truncated to the first ``n_components`` rows.\n\n        'random'\n            The initial transformation will be a random array of shape\n            `(n_components, n_features)`. Each value is sampled from the\n            standard normal distribution.\n\n        numpy array\n            n_features_b must match the dimensionality of the inputs passed to\n            :meth:`fit` and n_features_a must be less than or equal to that.\n            If ``n_components`` is not None, n_features_a must match it.\n\n    warm_start : bool, optional, (default=False)\n        If True and :meth:`fit` has been called before, the solution of the\n        previous call to :meth:`fit` is used as the initial linear\n        transformation (``n_components`` and ``init`` will be ignored).\n\n    max_iter : int, optional (default=50)\n        Maximum number of iterations in the optimization.\n\n    tol : float, optional (default=1e-5)\n        Convergence tolerance for the optimization.\n\n    callback : callable, optional (default=None)\n        If not None, this function is called after every iteration of the\n        optimizer, taking as arguments the current solution (flattened\n        transformation matrix) and the number of iterations. This might be\n        useful in case one wants to examine or store the transformation\n        found after each iteration.\n\n    verbose : int, optional (default=0)\n        If 0, no progress messages will be printed.\n        If 1, progress messages will be printed to stdout.\n        If > 1, progress messages will be printed and the ``disp``\n        parameter of :func:`scipy.optimize.minimize` will be set to\n        ``verbose - 2``.\n\n    random_state : int or numpy.RandomState or None, optional (default=None)\n        A pseudo random number generator object or a seed for it if int. If\n        ``init='random'``, ``random_state`` is used to initialize the random\n        transformation. If ``init='pca'``, ``random_state`` is passed as an\n        argument to PCA when initializing the transformation.\n\n    Attributes\n    ----------\n    components_ : array, shape (n_components, n_features)\n        The linear transformation learned during \n...[truncated]...\noat\n            The loss computed for the given transformation.\n\n        gradient : array, shape (n_components * n_features,)\n            The new (flattened) gradient of the loss.\n        \"\"\"\n\n        if self.n_iter_ == 0:\n            self.n_iter_ += 1\n            if self.verbose:\n                header_fields = ['Iteration', 'Objective Value', 'Time(s)']\n                header_fmt = '{:>10} {:>20} {:>10}'\n                header = header_fmt.format(*header_fields)\n                cls_name = self.__class__.__name__\n                print('[{}]'.format(cls_name))\n                print('[{}] {}\\n[{}] {}'.format(cls_name, header,\n                                                cls_name, '-' * len(header)))\n\n        t_funcall = time.time()\n\n        transformation = transformation.reshape(-1, X.shape[1])\n        X_embedded = np.dot(X, transformation.T)  # (n_samples, n_components)\n\n        # Compute softmax distances\n        p_ij = pairwise_distances(X_embedded, squared=True)\n        np.fill_diagonal(p_ij, np.inf)\n        p_ij = softmax(-p_ij)  # (n_samples, n_samples)\n\n        # Compute loss\n        masked_p_ij = p_ij * same_class_mask\n        p = np.sum(masked_p_ij, axis=1, keepdims=True)  # (n_samples, 1)\n        loss = np.sum(p)\n\n        # Compute gradient of loss w.r.t. `transform`\n        weighted_p_ij = masked_p_ij - p_ij * p\n        weighted_p_ij_sym = weighted_p_ij + weighted_p_ij.T\n        np.fill_diagonal(weighted_p_ij_sym, -weighted_p_ij.sum(axis=0))\n        gradient = 2 * X_embedded.T.dot(weighted_p_ij_sym).dot(X)\n        # time complexity of the gradient: O(n_components x n_samples x (\n        # n_samples + n_features))\n\n        if self.verbose:\n            t_funcall = time.time() - t_funcall\n            values_fmt = '[{}] {:>10} {:>20.6e} {:>10.2f}'\n            print(values_fmt.format(self.__class__.__name__, self.n_iter_,\n                                    loss, t_funcall))\n            sys.stdout.flush()\n\n        return sign * loss, sign * gradient.ravel()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me see the _validate_params method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DfemoV6PLvEBxBNwAFGVkD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"_validate_params\" /testbed/sklearn/neighbors/nca.py | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DfemoV6PLvEBxBNwAFGVkD",
+          "content": "[exit_code=0]\n189:        X, y, init = self._validate_params(X, y)\n262:    def _validate_params(self, X, y):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01MayoeUc6kaWC8nHEywraJk",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '262,350p' /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MayoeUc6kaWC8nHEywraJk",
+          "content": "[exit_code=0]\ndef _validate_params(self, X, y):\n        \"\"\"Validate parameters as soon as :meth:`fit` is called.\n\n        Parameters\n        ----------\n        X : array-like, shape (n_samples, n_features)\n            The training samples.\n\n        y : array-like, shape (n_samples,)\n            The corresponding training labels.\n\n        Returns\n        -------\n        X : array, shape (n_samples, n_features)\n            The validated training samples.\n\n        y : array, shape (n_samples,)\n            The validated training labels, encoded to be integers in\n            the range(0, n_classes).\n\n        init : string or numpy array of shape (n_features_a, n_features_b)\n            The validated initialization of the linear transformation.\n\n        Raises\n        -------\n        TypeError\n            If a parameter is not an instance of the desired type.\n\n        ValueError\n            If a parameter's value violates its legal value range or if the\n            combination of two or more given parameters is incompatible.\n        \"\"\"\n\n        # Validate the inputs X and y, and converts y to numerical classes.\n        X, y = check_X_y(X, y, ensure_min_samples=2)\n        check_classification_targets(y)\n        y = LabelEncoder().fit_transform(y)\n\n        # Check the preferred dimensionality of the projected space\n        if self.n_components is not None:\n            check_scalar(self.n_components, 'n_components', int, 1)\n\n            if self.n_components > X.shape[1]:\n                raise ValueError('The preferred dimensionality of the '\n                                 'projected space `n_components` ({}) cannot '\n                                 'be greater than the given data '\n                                 'dimensionality ({})!'\n                                 .format(self.n_components, X.shape[1]))\n\n        # If warm_start is enabled, check that the inputs are consistent\n        check_scalar(self.warm_start, 'warm_start', bool)\n        if self.warm_start and hasattr(self, 'components_'):\n            if self.components_.shape[1] != X.shape[1]:\n                raise ValueError('The new inputs dimensionality ({}) does not '\n                                 'match the input dimensionality of the '\n                                 'previously learned transformation ({}).'\n                                 .format(X.shape[1],\n                                         self.components_.shape[1]))\n\n        check_scalar(self.max_iter, 'max_iter', int, 1)\n        check_scalar(self.tol, 'tol', float, 0.)\n        check_scalar(self.verbose, 'verbose', int, 0)\n\n        if self.callback is not None:\n            if not callable(self.callback):\n                raise ValueError('`callback` is not callable.')\n\n        # Check how the linear transformation should be initialized\n        init = self.init\n\n        if isinstance(init, np.ndarray):\n            init = check_array(init)\n\n            # Assert that init.shape[1] = X.shape[1]\n            if init.shape[1] != X.shape[1]:\n                raise ValueError(\n                    'The input dimensionality ({}) of the given '\n                    'linear transformation `init` must match the '\n                    'dimensionality of the given inputs `X` ({}).'\n                    .format(init.shape[1], X.shape[1]))\n\n            # Assert that init.shape[0] <= init.shape[1]\n            if init.shape[0] > init.shape[1]:\n                raise ValueError(\n                    'The output dimensionality ({}) of the given '\n                    'linear transformation `init` cannot be '\n                    'greater than its input dimensionality ({}).'\n                    .format(init.shape[0], init.shape[1]))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me see the current imports at the top of the file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UPNGDC496GVCgJ754MhbTp",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '1,30p' /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UPNGDC496GVCgJ754MhbTp",
+          "content": "[exit_code=0]\n# coding: utf-8\n\"\"\"\nNeighborhood Component Analysis\n\"\"\"\n\n# Authors: William de Vazelhes <wdevazelhes@gmail.com>\n#          John Chiotellis <ioannis.chiotellis@in.tum.de>\n# License: BSD 3 clause\n\nfrom __future__ import print_function\n\nfrom warnings import warn\nimport numpy as np\nimport sys\nimport time\nfrom scipy.optimize import minimize\nfrom ..utils.extmath import softmax\nfrom ..metrics import pairwise_distances\nfrom ..base import BaseEstimator, TransformerMixin\nfrom ..preprocessing import LabelEncoder\nfrom ..decomposition import PCA\nfrom ..utils.multiclass import check_classification_targets\nfrom ..utils.random import check_random_state\nfrom ..utils.validation import (check_is_fitted, check_array, check_X_y,\n                                check_scalar)\nfrom ..exceptions import ConvergenceWarning\n\n\nclass NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n    \"\"\"Neighborhood Components Analysis"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the file structure. Let me apply the changes according to the proposal:\n\n1. First, add the `numbers` import to the imports section\n2. Update the check_scalar calls to use `numbers.Integral` and `numbers.Real`\n\nLet me apply the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01B9rQK6AXK5A4U6mpD9kn3Z",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_nca.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/sklearn/neighbors/nca.py', 'r') as f:\n    content = f.read()\n\n# Change 1: Add import numbers after line 11 (from warnings import warn)\nlines = content.split('\\n')\nnew_lines = []\nfor i, line in enumerate(lines):\n    new_lines.append(line)\n    # After the line \"from warnings import warn\", add \"import numbers\"\n    if line == 'from warnings import warn':\n        new_lines.append('import numbers')\n\ncontent = '\\n'.join(new_lines)\n\n# Change 2-5: Replace the check_scalar calls\n# Line 302: check_scalar(self.n_components, 'n_components', int, 1)\ncontent = content.replace(\n    \"check_scalar(self.n_components, 'n_components', int, 1)\",\n    \"check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\"\n)\n\n# Line 321: check_scalar(self.max_iter, 'max_iter', int, 1)\ncontent = content.replace(\n    \"check_scalar(self.max_iter, 'max_iter', int, 1)\",\n    \"check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\"\n)\n\n# Line 322: check_scalar(self.tol, 'tol', float, 0.)\ncontent = content.replace(\n    \"check_scalar(self.tol, 'tol', float, 0.)\",\n    \"check_scalar(self.tol, 'tol', numbers.Real, 0.)\"\n)\n\n# Line 323: check_scalar(self.verbose, 'verbose', int, 0)\ncontent = content.replace(\n    \"check_scalar(self.verbose, 'verbose', int, 0)\",\n    \"check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\"\n)\n\n# Write the file back\nwith open('/testbed/sklearn/neighbors/nca.py', 'w') as f:\n    f.write(content)\n\nprint(\"Changes applied successfully!\")\nEOF\npython /tmp/fix_nca.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01B9rQK6AXK5A4U6mpD9kn3Z",
+          "content": "[exit_code=0]\nChanges applied successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes were applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Mj2JLA9aJqKnfhWuWJxMiV",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '1,30p' /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Mj2JLA9aJqKnfhWuWJxMiV",
+          "content": "[exit_code=0]\n# coding: utf-8\n\"\"\"\nNeighborhood Component Analysis\n\"\"\"\n\n# Authors: William de Vazelhes <wdevazelhes@gmail.com>\n#          John Chiotellis <ioannis.chiotellis@in.tum.de>\n# License: BSD 3 clause\n\nfrom __future__ import print_function\n\nfrom warnings import warn\nimport numbers\nimport numpy as np\nimport sys\nimport time\nfrom scipy.optimize import minimize\nfrom ..utils.extmath import softmax\nfrom ..metrics import pairwise_distances\nfrom ..base import BaseEstimator, TransformerMixin\nfrom ..preprocessing import LabelEncoder\nfrom ..decomposition import PCA\nfrom ..utils.multiclass import check_classification_targets\nfrom ..utils.random import check_random_state\nfrom ..utils.validation import (check_is_fitted, check_array, check_X_y,\n                                check_scalar)\nfrom ..exceptions import ConvergenceWarning\n\n\nclass NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me verify the check_scalar calls were updated:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Ugkj2oubJ9rkwnitNrYocU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '295,330p' /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Ugkj2oubJ9rkwnitNrYocU",
+          "content": "[exit_code=0]\n# Validate the inputs X and y, and converts y to numerical classes.\n        X, y = check_X_y(X, y, ensure_min_samples=2)\n        check_classification_targets(y)\n        y = LabelEncoder().fit_transform(y)\n\n        # Check the preferred dimensionality of the projected space\n        if self.n_components is not None:\n            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n\n            if self.n_components > X.shape[1]:\n                raise ValueError('The preferred dimensionality of the '\n                                 'projected space `n_components` ({}) cannot '\n                                 'be greater than the given data '\n                                 'dimensionality ({})!'\n                                 .format(self.n_components, X.shape[1]))\n\n        # If warm_start is enabled, check that the inputs are consistent\n        check_scalar(self.warm_start, 'warm_start', bool)\n        if self.warm_start and hasattr(self, 'components_'):\n            if self.components_.shape[1] != X.shape[1]:\n                raise ValueError('The new inputs dimensionality ({}) does not '\n                                 'match the input dimensionality of the '\n                                 'previously learned transformation ({}).'\n                                 .format(X.shape[1],\n                                         self.components_.shape[1]))\n\n        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n\n        if self.callback is not None:\n            if not callable(self.callback):\n                raise ValueError('`callback` is not callable.')\n\n        # Check how the linear transformation should be initialized"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! All changes have been applied correctly. Now let me run git diff to verify the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0151GdKScZ5RXNoV1zqkHH7w",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0151GdKScZ5RXNoV1zqkHH7w",
+          "content": "[exit_code=0]\ndiff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py\nindex 1d278b6e1..146edbb74 100644\n--- a/sklearn/neighbors/nca.py\n+++ b/sklearn/neighbors/nca.py\n@@ -10,6 +10,7 @@ Neighborhood Component Analysis\n from __future__ import print_function\n \n from warnings import warn\n+import numbers\n import numpy as np\n import sys\n import time\n@@ -299,7 +300,7 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n \n         # Check the preferred dimensionality of the projected space\n         if self.n_components is not None:\n-            check_scalar(self.n_components, 'n_components', int, 1)\n+            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n \n             if self.n_components > X.shape[1]:\n                 raise ValueError('The preferred dimensionality of the '\n@@ -318,9 +319,9 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n                                  .format(X.shape[1],\n                                          self.components_.shape[1]))\n \n-        check_scalar(self.max_iter, 'max_iter', int, 1)\n-        check_scalar(self.tol, 'tol', float, 0.)\n-        check_scalar(self.verbose, 'verbose', int, 0)\n+        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n+        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n+        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n \n         if self.callback is not None:\n             if not callable(self.callback):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly what was expected:\n1. Added `import numbers` after the `from warnings import warn` line\n2. Changed `int` to `numbers.Integral` for `n_components`, `max_iter`, and `verbose`\n3. Changed `float` to `numbers.Real` for `tol`\n\nThese changes allow the NCA estimator to accept compatible numeric types (like numpy integers and integers passed from GridSearch) while maintaining the same validation logic.\n\n```json\n{\n  \"patch\": \"diff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py\\nindex 1d278b6e1..146edbb74 100644\\n--- a/sklearn/neighbors/nca.py\\n+++ b/sklearn/neighbors/nca.py\\n@@ -10,6 +10,7 @@ Neighborhood Component Analysis\\n from __future__ import print_function\\n \\n from warnings import warn\\n+import numbers\\n import numpy as np\\n import sys\\n import time\\n@@ -299,7 +300,7 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\\n \\n         # Check the preferred dimensionality of the projected space\\n         if self.n_components is not None:\\n-            check_scalar(self.n_components, 'n_components', int, 1)\\n+            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\\n \\n             if self.n_components > X.shape[1]:\\n                 raise ValueError('The preferred dimensionality of the '\\n@@ -318,9 +319,9 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\\n                                  .format(X.shape[1],\\n                                          self.components_.shape[1]))\\n \\n-        check_scalar(self.max_iter, 'max_iter', int, 1)\\n-        check_scalar(self.tol, 'tol', float, 0.)\\n-        check_scalar(self.verbose, 'verbose', int, 0)\\n+        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\\n+        check_scalar(self.tol, 'tol', numbers.Real, 0.)\\n+        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\\n \\n         if self.callback is not None:\\n             if not callable(self.callback):\",\n  \"implementation_notes\": \"Added import numbers module and replaced strict type checks (int, float) with flexible numeric abstract base classes (numbers.Integral, numbers.Real) in the _validate_params method of NeighborhoodComponentsAnalysis. This allows the estimator to accept compatible numeric types from GridSearch (e.g., numpy.int64, int where float is expected) while maintaining validation constraints.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T17:29:11Z"
+}

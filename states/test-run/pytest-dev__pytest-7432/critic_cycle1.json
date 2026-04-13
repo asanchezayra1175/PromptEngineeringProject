@@ -1,0 +1,121 @@
+{
+  "instance_id": "pytest-dev__pytest-7432",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PD \u2014 Condition boundary",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>pytest-dev__pytest-7432</instance_id>\n\n<problem_statement>\nskipping: --runxfail breaks pytest.mark.skip location reporting\npytest versions: 5.4.x, current master\r\n\r\nWhen `@pytest.mark.skip`/`skipif` marks are used to skip a test, for example\r\n\r\n```py\r\nimport pytest\r\n@pytest.mark.skip\r\ndef test_skip_location() -> None:\r\n    assert 0\r\n```\r\n\r\nthe expected skip location reported should point to the item itself, and this is indeed what happens when running with `pytest -rs`:\r\n\r\n```\r\nSKIPPED [1] test_it.py:3: unconditional skip\r\n```\r\n\r\nHowever, adding `pytest -rs --runxfail` breaks this:\r\n\r\n```\r\nSKIPPED [1] src/_pytest/skipping.py:238: unconditional skip\r\n```\r\n\r\nThe `--runxfail` is only about xfail and should not affect this at all.\r\n\r\n---\r\n\r\nHint: the bug is in `src/_pytest/skipping.py`, the `pytest_runtest_makereport` hook.\n\n</problem_statement>\n\n<hints>\nCan I look into this one?\n@debugduck Sure!\nAwesome! I'll get started on it and open up a PR when I find it. I'm a bit new, so I'm still learning about the code base.\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/src/_pytest/skipping.py\"]\nBug analysis: The pytest_runtest_makereport hook contains an elif chain where --runxfail causes it to take an early branch that bypasses the skip location correction logic. When --runxfail is enabled, the condition on line 316 matches and executes 'pass', preventing the subsequent elif block (lines 325-335) that corrects skip location reporting from executing. This causes skip location to be reported incorrectly as the internal skipping.py file rather than the actual test location.\nExploration notes: The hook is at line 261. The problematic elif chain starts around line 313. Line 316 contains the runxfail condition that short-circuits the logic. Lines 325-335 contain the skip location correction that gets bypassed. The skipped_by_mark_key is set at line 238 in pytest_runtest_setup, which is the incorrect location being reported. The condition at line 325 checks item._store.get(skipped_by_mark_key, True) to identify skips caused by marks.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: The runxfail condition was too broad, catching both xfail and skip cases. Making it specific to xfail cases only allows skip location correction to work properly.\nProposed changes: [\n  {\n    \"file\": \"/testbed/src/_pytest/skipping.py\",\n    \"location\": \"pytest_runtest_makereport, line 273\",\n    \"change\": \"REPLACE line 273:\\n    elif item.config.option.runxfail:\\nWITH:\\n    elif item.config.option.runxfail and xfailed:\",\n    \"rationale\": \"The --runxfail option should only affect xfailed tests, not skipped tests. The current condition is too broad and prevents skip location correction logic from executing. Adding 'and xfailed' makes the condition specific to xfail cases only, allowing the skip location correction logic at lines 294-305 to execute for skipped tests even when --runxfail is enabled.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py\nindex 7bd975e5a..058bf2a38 100644\n--- a/src/_pytest/skipping.py\n+++ b/src/_pytest/skipping.py\n@@ -270,7 +270,7 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):\n         else:\n             rep.longrepr = \"Unexpected success\"\n         rep.outcome = \"failed\"\n-    elif item.config.option.runxfail:\n+    elif item.config.option.runxfail and xfailed:\n         pass  # don't interfere\n     elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):\n         assert call.excinfo.value.msg is not None\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze this patch carefully.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Tk48ZzVhsU9HERSDGmWW8w",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/src/_pytest/skipping.py | head -320"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Tk48ZzVhsU9HERSDGmWW8w",
+          "content": "[exit_code=0]\n1\t\"\"\" support for skip/xfail functions and markers. \"\"\"\n     2\timport os\n     3\timport platform\n     4\timport sys\n     5\timport traceback\n     6\tfrom typing import Generator\n     7\tfrom typing import Optional\n     8\tfrom typing import Tuple\n     9\t\n    10\timport attr\n    11\t\n    12\timport _pytest._code\n    13\tfrom _pytest.compat import TYPE_CHECKING\n    14\tfrom _pytest.config import Config\n    15\tfrom _pytest.config import hookimpl\n    16\tfrom _pytest.config.argparsing import Parser\n    17\tfrom _pytest.mark.structures import Mark\n    18\tfrom _pytest.nodes import Item\n    19\tfrom _pytest.outcomes import fail\n    20\tfrom _pytest.outcomes import skip\n    21\tfrom _pytest.outcomes import xfail\n    22\tfrom _pytest.reports import BaseReport\n    23\tfrom _pytest.runner import CallInfo\n    24\tfrom _pytest.store import StoreKey\n    25\t\n    26\tif TYPE_CHECKING:\n    27\t    from typing import Type\n    28\t\n    29\t\n    30\tdef pytest_addoption(parser: Parser) -> None:\n    31\t    group = parser.getgroup(\"general\")\n    32\t    group.addoption(\n    33\t        \"--runxfail\",\n    34\t        action=\"store_true\",\n    35\t        dest=\"runxfail\",\n    36\t        default=False,\n    37\t        help=\"report the results of xfail tests as if they were not marked\",\n    38\t    )\n    39\t\n    40\t    parser.addini(\n    41\t        \"xfail_strict\",\n    42\t        \"default for the strict parameter of xfail \"\n    43\t        \"markers when not given explicitly (default: False)\",\n    44\t        default=False,\n    45\t        type=\"bool\",\n    46\t    )\n    47\t\n    48\t\n    49\tdef pytest_configure(config: Config) -> None:\n    50\t    if config.option.runxfail:\n    51\t        # yay a hack\n    52\t        import pytest\n    53\t\n    54\t        old = pytest.xfail\n    55\t        config._cleanup.append(lambda: setattr(pytest, \"xfail\", old))\n    56\t\n    57\t        def nop(*args, **kwargs):\n    58\t            pass\n    59\t\n    60\t        nop.Exception = xfail.Exception  # type: ignore[attr-defined] # noqa: F821\n    61\t        setattr(pytest, \"xfail\", nop)\n    62\t\n    63\t    config.addinivalue_line(\n    64\t        \"markers\",\n    65\t        \"skip(reason=None): skip the given test function with an optional reason. \"\n    66\t        'Example: skip(reason=\"no way of currently testing this\") skips the '\n    67\t        \"test.\",\n    68\t    )\n    69\t    config.addinivalue_line(\n    70\t        \"markers\",\n    71\t        \"skipif(condition, ..., *, reason=...): \"\n    72\t        \"skip the given test function if any of the conditions evaluate to True. \"\n    73\t        \"Example: skipif(sys.platform == 'win32') skips the test if we are on the win32 platform. \"\n    74\t        \"See https://docs.pytest.org/en/stable/reference.html#pytest-mark-skipif\",\n    75\t    )\n    76\t    config.addinivalue_line(\n    77\t        \"markers\",\n    78\t        \"xfail(condition, ..., *, reason=..., run=True, raises=None, strict=xfail_strict): \"\n    79\t        \"mark the test function as an expected failure if any of the conditions \"\n    80\t        \"evaluate to True. Optionally specify a reason for better reporting \"\n    81\t        \"and run=False if you don't even want to execute the test function. \"\n    82\t        \"If only specific exception(s) are expected, you can list them in \"\n    83\t        \"raises, and if the test fails in other ways, it will be reported as \"\n    84\t        \"a true failure. See https://docs.pytest.org/en/stable/reference.html#pytest-mark-xfail\",\n    85\t    )\n    86\t\n    87\t\n    88\tdef evaluate_condition(item: Item, mark: Mark, condition: object) -> Tuple[bool, str]:\n    89\t    \"\"\"Evaluate a single skipif/xfail condition.\n    90\t\n    91\t    If an old-style string condition is given, it is eval()'d, otherwise the\n    92\t    condition is bool()'d. If this fails, an appropriately formatted pytest.fail\n    93\t    is raised.\n    94\t\n    95\t    Returns (result, reason). The reason is only relevant if the result is True.\n    96\t    \"\"\"\n    97\t    # String condition.\n    98\t    if isinstance(condition, str):\n    99\t        globals_ = {\n   100\t            \"os\": os,\n   101\t            \"sys\": sys,\n   102\t            \"platform\": platform,\n   103\t            \"config\": item.config,\n   104\t        }\n   105\t        if hasattr(item, \"obj\"):\n   106\t            globals_.update(item.obj.__globals__)  # type: ignore[attr-defined]\n   107\t        try:\n   108\t            condition_code = _pytest._code.compile(condition, mode=\"eval\")\n   109\t            result = eval(condition_code, globals_)\n   110\t        except SyntaxError as exc:\n   111\t            msglines = [\n   112\t                \"Error evaluating %r condition\" % mark.name,\n   113\t                \"    \" + condition,\n   114\t                \"    \" + \" \" * (exc.offset or 0) + \"^\",\n   115\t                \"SyntaxError: invalid syntax\",\n   116\t            ]\n   117\t            fail(\"\\n\".join(msglines), pytrace=False)\n   118\t        except Exception as exc:\n   119\t            msglines = [\n   120\t                \"Error evaluating %r condition\" % mark.name,\n   121\t    \n...[truncated]...\nome = \"failed\"\n   273\t    elif item.config.option.runxfail and xfailed:\n   274\t        pass  # don't interfere\n   275\t    elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):\n   276\t        assert call.excinfo.value.msg is not None\n   277\t        rep.wasxfail = \"reason: \" + call.excinfo.value.msg\n   278\t        rep.outcome = \"skipped\"\n   279\t    elif not rep.skipped and xfailed:\n   280\t        if call.excinfo:\n   281\t            raises = xfailed.raises\n   282\t            if raises is not None and not isinstance(call.excinfo.value, raises):\n   283\t                rep.outcome = \"failed\"\n   284\t            else:\n   285\t                rep.outcome = \"skipped\"\n   286\t                rep.wasxfail = xfailed.reason\n   287\t        elif call.when == \"call\":\n   288\t            if xfailed.strict:\n   289\t                rep.outcome = \"failed\"\n   290\t                rep.longrepr = \"[XPASS(strict)] \" + xfailed.reason\n   291\t            else:\n   292\t                rep.outcome = \"passed\"\n   293\t                rep.wasxfail = xfailed.reason\n   294\t    elif (\n   295\t        item._store.get(skipped_by_mark_key, True)\n   296\t        and rep.skipped\n   297\t        and type(rep.longrepr) is tuple\n   298\t    ):\n   299\t        # skipped by mark.skipif; change the location of the failure\n   300\t        # to point to the item definition, otherwise it will display\n   301\t        # the location of where the skip exception was raised within pytest\n   302\t        _, _, reason = rep.longrepr\n   303\t        filename, line = item.reportinfo()[:2]\n   304\t        assert line is not None\n   305\t        rep.longrepr = str(filename), line + 1, reason\n   306\t\n   307\t\n   308\tdef pytest_report_teststatus(report: BaseReport) -> Optional[Tuple[str, str, str]]:\n   309\t    if hasattr(report, \"wasxfail\"):\n   310\t        if report.skipped:\n   311\t            return \"xfailed\", \"x\", \"XFAIL\"\n   312\t        elif report.passed:\n   313\t            return \"xpassed\", \"X\", \"XPASS\"\n   314\t    return None"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01VfZ9GBYq3pvr5C8AXdghP6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/src/_pytest/skipping.py | sed -n '230,280p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VfZ9GBYq3pvr5C8AXdghP6",
+          "content": "[exit_code=0]\n230\t\n   231\t\n   232\t@hookimpl(tryfirst=True)\n   233\tdef pytest_runtest_setup(item: Item) -> None:\n   234\t    item._store[skipped_by_mark_key] = False\n   235\t\n   236\t    skipped = evaluate_skip_marks(item)\n   237\t    if skipped:\n   238\t        item._store[skipped_by_mark_key] = True\n   239\t        skip(skipped.reason)\n   240\t\n   241\t    if not item.config.option.runxfail:\n   242\t        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)\n   243\t        if xfailed and not xfailed.run:\n   244\t            xfail(\"[NOTRUN] \" + xfailed.reason)\n   245\t\n   246\t\n   247\t@hookimpl(hookwrapper=True)\n   248\tdef pytest_runtest_call(item: Item) -> Generator[None, None, None]:\n   249\t    xfailed = item._store.get(xfailed_key, None)\n   250\t    if xfailed is None:\n   251\t        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)\n   252\t\n   253\t    if not item.config.option.runxfail:\n   254\t        if xfailed and not xfailed.run:\n   255\t            xfail(\"[NOTRUN] \" + xfailed.reason)\n   256\t\n   257\t    yield\n   258\t\n   259\t\n   260\t@hookimpl(hookwrapper=True)\n   261\tdef pytest_runtest_makereport(item: Item, call: CallInfo[None]):\n   262\t    outcome = yield\n   263\t    rep = outcome.get_result()\n   264\t    xfailed = item._store.get(xfailed_key, None)\n   265\t    # unittest special case, see setting of unexpectedsuccess_key\n   266\t    if unexpectedsuccess_key in item._store and rep.when == \"call\":\n   267\t        reason = item._store[unexpectedsuccess_key]\n   268\t        if reason:\n   269\t            rep.longrepr = \"Unexpected success: {}\".format(reason)\n   270\t        else:\n   271\t            rep.longrepr = \"Unexpected success\"\n   272\t        rep.outcome = \"failed\"\n   273\t    elif item.config.option.runxfail and xfailed:\n   274\t        pass  # don't interfere\n   275\t    elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):\n   276\t        assert call.excinfo.value.msg is not None\n   277\t        rep.wasxfail = \"reason: \" + call.excinfo.value.msg\n   278\t        rep.outcome = \"skipped\"\n   279\t    elif not rep.skipped and xfailed:\n   280\t        if call.excinfo:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow let me understand the patch and the fix pattern.\n\n**Problem statement**: When `--runxfail` is used with `@pytest.mark.skip`, the skip location is incorrectly reported as `src/_pytest/skipping.py:238` instead of the actual test file location.\n\n**Root cause analysis**: \nThe `pytest_runtest_makereport` hook has an elif chain:\n1. Line 266-272: `unexpectedsuccess_key` handling\n2. Line 273: `elif item.config.option.runxfail:` \u2192 `pass` (don't interfere)\n3. Line 275: `elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):`\n4. Line 279: `elif not rep.skipped and xfailed:`\n5. Line 294-305: Skip location correction block\n\nThe issue is that when `--runxfail` is enabled AND a test is skipped by `@pytest.mark.skip`, the condition at line 273 (originally) matches because `item.config.option.runxfail` is True, causing it to hit `pass` and skip the rest of the elif chain. This prevents the skip location correction at lines 294-305 from running.\n\n**The fix**: Changed line 273 from:\n```python\nelif item.config.option.runxfail:\n```\nto:\n```python\nelif item.config.option.runxfail and xfailed:\n```\n\nThis makes the condition only match when `--runxfail` is enabled AND there's actually an xfail marker (`xfailed` is truthy). For plain skip tests (no xfail), `xfailed` will be None/False, so the condition won't match, allowing the elif chain to continue to the skip location correction block.\n\n**Evaluating the fix pattern (PD - Condition boundary)**:\nThe fix narrows the condition by adding `and xfailed`. This is precisely the right approach.\n\nLet me verify what `xfailed` is for a skip test:\n- In `pytest_runtest_setup`, when `not item.config.option.runxfail`, `item._store[xfailed_key]` is set. But when `runxfail` is True, line 241-244 doesn't run.\n- In `pytest_runtest_call`, `xfailed = item._store.get(xfailed_key, None)`. If not stored, it evaluates marks. But if there's only a skip mark (no xfail mark), `evaluate_xfail_marks(item)` would return None.\n- So for a plain skip test with `--runxfail`, `xfailed` would be None (falsy).\n\nWith the patch:\n- `item.config.option.runxfail` = True\n- `xfailed` = None (for a skip-only test)\n- So `elif item.config.option.runxfail and xfailed:` \u2192 `True and None` \u2192 `False`\n- The elif chain continues to the skip location correction at lines 294-305 \u2713\n\n**Correctness**: The fix correctly addresses the root cause. For skip-only tests with `--runxfail`, `xfailed` will be None/False, so the condition won't short-circuit, allowing the skip location correction to work.\n\n**Completeness**: The fix covers the case described in the problem. For xfail tests with `--runxfail`, `xfailed` will be truthy, so the pass behavior is maintained (correct for xfail).\n\n**Alignment**: The fix exactly matches the proposed change in the solution proposal.\n\n**Safety**: The change is minimal and targeted. The only change is adding `and xfailed` to one condition, which preserves the existing behavior for xfail tests while fixing the bug for skip tests.\n\nThis is a clean, correct fix. The verdict should be pass.\n</think>\n\nLet me examine the full context of the patched code carefully.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019pAuULeQPVvLcTwLWmS5zv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"xfailed_key\\|skipped_by_mark_key\" /testbed/src/_pytest/skipping.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019pAuULeQPVvLcTwLWmS5zv",
+          "content": "[exit_code=0]\n226:skipped_by_mark_key = StoreKey[bool]()\n228:xfailed_key = StoreKey[Optional[Xfail]]()\n234:    item._store[skipped_by_mark_key] = False\n238:        item._store[skipped_by_mark_key] = True\n242:        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)\n249:    xfailed = item._store.get(xfailed_key, None)\n251:        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)\n264:    xfailed = item._store.get(xfailed_key, None)\n295:        item._store.get(skipped_by_mark_key, True)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The analysis is now complete. Let me trace through the logic:\n\n**For a `@pytest.mark.skip` test with `--runxfail`:**\n1. `pytest_runtest_setup`: `runxfail=True`, so `item._store[xfailed_key]` is NOT set (line 241-244 is skipped). The skip mark causes `skip()` to be called.\n2. `pytest_runtest_call`: `xfailed = item._store.get(xfailed_key, None)` \u2192 None; then `evaluate_xfail_marks(item)` returns None (no xfail mark). So `xfailed = None`.\n3. `pytest_runtest_makereport`: `xfailed = item._store.get(xfailed_key, None)` \u2192 could be None or the evaluated value.\n\nWith the **original** code: `elif item.config.option.runxfail:` \u2192 True \u2192 `pass` \u2192 skip location correction at lines 294-305 never executes.\n\nWith the **patched** code: `elif item.config.option.runxfail and xfailed:` \u2192 `True and None` \u2192 False \u2192 elif chain continues to skip location correction at lines 294-305 \u2713\n\nFor an `@pytest.mark.xfail` test with `--runxfail`:\n- `xfailed` is set (evaluated in `pytest_runtest_call`)\n- `item.config.option.runxfail and xfailed` \u2192 True \u2192 `pass` (correct, maintains existing behavior)\n\nThe fix is minimal, targeted, and correctly addresses the root cause without affecting other code paths.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PD \u2014 Condition boundary\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 4,
+  "timestamp": "2026-04-13T15:01:14Z"
+}

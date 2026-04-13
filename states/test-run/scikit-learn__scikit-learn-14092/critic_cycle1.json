@@ -1,0 +1,148 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-14092",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PB \u2014 Deprecated API (type replacement): replaced strict built-in types with abstract base classes from `numbers` module",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>scikit-learn__scikit-learn-14092</instance_id>\n\n<problem_statement>\nNCA fails in GridSearch due to too strict parameter checks\nNCA checks its parameters to have a specific type, which can easily fail in a GridSearch due to how param grid is made.\r\n\r\nHere is an example:\r\n```python\r\nimport numpy as np\r\n\r\nfrom sklearn.pipeline import Pipeline\r\nfrom sklearn.model_selection import GridSearchCV\r\nfrom sklearn.neighbors import NeighborhoodComponentsAnalysis\r\nfrom sklearn.neighbors import KNeighborsClassifier\r\n\r\nX = np.random.random_sample((100, 10))\r\ny = np.random.randint(2, size=100)\r\n\r\nnca = NeighborhoodComponentsAnalysis()\r\nknn = KNeighborsClassifier()\r\n\r\npipe = Pipeline([('nca', nca),\r\n                 ('knn', knn)])\r\n                \r\nparams = {'nca__tol': [0.1, 0.5, 1],\r\n          'nca__n_components': np.arange(1, 10)}\r\n          \r\ngs = GridSearchCV(estimator=pipe, param_grid=params, error_score='raise')\r\ngs.fit(X,y)\r\n```\r\n\r\nThe issue is that for `tol`: 1 is not a float, and for  `n_components`: np.int64 is not int\r\n\r\nBefore proposing a fix for this specific situation, I'd like to have your general opinion about parameter checking.  \r\nI like this idea of common parameter checking tool introduced with the NCA PR. What do you think about extending it across the code-base (or at least for new or recent estimators) ?\r\n\r\nCurrently parameter checking is not always done or often partially done, and is quite redundant. For instance, here is the input validation of lda:\r\n```python\r\ndef _check_params(self):\r\n        \"\"\"Check model parameters.\"\"\"\r\n        if self.n_components <= 0:\r\n            raise ValueError(\"Invalid 'n_components' parameter: %r\"\r\n                             % self.n_components)\r\n\r\n        if self.total_samples <= 0:\r\n            raise ValueError(\"Invalid 'total_samples' parameter: %r\"\r\n                             % self.total_samples)\r\n\r\n        if self.learning_offset < 0:\r\n            raise ValueError(\"Invalid 'learning_offset' parameter: %r\"\r\n                             % self.learning_offset)\r\n\r\n        if self.learning_method not in (\"batch\", \"online\"):\r\n            raise ValueError(\"Invalid 'learning_method' parameter: %r\"\r\n                             % self.learning_method)\r\n```\r\nmost params aren't checked and for those who are there's a lot of duplicated code.\r\n\r\nA propose to be upgrade the new tool to be able to check open/closed intervals (currently only closed) and list membership.\r\n\r\nThe api would be something like that:\r\n```\r\ncheck_param(param, name, valid_options)\r\n```\r\nwhere valid_options would be a dict of `type: constraint`. e.g for the `beta_loss` param of `NMF`, it can be either a float or a string in a list, which would give\r\n```\r\nvalid_options = {numbers.Real: None,  # None for no constraint\r\n                 str: ['frobenius', 'kullback-leibler', 'itakura-saito']}\r\n```\r\nSometimes a parameter can only be positive or within a given interval, e.g. `l1_ratio` of `LogisticRegression` must be between 0 and 1, which would give\r\n```\r\nvalid_options = {numbers.Real: Interval(0, 1, closed='both')}\r\n```\r\npositivity of e.g. `max_iter` would be `numbers.Integral: Interval(left=1)`.\n\n</problem_statement>\n\n<hints>\nI have developed a framework, experimenting with parameter verification: https://github.com/thomasjpfan/skconfig (Don't expect the API to be stable)\r\n\r\nYour idea of using a simple dict for union types is really nice!\r\n\r\nEdit: I am currently trying out another idea. I'll update this issue when it becomes something presentable.\nIf I understood correctly your package is designed for a sklearn user, who has to implement its validator for each estimator, or did I get it wrong ?\r\nI think we want to keep the param validation inside the estimators.\r\n\r\n> Edit: I am currently trying out another idea. I'll update this issue when it becomes something presentable.\r\n\r\nmaybe you can pitch me and if you want I can give a hand :)\nI would have loved to using the typing system to get this to work:\r\n\r\n```py\r\ndef __init__(\r\n    self,\r\n    C: Annotated[float, Range('[0, Inf)')],\r\n    ...)\r\n```\r\n\r\nbut that would have to wait for [PEP 593](https://www.python.org/dev/peps/pep-0593/). In the end, I would want the validator to be a part of sklearn estimators. Using typing (as above) is a natural choice, since it keeps the parameter and its constraint physically close to each other.\r\n\r\nIf we can't use typing, these constraints can be place in a `_validate_parameters` method. This will be called at the beginning of fit to do parameter validation. Estimators that need more validation will overwrite the method, call `super()._validate_parameters` and do more validation. For example, `LogesticRegression`'s `penalty='l2'` only works for specify solvers. `skconfig` defines a framework for handling these situations, but I think it would be too hard to learn.\n>  Using typing (as above) is a natural choice\r\n\r\nI agree, and to go further it would be really nice to use them for the coverage to check that every possible type of a parameter is covered by tests\r\n\r\n> If we can't use typing, these constraints can be place in a _validate_parameters method. \r\n\r\nThis is already the case for a subset of the estimators (`_check_params` or `_validate_input`). But it's often incomplete.\r\n\r\n> skconfig defines a framework for handling these situations, but I think it would be too hard to learn.\r\n\r\nYour framework does way more than what I proposed. Maybe we can do this in 2 steps:\r\nFirst, a simple single param check which only checks its type and if its value is acceptable in general (e.g. positive for a number of clusters). This will raise a standard error message\r\nThen a more advanced check, depending on the data (e.g. number of clusters should be < n_samples) or consistency across params (e.g. solver + penalty). These checks require more elaborate error messages.\r\n\r\nwdyt ?\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/sklearn/neighbors/nca.py\"]\nBug analysis: The _validate_params method in NeighborhoodComponentsAnalysis uses check_scalar with strict type checking that requires exact type matches. When GridSearch passes parameters like tol=1 (int instead of float) or n_components=np.int64(5) (numpy int instead of Python int), the isinstance checks in check_scalar fail and raise TypeError exceptions.\nExploration notes: The problematic calls are at lines 302 (n_components), 321 (max_iter), and 322 (tol) in nca.py. Each uses check_scalar from sklearn.utils.validation which performs strict isinstance(x, target_type) checks. The check_scalar function is defined in sklearn/utils/validation.py around line 944. GridSearch creates parameter grids that may contain compatible but not identical numeric types, causing these strict checks to fail.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Replace strict built-in type checks (int, float) with flexible numeric abstract base classes (numbers.Integral, numbers.Real) to accept compatible numeric types from GridSearch while maintaining the same validation logic\nProposed changes: [\n  {\n    \"file\": \"/testbed/sklearn/neighbors/nca.py\",\n    \"location\": \"_validate_params method, import section\",\n    \"change\": \"REPLACE line 14:\\n  from warnings import warn\\nWITH:\\n  from warnings import warn\\n  import numbers\",\n    \"rationale\": \"Add numbers module import to use numbers.Integral and numbers.Real for more flexible numeric type checking\"\n  },\n  {\n    \"file\": \"/testbed/sklearn/neighbors/nca.py\",\n    \"location\": \"_validate_params method, line 302\",\n    \"change\": \"REPLACE line 302:\\n            check_scalar(self.n_components, 'n_components', int, 1)\\nWITH:\\n            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\",\n    \"rationale\": \"Use numbers.Integral instead of int to accept compatible integer types like numpy.int64\"\n  },\n  {\n    \"file\": \"/testbed/sklearn/neighbors/nca.py\",\n    \"location\": \"_validate_params method, line 321\",\n    \"change\": \"REPLACE line 321:\\n        check_scalar(self.max_iter, 'max_iter', int, 1)\\nWITH:\\n        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\",\n    \"rationale\": \"Use numbers.Integral instead of int to accept compatible integer types from GridSearch\"\n  },\n  {\n    \"file\": \"/testbed/sklearn/neighbors/nca.py\",\n    \"location\": \"_validate_params method, line 322\",\n    \"change\": \"REPLACE line 322:\\n        check_scalar(self.tol, 'tol', float, 0.)\\nWITH:\\n        check_scalar(self.tol, 'tol', numbers.Real, 0.)\",\n    \"rationale\": \"Use numbers.Real instead of float to accept compatible numeric types like int from GridSearch\"\n  },\n  {\n    \"file\": \"/testbed/sklearn/neighbors/nca.py\",\n    \"location\": \"_validate_params method, line 323\",\n    \"change\": \"REPLACE line 323:\\n        check_scalar(self.verbose, 'verbose', int, 0)\\nWITH:\\n        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\",\n    \"rationale\": \"Use numbers.Integral instead of int to accept compatible integer types from GridSearch\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py\nindex 1d278b6e1..146edbb74 100644\n--- a/sklearn/neighbors/nca.py\n+++ b/sklearn/neighbors/nca.py\n@@ -10,6 +10,7 @@ Neighborhood Component Analysis\n from __future__ import print_function\n \n from warnings import warn\n+import numbers\n import numpy as np\n import sys\n import time\n@@ -299,7 +300,7 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n \n         # Check the preferred dimensionality of the projected space\n         if self.n_components is not None:\n-            check_scalar(self.n_components, 'n_components', int, 1)\n+            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n \n             if self.n_components > X.shape[1]:\n                 raise ValueError('The preferred dimensionality of the '\n@@ -318,9 +319,9 @@ class NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):\n                                  .format(X.shape[1],\n                                          self.components_.shape[1]))\n \n-        check_scalar(self.max_iter, 'max_iter', int, 1)\n-        check_scalar(self.tol, 'tol', float, 0.)\n-        check_scalar(self.verbose, 'verbose', int, 0)\n+        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n+        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n+        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n \n         if self.callback is not None:\n             if not callable(self.callback):\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze this patch systematically.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Q2F1ewGNU2hJB939orJYBA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/sklearn/neighbors/nca.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        },
+        {
+          "id": "toolu_01ThMdf6zZFwturwbyVbu5mt",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"check_scalar\\|numbers\\.\" /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Q2F1ewGNU2hJB939orJYBA",
+          "content": "[exit_code=0]\n# coding: utf-8\n\"\"\"\nNeighborhood Component Analysis\n\"\"\"\n\n# Authors: William de Vazelhes <wdevazelhes@gmail.com>\n#          John Chiotellis <ioannis.chiotellis@in.tum.de>\n# License: BSD 3 clause\n\nfrom __future__ import print_function\n\nfrom warnings import warn\nimport numbers\nimport numpy as np\nimport sys\nimport time\nfrom scipy.optimize import minimize\nfrom ..utils.extmath import softmax\nfrom ..metrics import pairwise_distances\nfrom ..base import BaseEstimator, TransformerMixin\nfrom ..preprocessing import LabelEncoder\nfrom ..decomposition import PCA\nfrom ..utils.multiclass import check_classification_targets\nfrom ..utils.random import check_random_state\nfrom ..utils.validation import (check_is_fitted, check_array, check_X_y,\n                                check_scalar)\nfrom ..exceptions import ConvergenceWarning\n\n\nclass NeighborhoodComponentsAnalysis(BaseEstimator, TransformerMixin):"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ThMdf6zZFwturwbyVbu5mt",
+          "content": "[exit_code=0]\n26:                                check_scalar)\n303:            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n313:        check_scalar(self.warm_start, 'warm_start', bool)\n322:        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n323:        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n324:        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Tc6z8FT2ALmt3iJkKTdW5Z",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"check_scalar\" /testbed/sklearn/utils/validation.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        },
+        {
+          "id": "toolu_01PXLc67c6hyzMir6koZYyKK",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '940,990p' /testbed/sklearn/utils/validation.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Tc6z8FT2ALmt3iJkKTdW5Z",
+          "content": "[exit_code=0]\n944:def check_scalar(x, name, target_type, min_val=None, max_val=None):"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PXLc67c6hyzMir6koZYyKK",
+          "content": "[exit_code=0]\nif X_min < 0:\n        raise ValueError(\"Negative values in data passed to %s\" % whom)\n\n\ndef check_scalar(x, name, target_type, min_val=None, max_val=None):\n    \"\"\"Validate scalar parameters type and value.\n\n    Parameters\n    ----------\n    x : object\n        The scalar parameter to validate.\n\n    name : str\n        The name of the parameter to be printed in error messages.\n\n    target_type : type or tuple\n        Acceptable data types for the parameter.\n\n    min_val : float or int, optional (default=None)\n        The minimum valid value the parameter can take. If None (default) it\n        is implied that the parameter does not have a lower bound.\n\n    max_val : float or int, optional (default=None)\n        The maximum valid value the parameter can take. If None (default) it\n        is implied that the parameter does not have an upper bound.\n\n    Raises\n    -------\n    TypeError\n        If the parameter's type does not match the desired type.\n\n    ValueError\n        If the parameter's value violates the given bounds.\n    \"\"\"\n\n    if not isinstance(x, target_type):\n        raise TypeError('`{}` must be an instance of {}, not {}.'\n                        .format(name, target_type, type(x)))\n\n    if min_val is not None and x < min_val:\n        raise ValueError('`{}`= {}, must be >= {}.'.format(name, x, min_val))\n\n    if max_val is not None and x > max_val:\n        raise ValueError('`{}`= {}, must be <= {}.'.format(name, x, max_val))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01VDSyDnXjtTZZEA2owsmNv6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '290,340p' /testbed/sklearn/neighbors/nca.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VDSyDnXjtTZZEA2owsmNv6",
+          "content": "[exit_code=0]\nValueError\n            If a parameter's value violates its legal value range or if the\n            combination of two or more given parameters is incompatible.\n        \"\"\"\n\n        # Validate the inputs X and y, and converts y to numerical classes.\n        X, y = check_X_y(X, y, ensure_min_samples=2)\n        check_classification_targets(y)\n        y = LabelEncoder().fit_transform(y)\n\n        # Check the preferred dimensionality of the projected space\n        if self.n_components is not None:\n            check_scalar(self.n_components, 'n_components', numbers.Integral, 1)\n\n            if self.n_components > X.shape[1]:\n                raise ValueError('The preferred dimensionality of the '\n                                 'projected space `n_components` ({}) cannot '\n                                 'be greater than the given data '\n                                 'dimensionality ({})!'\n                                 .format(self.n_components, X.shape[1]))\n\n        # If warm_start is enabled, check that the inputs are consistent\n        check_scalar(self.warm_start, 'warm_start', bool)\n        if self.warm_start and hasattr(self, 'components_'):\n            if self.components_.shape[1] != X.shape[1]:\n                raise ValueError('The new inputs dimensionality ({}) does not '\n                                 'match the input dimensionality of the '\n                                 'previously learned transformation ({}).'\n                                 .format(X.shape[1],\n                                         self.components_.shape[1]))\n\n        check_scalar(self.max_iter, 'max_iter', numbers.Integral, 1)\n        check_scalar(self.tol, 'tol', numbers.Real, 0.)\n        check_scalar(self.verbose, 'verbose', numbers.Integral, 0)\n\n        if self.callback is not None:\n            if not callable(self.callback):\n                raise ValueError('`callback` is not callable.')\n\n        # Check how the linear transformation should be initialized\n        init = self.init\n\n        if isinstance(init, np.ndarray):\n            init = check_array(init)\n\n            # Assert that init.shape[1] = X.shape[1]\n            if init.shape[1] != X.shape[1]:\n                raise ValueError(\n                    'The input dimensionality ({}) of the given '\n                    'linear transformation `init` must match the '"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe patch looks correct. Let me analyze it:\n\n1. **Root cause**: The `_validate_params` method in `NeighborhoodComponentsAnalysis` was using strict Python built-in types (`int`, `float`) for `isinstance` checks via `check_scalar`. GridSearch can pass `np.int64` for integer parameters or Python `int` for float parameters (like `tol=1`), which fails the strict isinstance checks.\n\n2. **Fix**: The patch replaces:\n   - `int` with `numbers.Integral` (which accepts Python int, np.int64, np.int32, etc.)\n   - `float` with `numbers.Real` (which accepts Python int, float, np.float64, etc.)\n   - Adds `import numbers` at the top\n\n3. **Correctness**:\n   - `numbers.Integral` is the abstract base class for integers. `isinstance(np.int64(5), numbers.Integral)` returns `True`.\n   - `numbers.Real` is the abstract base class for real numbers. `isinstance(1, numbers.Real)` and `isinstance(np.float64(0.1), numbers.Real)` both return `True`.\n   - The `check_scalar` function uses `isinstance(x, target_type)`, which works correctly with abstract base classes.\n\n4. **Completeness**: \n   - All four problematic checks are addressed: `n_components`, `max_iter`, `tol`, and `verbose`.\n   - The `warm_start` check still uses `bool`, which is correct since booleans don't need to be flexible.\n   - The `import numbers` is added correctly.\n\n5. **Alignment**: Matches the proposed fix strategy exactly.\n\n6. **Safety**: Using `numbers.Integral` and `numbers.Real` from the `numbers` module is the standard Python approach and well-established in scikit-learn itself. This won't break any valid existing usage since Python `int` and `float` are subclasses of `numbers.Integral` and `numbers.Real` respectively.\n\nThe patch correctly and completely addresses the issue. All four criteria pass.\n</think>\n\nThe patch is straightforward. Let me verify the key aspects:\n\n1. **Import added correctly** - `import numbers` is added after `from warnings import warn`.\n\n2. **`check_scalar` uses `isinstance`** - Confirmed at line 976 in validation.py: `if not isinstance(x, target_type):`. Using `numbers.Integral` and `numbers.Real` as abstract base classes works correctly with `isinstance`.\n\n3. **All problematic checks updated**:\n   - `n_components`: `int` \u2192 `numbers.Integral` \u2713 (handles `np.int64`)\n   - `max_iter`: `int` \u2192 `numbers.Integral` \u2713\n   - `tol`: `float` \u2192 `numbers.Real` \u2713 (handles `int` like `1`)\n   - `verbose`: `int` \u2192 `numbers.Integral` \u2713\n\n4. **`warm_start` stays as `bool`** - Correct, since booleans in GridSearch are typically Python `bool`.\n\n5. **`numbers.Real` for `tol`**: Since `numbers.Real` includes `numbers.Integral` (integers), passing `tol=1` (int) will now be accepted, which is the expected behavior.\n\n6. **`numbers.Integral` for integers**: `np.int64` is registered as a `numbers.Integral`, so `isinstance(np.int64(5), numbers.Integral)` is `True`.\n\nThe fix is minimal, targeted, and addresses the root cause without any collateral changes.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PB \u2014 Deprecated API (type replacement): replaced strict built-in types with abstract base classes from `numbers` module\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 4,
+  "timestamp": "2026-04-13T17:29:36Z"
+}

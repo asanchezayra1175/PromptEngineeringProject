@@ -1,0 +1,402 @@
+{
+  "instance_id": "matplotlib__matplotlib-26011",
+  "status": "success",
+  "attempt": 1,
+  "relevant_files": [
+    "/testbed/lib/matplotlib/axis.py"
+  ],
+  "relevant_symbols": [
+    "Axis._set_lim"
+  ],
+  "bug_analysis": "The _set_lim method processes callbacks for the current axis when emit=True, but when propagating limit changes to shared axes, it calls other._axis_map[name]._set_lim(v0, v1, emit=False, auto=auto). The emit=False parameter prevents xlim_changed/ylim_changed callbacks from being triggered on shared axes, even though their view limits have been updated.",
+  "exploration_notes": "The bug is in lines 1240-1248 of axis.py. The _set_lim method is called by set_xlim/set_ylim methods in _base.py via self.xaxis._set_lim(left, right, emit=emit, auto=auto). The method uses self._get_shared_axes() to find shared axes and calls their _set_lim with emit=False. The test target test_xylim_changed_shared should verify that callbacks are triggered on shared axes when limits change on any axis in the shared group.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explore the following repository and produce a localization report identifying where the bug lives.\n\n<instance_id>matplotlib__matplotlib-26011</instance_id>\n\n<problem_statement>\nxlim_changed not emitted on shared axis\n<!--To help us understand and resolve your issue, please fill out the form to the best of your ability.-->\r\n<!--You can feel free to delete the sections that do not apply.-->\r\n\r\n### Bug report\r\n\r\n**Bug summary**\r\n\r\nWhen an axis is shared with another its registered \"xlim_changed\" callbacks does not get called when the change is induced by a shared axis (via sharex=). \r\n\r\nIn _base.py the set_xlim for sibling axis are called with emit=False:\r\n\r\n```\r\nmatplotlib/lib/matplotlib/axes/_base.py:\r\n\r\n/.../\r\ndef set_xlim(...)\r\n/.../\r\n        if emit:\r\n            self.callbacks.process('xlim_changed', self)\r\n            # Call all of the other x-axes that are shared with this one\r\n            for other in self._shared_x_axes.get_siblings(self):\r\n                if other is not self:\r\n                    other.set_xlim(self.viewLim.intervalx,\r\n                                   emit=False, auto=auto)\r\n```\r\n\r\nI'm very new to matplotlib, so perhaps there is a good reason for this? emit=False seems to disable both continued \"inheritance\" of axis (why?) and triggering of change callbacks (looking at the code above).\r\n\r\nIt seems like one would at least want to trigger the xlim_changed callbacks as they would be intended to react to any change in axis limits.\r\n\r\nEdit: Setting emit=True seems to introduce a recursion issue (not sure why but as inheritance seems to be passed along anyway it doesn't really matter). Moving the callback call to outside of the \"if emit:\"-statement seems to solve the issue as far as I can see when trying it out. Any reason to keep it inside the if-statement? \r\n\n\n</problem_statement>\n\n<hints>\nI'm also seeing this behavior on matplotlib 3.4.1.  Working from the [resampling data example](https://matplotlib.org/stable/gallery/event_handling/resample.html), I've been developing an adaptive waveform plotter in [this PR](https://github.com/librosa/librosa/issues/1207) (code included there).  The specific quirks that I'm seeing are as follows:\r\n\r\n- Create two axes with shared x axis (eg, `fig, (ax0, ax1) = plt.subplots(nrows=2, sharex=True)`), and set an axis callback on `ax0` for `xlim_changed`.  If the xlim changes on `ax1`, which does not directly have the callback set, the axes still update appropriately but the callback is never triggered.\r\n- Possibly related: if the callback is set on `ax0` first, and some time later we draw on `ax1`, the callback never triggers even if we directly set the xlims on `ax0`.\r\n\r\nNote: if I create the shared axes, draw on `ax1` first and set the callback on `ax0` last, everything works as expected.  So I don't think there's any fundamental incompatibility here.  It does seem like some data structure is being either ignored or clobbered though.\nA short self-contained example would be very helpful here!  Thanks  \n\"short\" is relative here :)  There is a full setup in the linked PR, but here's something hopefully a little more streamlined:\r\n\r\n```python\r\nimport numpy as np\r\nimport matplotlib.pyplot as plt\r\n\r\n# From https://matplotlib.org/stable/gallery/event_handling/resample.html\r\n# A class that will downsample the data and recompute when zoomed.\r\nclass DataDisplayDownsampler:\r\n    def __init__(self, xdata, ydata):\r\n        self.origYData = ydata\r\n        self.origXData = xdata\r\n        self.max_points = 50\r\n        self.delta = xdata[-1] - xdata[0]\r\n\r\n    def downsample(self, xstart, xend):\r\n        # get the points in the view range\r\n        mask = (self.origXData > xstart) & (self.origXData < xend)\r\n        # dilate the mask by one to catch the points just outside\r\n        # of the view range to not truncate the line\r\n        mask = np.convolve([1, 1, 1], mask, mode='same').astype(bool)\r\n        # sort out how many points to drop\r\n        ratio = max(np.sum(mask) // self.max_points, 1)\r\n\r\n        # mask data\r\n        xdata = self.origXData[mask]\r\n        ydata = self.origYData[mask]\r\n\r\n        # downsample data\r\n        xdata = xdata[::ratio]\r\n        ydata = ydata[::ratio]\r\n\r\n        print(\"using {} of {} visible points\".format(len(ydata), np.sum(mask)))\r\n\r\n        return xdata, ydata\r\n\r\n    def update(self, ax):\r\n        # Update the line\r\n        lims = ax.viewLim\r\n        if abs(lims.width - self.delta) > 1e-8:\r\n            self.delta = lims.width\r\n            xstart, xend = lims.intervalx\r\n            self.line.set_data(*self.downsample(xstart, xend))\r\n            ax.figure.canvas.draw_idle()\r\n\r\n\r\n# Create a signal\r\nxdata = np.linspace(16, 365, (365-16)*4)\r\nydata = np.sin(2*np.pi*xdata/153) + np.cos(2*np.pi*xdata/127)\r\n\r\n\r\n# --- This does not work: ax1 drawn after ax0 kills callbacks\r\nd = DataDisplayDownsampler(xdata, ydata)\r\nfig, (ax0, ax1) = plt.subplots(nrows=2, sharex=True)\r\n\r\n# Hook up the line\r\nd.line, = ax0.plot(xdata, ydata, 'o-')\r\nax0.set_autoscale_on(False)  # Otherwise, infinite loop\r\n\r\n# Connect for changing the view limits\r\nax0.callbacks.connect('xlim_changed', d.update)\r\nax0.set_xlim(16, 365)\r\n\r\nax1.plot(xdata, -ydata)\r\nplt.show()\r\n\r\n\r\n# --- This does work: ax0 drawn after ax1\r\n# --- Note: only works if axis limits are controlled via ax0, not ax1\r\n# Create a signal\r\nxdata = np.linspace(16, 365, (365-16)*4)\r\nydata = np.sin(2*np.pi*xdata/153) + np.cos(2*np.pi*xdata/127)\r\n\r\nd = DataDisplayDownsampler(xdata, ydata)\r\n\r\nfig, (ax0, ax1) = plt.subplots(nrows=2, sharex=True)\r\n\r\nax1.plot(xdata, -ydata)\r\n\r\n# Hook up the line\r\nd.line, = ax0.plot(xdata, ydata, 'o-')\r\nax0.set_autoscale_on(False)  # Otherwise, infinite loop\r\n\r\n# Connect for changing the view limits\r\nax0.callbacks.connect('xlim_changed', d.update)\r\nax0.set_xlim(16, 365)\r\n\r\n\r\nplt.show()\r\n\r\n```\r\n\r\nIn neither case does panning/zooming/setting limits on `ax1` do the right thing.\nThats not bad ;-)\nThe problem is that we do \r\n```\r\nother.set_xlim(self.viewLim.intervalx, emit=False, auto=auto)\r\n```\r\nwhich doesn't do the `ax0.callbacks.process('xlim_changed', self)` \r\n\r\nIf we don't do this, it continues to emit to the shared axes and we get an infinite recursion.  \r\n\r\nSomething like \r\n```diff\r\ndiff --git a/lib/matplotlib/axes/_base.py b/lib/matplotlib/axes/_base.py\r\nindex 9898c7c75..0c1941efb 100644\r\n--- a/lib/matplotlib/axes/_base.py\r\n+++ b/lib/matplotlib/axes/_base.py\r\n@@ -3742,10 +3742,11 @@ class _AxesBase(martist.Artist):\r\n             # Call all of the other x-axes that are shared with this one\r\n             for other in self._shared_x_axes.get_siblings(self):\r\n                 if other is not self:\r\n-                    other.set_xlim(self.viewLim.intervalx,\r\n-                                   emit=False, auto=auto)\r\n-                    if other.figure != self.figure:\r\n-                        other.figure.canvas.draw_idle()\r\n+                    if not np.allclose(other.viewLim.intervalx, self.viewLim.intervalx):\r\n+                        other.set_xlim(self.viewLim.intervalx,\r\n+                                    emit=True, auto=auto)\r\n+                        if other.figure != self.figure:\r\n+                            other.figure.canvas.draw_idle()\r\n```\r\n\r\nFixes the problem (plus we'd need the same for yaxis).  However, I'm not really expert enough on how sharing is supposed to work versus the callbacks to know if this is right or the best.  @anntzer or @efiring last touched this part of the code I think.   \nI think I would prefer something like\r\n```patch\r\ndiff --git i/lib/matplotlib/axes/_base.py w/lib/matplotlib/axes/_base.py\r\nindex 9898c7c75..1116d120f 100644\r\n--- i/lib/matplotlib/axes/_base.py\r\n+++ w/lib/matplotlib/axes/_base.py\r\n@@ -541,6 +541,11 @@ class _process_plot_var_args:\r\n             return [l[0] for l in result]\r\n \r\n \r\n+import dataclasses\r\n+_NoRecursionMarker = dataclasses.make_dataclass(\r\n+    \"_NoRecursionMarker\", [\"event_src\"])\r\n+\r\n+\r\n @cbook._define_aliases({\"facecolor\": [\"fc\"]})\r\n class _AxesBase(martist.Artist):\r\n     name = \"rectilinear\"\r\n@@ -3737,13 +3742,18 @@ class _AxesBase(martist.Artist):\r\n         if auto is not None:\r\n             self._autoscaleXon = bool(auto)\r\n \r\n-        if emit:\r\n+        if emit and emit != _NoRecursionMarker(self):\r\n             self.callbacks.process('xlim_changed', self)\r\n             # Call all of the other x-axes that are shared with this one\r\n             for other in self._shared_x_axes.get_siblings(self):\r\n                 if other is not self:\r\n+                    # Undocumented internal feature: emit can be set to\r\n+                    # _NoRecursionMarker(self) which is treated as True, but\r\n+                    # avoids infinite recursion.\r\n+                    if not isinstance(emit, _NoRecursionMarker):\r\n+                        emit = _NoRecursionMarker(self)\r\n                     other.set_xlim(self.viewLim.intervalx,\r\n-                                   emit=False, auto=auto)\r\n+                                   emit=emit, auto=auto)\r\n                     if other.figure != self.figure:\r\n                         other.figure.canvas.draw_idle()\r\n         self.stale = True\r\n```\r\nto more explicitly block infinite recursion, but other than that the basic idea seems fine to me.\nI'm not sure if this is related, but I'm seeing a similar issue if I try to run the same example code multiple times on one ax.  As far as I can tell from reading https://github.com/matplotlib/matplotlib/blob/master/lib/matplotlib/cbook/__init__.py , it should support multiple callbacks on the same signal (or am I misunderstanding?), but the above example when run twice only issues the second callback.\r\n\r\nIf you think this is unrelated, I can open a separate issue for it.\nI'm not exactly sure what you mean, but note that CallbackRegistry currently drops duplicate callbacks (connecting a same callback a second time to the same signal results in it being dropped and the original cid is returned).  I actually think that's a pretty unhelpful behavior and would be happy to see it deprecated (that can just go through a normal deprecation cycle), but that would be a separate issue.\nAh, I see.  Thanks @anntzer for the clarification.\nI am :+1: on @anntzer 's solution here.\r\n\r\nMarking this as a good first issue because we have a patch for it.  Will still need to write a test, a simplified version of the initial bug report would probably work (we do not need convolve in the tests / real signals etc).\r\n\r\n------\r\n\r\nalso good to see fellow NYers around!\nHaving the same problem with perhaps a somewhat simpler example. If the registered callbacks were triggered by changes in axes limits from plots with shared x/y-axes, the gray dashed line in the left plot would extend across the whole canvas:\r\n\r\n![tmp](https://user-images.githubusercontent.com/30958850/130777946-5fd58887-d4e3-4287-a6e7-1be4a093fa98.png)\r\n\r\n```py\r\nfrom typing import Any\r\n\r\nimport matplotlib.pyplot as plt\r\nfrom matplotlib.axes import Axes\r\n\r\n\r\ndef add_identity(ax: Axes = None, **line_kwargs: Any) -> None:\r\n    \"\"\"Add a parity line (y = x) to the provided axis.\"\"\"\r\n    if ax is None:\r\n        ax = plt.gca()\r\n\r\n    # zorder=0 ensures other plotted data displays on top of line\r\n    default_kwargs = dict(alpha=0.5, zorder=0, linestyle=\"dashed\", color=\"black\")\r\n    (identity,) = ax.plot([], [], **default_kwargs, **line_kwargs)\r\n\r\n    def callback(axes: Axes) -> None:\r\n        x_min, x_max = axes.get_xlim()\r\n        y_min, y_max = axes.get_ylim()\r\n        low = max(x_min, y_min)\r\n        high = min(x_max, y_max)\r\n        identity.set_data([low, high], [low, high])\r\n\r\n    callback(ax)\r\n    # Register callbacks to update identity line when moving plots in interactive\r\n    # mode to ensure line always extend to plot edges.\r\n    ax.callbacks.connect(\"xlim_changed\", callback)\r\n    ax.callbacks.connect(\"ylim_changed\", callback)\r\n\r\n\r\nfig, (ax1, ax2) = plt.subplots(1, 2, sharex=True, sharey=True)\r\n\r\nax1.plot([0, 1], [1, 0])\r\nadd_identity(ax1)\r\n\r\nax2.plot([0, 2], [2, 0])\r\nadd_identity(ax2)\r\n\r\nplt.savefig('tmp.png')\r\n```\nWhile not the point of this issue, that identity line can be achieved with [`axline`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.axline.html).\n@QuLogic Damn, that's what I get for not reading the docs closely enough: unnecessary work reinventing a (worse) wheel. Thanks for the pointer!\nNo worries, it's [new-ish](https://matplotlib.org/stable/users/prev_whats_new/whats_new_3.3.0.html#new-axes-axline-method).\n</hints>\n\n<repo>matplotlib/matplotlib</repo>\n<base_commit>00afcc0c6d4d2e4390338127f05b8f4fdb4e7087</base_commit>\n\n<test_targets>\nThese tests must pass after the fix \u2014 use them to find the relevant module.\n[\n  \"lib/matplotlib/tests/test_axes.py::test_xylim_changed_shared\"\n]\n</test_targets>\n\nBegin by reading the problem statement, then grep for the key term. Output the JSON report when you have identified the relevant files and symbols.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLooking at the problem statement, I can see:\n\n1. The issue is about xlim_changed callbacks not being emitted on shared axes\n2. The bug is specifically in matplotlib/lib/matplotlib/axes/_base.py in the set_xlim method\n3. The problem is that when axes are shared, the set_xlim calls on sibling axes use emit=False\n4. There's a specific code block showing the buggy behavior in _base.py\n5. The test target is lib/matplotlib/tests/test_axes.py::test_xylim_changed_shared\n\nFrom the hints, I can see that @anntzer provided a specific patch solution using a _NoRecursionMarker to avoid infinite recursion while still allowing callbacks to be emitted.\n\nLet me start by looking at the test to understand what exactly needs to be tested, then examine the buggy code in _base.py.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018Uik9WKTaS89aPibuGTmje",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"test_xylim_changed_shared\" /testbed/lib/matplotlib/tests/test_axes.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018Uik9WKTaS89aPibuGTmje",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe test doesn't exist yet, which makes sense since this is a bug report. Let me look at the actual buggy code in _base.py first, focusing on the set_xlim method that was mentioned in the problem statement.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KfRhT33V6R8RFnDX4J2MC8",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"emit=False\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KfRhT33V6R8RFnDX4J2MC8",
+          "content": "[exit_code=0]\n1227-        self._shared_axes[\"x\"].join(self, other)\n1228-        self._sharex = other\n1229-        self.xaxis.major = other.xaxis.major  # Ticker instances holding\n1230-        self.xaxis.minor = other.xaxis.minor  # locator and formatter.\n1231-        x0, x1 = other.get_xlim()\n1232:        self.set_xlim(x0, x1, emit=False, auto=other.get_autoscalex_on())\n1233-        self.xaxis._scale = other.xaxis._scale\n1234-\n1235-    def sharey(self, other):\n1236-        \"\"\"\n1237-        Share the y-axis with *other*.\n1238-\n1239-        This is equivalent to passing ``sharey=other`` when constructing the\n1240-        Axes, and cannot be used if the y-axis is already being shared with\n1241-        another Axes.\n1242-        \"\"\"\n--\n1246-        self._shared_axes[\"y\"].join(self, other)\n1247-        self._sharey = other\n1248-        self.yaxis.major = other.yaxis.major  # Ticker instances holding\n1249-        self.yaxis.minor = other.yaxis.minor  # locator and formatter.\n1250-        y0, y1 = other.get_ylim()\n1251:        self.set_ylim(y0, y1, emit=False, auto=other.get_autoscaley_on())\n1252-        self.yaxis._scale = other.yaxis._scale\n1253-\n1254-    def __clear(self):\n1255-        \"\"\"Clear the Axes.\"\"\"\n1256-        # The actual implementation of clear() as long as clear() has to be\n1257-        # an adapter delegating to the correct implementation.\n1258-        # The implementation can move back into clear() when the\n1259-        # deprecation on cla() subclassing expires.\n1260-\n1261-        # stash the current visibility state"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThis shows emit=False being used in sharex() and sharey() methods, but the main issue mentioned in the problem statement is in the set_xlim method itself where it calls siblings with emit=False. Let me find that specific code block.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01TAawSbza8rBDx3J8kRNJiE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 15 -B 5 \"def set_xlim\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TAawSbza8rBDx3J8kRNJiE",
+          "content": "[exit_code=0]\n3565-            if (isinstance(converted_limit, Real)\n3566-                    and not np.isfinite(converted_limit)):\n3567-                raise ValueError(\"Axis limits cannot be NaN or Inf\")\n3568-            return converted_limit\n3569-\n3570:    def set_xlim(self, left=None, right=None, *, emit=True, auto=False,\n3571-                 xmin=None, xmax=None):\n3572-        \"\"\"\n3573-        Set the x-axis view limits.\n3574-\n3575-        Parameters\n3576-        ----------\n3577-        left : float, optional\n3578-            The left xlim in data coordinates. Passing *None* leaves the\n3579-            limit unchanged.\n3580-\n3581-            The left and right xlims may also be passed as the tuple\n3582-            (*left*, *right*) as the first positional argument (or as\n3583-            the *left* keyword argument).\n3584-\n3585-            .. ACCEPTS: (bottom: float, top: float)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nI need to see the actual implementation of set_xlim where the emit=False issue occurs. Let me look further into this method.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Bz3iQo45rwot766JWMAJtD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '3570,3650p' /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Bz3iQo45rwot766JWMAJtD",
+          "content": "[exit_code=0]\ndef set_xlim(self, left=None, right=None, *, emit=True, auto=False,\n                 xmin=None, xmax=None):\n        \"\"\"\n        Set the x-axis view limits.\n\n        Parameters\n        ----------\n        left : float, optional\n            The left xlim in data coordinates. Passing *None* leaves the\n            limit unchanged.\n\n            The left and right xlims may also be passed as the tuple\n            (*left*, *right*) as the first positional argument (or as\n            the *left* keyword argument).\n\n            .. ACCEPTS: (bottom: float, top: float)\n\n        right : float, optional\n            The right xlim in data coordinates. Passing *None* leaves the\n            limit unchanged.\n\n        emit : bool, default: True\n            Whether to notify observers of limit change.\n\n        auto : bool or None, default: False\n            Whether to turn on autoscaling of the x-axis. True turns on,\n            False turns off, None leaves unchanged.\n\n        xmin, xmax : float, optional\n            They are equivalent to left and right respectively, and it is an\n            error to pass both *xmin* and *left* or *xmax* and *right*.\n\n        Returns\n        -------\n        left, right : (float, float)\n            The new x-axis limits in data coordinates.\n\n        See Also\n        --------\n        get_xlim\n        set_xbound, get_xbound\n        invert_xaxis, xaxis_inverted\n\n        Notes\n        -----\n        The *left* value may be greater than the *right* value, in which\n        case the x-axis values will decrease from left to right.\n\n        Examples\n        --------\n        >>> set_xlim(left, right)\n        >>> set_xlim((left, right))\n        >>> left, right = set_xlim(left, right)\n\n        One limit may be left unchanged.\n\n        >>> set_xlim(right=right_lim)\n\n        Limits may be passed in reverse order to flip the direction of\n        the x-axis. For example, suppose *x* represents the number of\n        years before present. The x-axis limits might be set like the\n        following so 5000 years ago is on the left of the plot and the\n        present is on the right.\n\n        >>> set_xlim(5000, 0)\n        \"\"\"\n        if right is None and np.iterable(left):\n            left, right = left\n        if xmin is not None:\n            if left is not None:\n                raise TypeError(\"Cannot pass both 'left' and 'xmin'\")\n            left = xmin\n        if xmax is not None:\n            if right is not None:\n                raise TypeError(\"Cannot pass both 'right' and 'xmax'\")\n            right = xmax\n        return self.xaxis._set_lim(left, right, emit=emit, auto=auto)\n\n    get_xscale = _axis_method_wrapper(\"xaxis\", \"get_scale\")\n    set_xscale = _axis_method_wrapper(\"xaxis\", \"_set_axes_scale\")\n    get_xticks = _axis_method_wrapper(\"xaxis\", \"get_ticklocs\")"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nInteresting, the set_xlim method just delegates to self.xaxis._set_lim(). The actual logic with the shared axes handling must be in the xaxis._set_lim method or somewhere in the axis implementation. Let me check the xaxis module or look for _set_lim.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XiXGHYTruQBbttL3ZWw7aC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 15 -B 5 \"_set_lim\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XiXGHYTruQBbttL3ZWw7aC",
+          "content": "[exit_code=0]\n826-        self.dataLim = mtransforms.Bbox.null()\n827-        self._viewLim = mtransforms.Bbox.unit()\n828-        self.transScale = mtransforms.TransformWrapper(\n829-            mtransforms.IdentityTransform())\n830-\n831:        self._set_lim_and_transforms()\n832-\n833-    def _unstale_viewLim(self):\n834-        # We should arrange to store this information once per share-group\n835-        # instead of on every axis.\n836-        need_scale = {\n837-            name: any(ax._stale_viewlims[name]\n838-                      for ax in self._shared_axes[name].get_siblings(self))\n839-            for name in self._axis_names}\n840-        if any(need_scale.values()):\n841-            for name in need_scale:\n842-                for ax in self._shared_axes[name].get_siblings(self):\n843-                    ax._stale_viewlims[name] = False\n844-            self.autoscale_view(**{f\"scale{name}\": scale\n845-                                   for name, scale in need_scale.items()})\n846-\n--\n868-        for name in axis_names:\n869-            self._stale_viewlims[name] = True\n870-        if tight is not None:\n871-            self._tight = tight\n872-\n873:    def _set_lim_and_transforms(self):\n874-        \"\"\"\n875-        Set the *_xaxis_transform*, *_yaxis_transform*, *transScale*,\n876-        *transData*, *transLimits* and *transAxes* transformations.\n877-\n878-        .. note::\n879-\n880-            This method is primarily used by rectilinear projections of the\n881-            `~matplotlib.axes.Axes` class, and is meant to be overridden by\n882-            new kinds of projection Axes that need different transformations\n883-            and limits. (See `~matplotlib.projections.polar.PolarAxes` for an\n884-            example.)\n885-        \"\"\"\n886-        self.transAxes = mtransforms.BboxTransformTo(self.bbox)\n887-\n888-        # Transforms the x and y axis separately by a scale factor.\n--\n1360-            self.patch.set_visible(patch_visible)\n1361-        if self._sharey is not None:\n1362-            self.yaxis.set_visible(yaxis_visible)\n1363-            self.patch.set_visible(patch_visible)\n1364-\n1365:        # This comes last, as the call to _set_lim may trigger an autoscale (in\n1366-        # case of shared axes), requiring children to be already set up.\n1367-        for name, axis in self._axis_map.items():\n1368-            share = getattr(self, f\"_share{name}\")\n1369-            if share is not None:\n1370-                getattr(self, f\"share{name}\")(share)\n1371-            else:\n1372-                # Although the scale was set to linear as part of clear,\n1373-                # polar requires that _set_scale is called again\n1374-                if self.name == \"polar\":\n1375-                    axis._set_scale(\"linear\")\n1376:                axis._set_lim(0, 1, auto=True)\n1377-        self._update_transScale()\n1378-\n1379-        self.stale = True\n1380-\n1381-    def clear(self):\n1382-        \"\"\"Clear the Axes.\"\"\"\n1383-        # Act as an alias, or as the superclass implementation depending on the\n1384-        # subclass implementation.\n1385-        if self._subclass_uses_cla:\n1386-            self.cla()\n1387-        else:\n1388-            self.__clear()\n1389-\n1390-    def cla(self):\n1391-        \"\"\"Clear the Axes.\"\"\"\n--\n3641-            left = xmin\n3642-        if xmax is not None:\n3643-            if right is not None:\n3644-                raise TypeError(\"Cannot pass both 'right' and 'xmax'\")\n3645-            right = xmax\n3646:        return self.xaxis._set_lim(left, right, emit=emit, auto=auto)\n3647-\n3648-    get_xscale = _axis_method_wrapper(\"xaxis\", \"get_scale\")\n3649-    set_xscale = _axis_method_wrapper(\"xaxis\", \"_set_axes_scale\")\n3650-    get_xticks = _axis_method_wrapper(\"xaxis\", \"get_ticklocs\")\n3651-    set_xticks = _axis_method_wrapper(\"xaxis\", \"set_ticks\")\n3652-    get_xmajorticklabels = _axis_method_wrapper(\"xaxis\", \"get_majorticklabels\")\n3653-    get_xminorticklabels = _axis_method_wrapper(\"xaxis\", \"get_minorticklabels\")\n3654-    get_xticklabels = _axis_method_wrapper(\"xaxis\", \"get_ticklabels\")\n3655-    set_xticklabels = _axis_method_wrapper(\n3656-        \"xaxis\", \"set_ticklabels\",\n3657-        doc_sub={\"Axis.set_ticks\": \"Axes.set_xticks\"})\n3658-\n3659-    def get_ylabel(self):\n3660-        \"\"\"\n3661-        Get the ylabel text string.\n--\n3872-            bottom = ymin\n3873-        if ymax is not None:\n3874-            if top is not None:\n3875-                raise TypeError(\"Cannot pass both 'top' and 'ymax'\")\n3876-            top = ymax\n3877:        return self.yaxis._set_lim(bottom, top, emit=emit, auto=auto)\n3878-\n3879-    get_yscale = _axis_method_wrapper(\"yaxis\", \"get_scale\")\n3880-    set_yscale = _axis_method_wrapper(\"yaxis\", \"_set_axes_scale\")\n3881-    get_yticks = _axis_method_wrapper(\"yaxis\", \"get_ticklocs\")\n3882-    set_yticks = _axis_method_wrapper(\"yaxis\", \"set_ticks\")\n3883-    get_ymajorticklabels = _axis_method_wrapper(\"yaxis\", \"get_majorticklabels\")\n3884-    get_yminorticklabels = _axis_method_wrapper(\"yaxis\", \"get_minorticklabels\")\n3885-    get_yticklabels = _axis_method_wrapper(\"yaxis\", \"get_ticklabels\")\n3886-    set_yticklabels = _axis_method_wrapper(\n3887-        \"yaxis\", \"set_ticklabels\",\n3888-        doc_sub={\"Axis.set_ticks\": \"Axes.set_yticks\"})\n3889-\n3890-    xaxis_date = _axis_method_wrapper(\"xaxis\", \"axis_date\")\n3891-    yaxis_date = _axis_method_wrapper(\"yaxis\", \"axis_date\")\n3892-"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nSo the set_xlim method delegates to self.xaxis._set_lim(). I need to find where _set_lim is implemented on the axis. This is likely in the axis module. But wait - let me look more carefully at the problem statement. It mentions that the code with emit=False is in _base.py, specifically in set_xlim. Let me search more specifically for the pattern mentioned in the problem statement.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KmoeuMJ3qaEZEkq9S8Vud6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"get_siblings\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KmoeuMJ3qaEZEkq9S8Vud6",
+          "content": "[exit_code=0]\n742-\n743-    def __getstate__(self):\n744-        state = super().__getstate__()\n745-        # Prune the sharing & twinning info to only contain the current group.\n746-        state[\"_shared_axes\"] = {\n747:            name: self._shared_axes[name].get_siblings(self)\n748-            for name in self._axis_names if self in self._shared_axes[name]}\n749:        state[\"_twinned_axes\"] = (self._twinned_axes.get_siblings(self)\n750-                                  if self in self._twinned_axes else None)\n751-        return state\n752-\n753-    def __setstate__(self, state):\n754-        # Merge the grouping info back into the global groupers.\n755-        shared_axes = state.pop(\"_shared_axes\")\n756-        for name, shared_siblings in shared_axes.items():\n757-            self._shared_axes[name].join(*shared_siblings)\n758-        twinned_siblings = state.pop(\"_twinned_axes\")\n759-        if twinned_siblings:\n--\n833-    def _unstale_viewLim(self):\n834-        # We should arrange to store this information once per share-group\n835-        # instead of on every axis.\n836-        need_scale = {\n837-            name: any(ax._stale_viewlims[name]\n838:                      for ax in self._shared_axes[name].get_siblings(self))\n839-            for name in self._axis_names}\n840-        if any(need_scale.values()):\n841-            for name in need_scale:\n842:                for ax in self._shared_axes[name].get_siblings(self):\n843-                    ax._stale_viewlims[name] = False\n844-            self.autoscale_view(**{f\"scale{name}\": scale\n845-                                   for name, scale in need_scale.items()})\n846-\n847-    @property\n848-    def viewLim(self):\n849-        self._unstale_viewLim()\n850-        return self._viewLim\n851-\n852-    def _request_autoscale_view(self, axis=\"all\", tight=None):\n--\n1130-        Call this internally to get the same functionality of `set_position`,\n1131-        but not to take the axis out of the constrained_layout hierarchy.\n1132-        \"\"\"\n1133-        if not isinstance(pos, mtransforms.BboxBase):\n1134-            pos = mtransforms.Bbox.from_bounds(*pos)\n1135:        for ax in self._twinned_axes.get_siblings(self):\n1136-            if which in ('both', 'active'):\n1137-                ax._position.set(pos)\n1138-            if which in ('both', 'original'):\n1139-                ax._originalPosition.set(pos)\n1140-        self.stale = True\n1141-\n1142-    def reset_position(self):\n1143-        \"\"\"\n1144-        Reset the active position to the original position.\n1145-\n1146-        This undoes changes to the active position (as defined in\n1147-        `.set_position`) which may have been performed to satisfy fixed-aspect\n1148-        constraints.\n1149-        \"\"\"\n1150:        for ax in self._twinned_axes.get_siblings(self):\n1151-            pos = ax.get_position(original=True)\n1152-            ax.set_position(pos, which='active')\n1153-\n1154-    def set_axes_locator(self, locator):\n1155-        \"\"\"\n1156-        Set the Axes locator.\n1157-\n1158-        Parameters\n1159-        ----------\n1160-        locator : Callable[[Axes, Renderer], Bbox]\n--\n1661-            if aspect <= 0 or not np.isfinite(aspect):\n1662-                raise ValueError(\"aspect must be finite and positive \")\n1663-\n1664-        if share:\n1665-            axes = {sibling for name in self._axis_names\n1666:                    for sibling in self._shared_axes[name].get_siblings(self)}\n1667-        else:\n1668-            axes = [self]\n1669-\n1670-        for ax in axes:\n1671-            ax._aspect = aspect\n1672-\n1673-        if adjustable is None:\n1674-            adjustable = self._adjustable\n1675-        self.set_adjustable(adjustable, share=share)  # Handle sharing.\n1676-\n--\n1723-        and independently on each Axes as it is drawn.\n1724-        \"\"\"\n1725-        _api.check_in_list([\"box\", \"datalim\"], adjustable=adjustable)\n1726-        if share:\n1727-            axs = {sibling for name in self._axis_names\n1728:                   for sibling in self._shared_axes[name].get_siblings(self)}\n1729-        else:\n1730-            axs = [self]\n1731-        if (adjustable == \"datalim\"\n1732-                and any(getattr(ax.get_data_ratio, \"__func__\", None)\n1733-                        != _AxesBase.get_data_ratio\n1734-                        for ax in axs)):\n1735-            # Limits adjustment by apply_aspect assumes that the axes' aspect\n1736-            # ratio can be computed from the data limits and scales.\n1737-            raise ValueError(\"Cannot set Axes adjustable to 'datalim' for \"\n1738-                             \"Axes which override 'get_data_ratio'\")\n--\n1777-        See Also\n1778-        --------\n1779-        matplotlib.axes.Axes.set_aspect\n1780-            for a description of aspect handling.\n1781-        \"\"\"\n1782:        axs = {*self._twinned_axes.get_siblings(self),\n1783:               *self._twinned_axes.get_siblings(self)}\n1784-\n1785-        if aspect is not None:\n1786-            aspect = float(aspect)\n1787-         \n...[truncated]...\nrtist.sticky_edges.y\n2860:                    for ax in self._shared_axes[\"y\"].get_siblings(self)\n2861-                    for artist in ax.get_children()]))\n2862-        if self.get_xscale() == 'log':\n2863-            x_stickies = x_stickies[x_stickies > 0]\n2864-        if self.get_yscale() == 'log':\n2865-            y_stickies = y_stickies[y_stickies > 0]\n2866-\n2867-        def handle_single_axis(\n2868-                scale, shared_axes, name, axis, margin, stickies, set_bound):\n2869-\n2870-            if not (scale and axis._get_autoscale_on()):\n2871-                return  # nothing to do...\n2872-\n2873:            shared = shared_axes.get_siblings(self)\n2874-            # Base autoscaling on finite data limits when there is at least one\n2875-            # finite data limit among all the shared_axes and intervals.\n2876-            values = [val for ax in shared\n2877-                      for val in getattr(ax.dataLim, f\"interval{name}\")\n2878-                      if np.isfinite(val)]\n2879-            if values:\n2880-                x0, x1 = (min(values), max(values))\n2881-            elif getattr(self._viewLim, f\"mutated{name}\")():\n2882-                # No data, but explicit viewLims already set:\n2883-                # in mutatedx or mutatedy.\n--\n2943-            return\n2944-\n2945-        titles = (self.title, self._left_title, self._right_title)\n2946-\n2947-        # Need to check all our twins too, and all the children as well.\n2948:        axs = self._twinned_axes.get_siblings(self) + self.child_axes\n2949-        for ax in self.child_axes:  # Child positions must be updated first.\n2950-            locator = ax.get_axes_locator()\n2951-            ax.apply_aspect(locator(self, renderer) if locator else None)\n2952-\n2953-        for title in titles:\n2954-            x, _ = title.get_position()\n2955-            # need to start again in case of window resizing\n2956-            title.set_position((x, 1.0))\n2957-            top = -np.inf\n2958-            for ax in axs:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThis still doesn't show me the specific code mentioned in the problem statement. Let me look for the exact pattern where _shared_x_axes.get_siblings is used with set_xlim:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011p482Nxjf5rXVZ7WoT2bF5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"_shared_x_axes.get_siblings\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011p482Nxjf5rXVZ7WoT2bF5",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nHmm, let me look for \"shared_x_axes\" instead since _shared_x_axes might not be the exact attribute name:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01NfoSGjyMBZf5QYUaEbwhNS",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"shared.*x.*axes\" /testbed/lib/matplotlib/axes/_base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NfoSGjyMBZf5QYUaEbwhNS",
+          "content": "[exit_code=0]\n750-                                  if self in self._twinned_axes else None)\n751-        return state\n752-\n753-    def __setstate__(self, state):\n754-        # Merge the grouping info back into the global groupers.\n755:        shared_axes = state.pop(\"_shared_axes\")\n756-        for name, shared_siblings in shared_axes.items():\n757-            self._shared_axes[name].join(*shared_siblings)\n758-        twinned_siblings = state.pop(\"_twinned_axes\")\n759-        if twinned_siblings:\n760-            self._twinned_axes.join(*twinned_siblings)\n761-        self.__dict__ = state\n762-        self._stale = True\n763-\n764-    def __repr__(self):\n765-        fields = []\n--\n1964-        Ymarg = Ysize - yr\n1965-        # Setting these targets to, e.g., 0.05*xr does not seem to help.\n1966-        xm = 0\n1967-        ym = 0\n1968-\n1969:        shared_x = self in self._shared_axes[\"x\"]\n1970-        shared_y = self in self._shared_axes[\"y\"]\n1971-\n1972-        if shared_x and shared_y:\n1973-            raise RuntimeError(\"set_aspect(..., adjustable='datalim') or \"\n1974-                               \"axis('equal') are not allowed when both axes \"\n1975-                               \"are shared.  Try set_aspect(..., \"\n1976-                               \"adjustable='box').\")\n1977-\n1978-        # If y is shared, then we are only allowed to change x, etc.\n1979-        if shared_y:\n--\n4480-        ax2.yaxis.set_visible(False)\n4481-        ax2.patch.set_visible(False)\n4482-        ax2.yaxis.units = self.yaxis.units\n4483-        return ax2\n4484-\n4485:    def get_shared_x_axes(self):\n4486:        \"\"\"Return an immutable view on the shared x-axes Grouper.\"\"\"\n4487-        return cbook.GrouperView(self._shared_axes[\"x\"])\n4488-\n4489-    def get_shared_y_axes(self):\n4490-        \"\"\"Return an immutable view on the shared y-axes Grouper.\"\"\"\n4491-        return cbook.GrouperView(self._shared_axes[\"y\"])\n4492-\n4493-    def label_outer(self):\n4494-        \"\"\"\n4495-        Only show \"outer\" labels and tick labels.\n4496-"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLet me look at the Axis implementation since set_xlim delegates to self.xaxis._set_lim. The problem statement showed code in _base.py, but it might be in the axis-related files. Let me check lib/matplotlib/axis.py:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013EkwDu4XUybc51THobz74M",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"_set_lim\" /testbed/lib/matplotlib/axis.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013EkwDu4XUybc51THobz74M",
+          "content": "[exit_code=0]\n1158-        the top for the y-axis; the \"inverse\" direction is increasing to the\n1159-        left for the x-axis and to the bottom for the y-axis.\n1160-        \"\"\"\n1161-        a, b = self.get_view_interval()\n1162-        # cast to bool to avoid bad interaction between python 3.8 and np.bool_\n1163:        self._set_lim(*sorted((a, b), reverse=bool(inverted)), auto=None)\n1164-\n1165-    def set_default_intervals(self):\n1166-        \"\"\"\n1167-        Set the default limits for the axis data and view interval if they\n1168-        have not been not mutated yet.\n1169-        \"\"\"\n1170-        # this is mainly in support of custom object plotting.  For\n1171-        # example, if someone passes in a datetime object, we do not\n1172-        # know automagically how to set the default min/max of the\n1173-        # data and view limits.  The unit conversion AxisInfo\n1174-        # interface provides a hook for custom types to register\n1175-        # default limits through the AxisInfo.default_limits\n1176-        # attribute, and the derived code below will check for that\n1177-        # and use it if it's available (else just use 0..1)\n1178-\n1179:    def _set_lim(self, v0, v1, *, emit=True, auto):\n1180-        \"\"\"\n1181-        Set view limits.\n1182-\n1183-        This method is a helper for the Axes ``set_xlim``, ``set_ylim``, and\n1184-        ``set_zlim`` methods.\n1185-\n1186-        Parameters\n1187-        ----------\n1188-        v0, v1 : float\n1189-            The view limits.  (Passing *v0* as a (low, high) pair is not\n--\n1240-        if emit:\n1241-            self.axes.callbacks.process(f\"{name}lim_changed\", self.axes)\n1242-            # Call all of the other axes that are shared with this one\n1243-            for other in self._get_shared_axes():\n1244-                if other is not self.axes:\n1245:                    other._axis_map[name]._set_lim(\n1246-                        v0, v1, emit=False, auto=auto)\n1247-                    if other.figure != self.figure:\n1248-                        other.figure.canvas.draw_idle()\n1249-\n1250-        self.stale = True\n1251-        return v0, v1\n1252-\n1253-    def _set_artist_props(self, a):\n1254-        if a is None:\n1255-            return"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nPerfect! I found the bug! It's in `/testbed/lib/matplotlib/axis.py` in the `_set_lim` method (lines 1179-1252). This method is called by `set_xlim` and the issue is on line 1245-1246 where it calls:\n\n```python\nother._axis_map[name]._set_lim(\n    v0, v1, emit=False, auto=auto)\n```\n\nThis is exactly what the problem statement described - when an axis limit is changed, it propagates the change to shared axes with `emit=False`, which means the callbacks don't get triggered on the shared axes.\n\nLet me examine this code more closely to understand the full context:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018t8LVmi4ncLYbqKCQQ51oR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '1179,1252p' /testbed/lib/matplotlib/axis.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018t8LVmi4ncLYbqKCQQ51oR",
+          "content": "[exit_code=0]\ndef _set_lim(self, v0, v1, *, emit=True, auto):\n        \"\"\"\n        Set view limits.\n\n        This method is a helper for the Axes ``set_xlim``, ``set_ylim``, and\n        ``set_zlim`` methods.\n\n        Parameters\n        ----------\n        v0, v1 : float\n            The view limits.  (Passing *v0* as a (low, high) pair is not\n            supported; normalization must occur in the Axes setters.)\n        emit : bool, default: True\n            Whether to notify observers of limit change.\n        auto : bool or None, default: False\n            Whether to turn on autoscaling of the x-axis. True turns on, False\n            turns off, None leaves unchanged.\n        \"\"\"\n        name = self._get_axis_name()\n\n        self.axes._process_unit_info([(name, (v0, v1))], convert=False)\n        v0 = self.axes._validate_converted_limits(v0, self.convert_units)\n        v1 = self.axes._validate_converted_limits(v1, self.convert_units)\n\n        if v0 is None or v1 is None:\n            # Axes init calls set_xlim(0, 1) before get_xlim() can be called,\n            # so only grab the limits if we really need them.\n            old0, old1 = self.get_view_interval()\n            if v0 is None:\n                v0 = old0\n            if v1 is None:\n                v1 = old1\n\n        if self.get_scale() == 'log' and (v0 <= 0 or v1 <= 0):\n            # Axes init calls set_xlim(0, 1) before get_xlim() can be called,\n            # so only grab the limits if we really need them.\n            old0, old1 = self.get_view_interval()\n            if v0 <= 0:\n                _api.warn_external(f\"Attempt to set non-positive {name}lim on \"\n                                   f\"a log-scaled axis will be ignored.\")\n                v0 = old0\n            if v1 <= 0:\n                _api.warn_external(f\"Attempt to set non-positive {name}lim on \"\n                                   f\"a log-scaled axis will be ignored.\")\n                v1 = old1\n        if v0 == v1:\n            _api.warn_external(\n                f\"Attempting to set identical low and high {name}lims \"\n                f\"makes transformation singular; automatically expanding.\")\n        reverse = bool(v0 > v1)  # explicit cast needed for python3.8+np.bool_.\n        v0, v1 = self.get_major_locator().nonsingular(v0, v1)\n        v0, v1 = self.limit_range_for_scale(v0, v1)\n        v0, v1 = sorted([v0, v1], reverse=bool(reverse))\n\n        self.set_view_interval(v0, v1, ignore=True)\n        # Mark viewlims as no longer stale without triggering an autoscale.\n        for ax in self._get_shared_axes():\n            ax._stale_viewlims[name] = False\n        if auto is not None:\n            self._set_autoscale_on(bool(auto))\n\n        if emit:\n            self.axes.callbacks.process(f\"{name}lim_changed\", self.axes)\n            # Call all of the other axes that are shared with this one\n            for other in self._get_shared_axes():\n                if other is not self.axes:\n                    other._axis_map[name]._set_lim(\n                        v0, v1, emit=False, auto=auto)\n                    if other.figure != self.figure:\n                        other.figure.canvas.draw_idle()\n\n        self.stale = True\n        return v0, v1"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nPerfect! Now I have confirmed the exact location and nature of the bug. The issue is in `/testbed/lib/matplotlib/axis.py` in the `_set_lim` method, specifically lines 1240-1248.\n\nThe bug is:\n1. When `emit=True`, the method processes callbacks for the current axis\n2. Then it propagates the limit change to shared axes, but calls them with `emit=False`\n3. This means shared axes don't trigger their own callbacks, even though their limits have changed\n\nBased on the hints, the solution involves using a recursion marker to allow emit=True while preventing infinite recursion.\n\nLet me also check if there are any similar patterns for the y-axis to understand the full scope:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01TU3bq8CakXoC9UhAHmJtT2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"ylim_changed\" /testbed/lib/matplotlib/axis.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TU3bq8CakXoC9UhAHmJtT2",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Rs1tghm9NTCtxXxRCbYkAP",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"lim_changed\" /testbed/lib/matplotlib/axis.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Rs1tghm9NTCtxXxRCbYkAP",
+          "content": "[exit_code=0]\n1241:            self.axes.callbacks.process(f\"{name}lim_changed\", self.axes)"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "IMPORTANT: You are running out of iterations. Stop exploring immediately. Based on everything you have found so far, write the reproduction test NOW and output the required JSON block. Do not make any more exploratory tool calls."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nBased on my exploration, I have identified the bug:\n\n**Location**: `/testbed/lib/matplotlib/axis.py` in the `_set_lim` method (lines 1240-1248)\n\n**Bug**: When axis limits are changed on a shared axis, the method calls `other._axis_map[name]._set_lim(v0, v1, emit=False, auto=auto)` which prevents callbacks from being triggered on shared axes.\n\n**Root cause**: The `emit=False` parameter prevents the `{name}lim_changed` callbacks from being processed on shared axes, even though their limits have changed.\n\n**Test target**: `lib/matplotlib/tests/test_axes.py::test_xylim_changed_shared` - this test doesn't exist yet but should test that callbacks are triggered on shared axes.\n\nThe bug affects both x and y axes since the same `_set_lim` method is used for both (it uses `f\"{name}lim_changed\"` where name can be 'x' or 'y').\n\nThe hints provide a solution using a recursion marker to allow emit=True while preventing infinite recursion, but my job is only to localize the bug, not fix it.\n</think>\n\n```json\n{\n  \"relevant_files\": [\"/testbed/lib/matplotlib/axis.py\"],\n  \"relevant_symbols\": [\"Axis._set_lim\"],\n  \"bug_analysis\": \"The _set_lim method processes callbacks for the current axis when emit=True, but when propagating limit changes to shared axes, it calls other._axis_map[name]._set_lim(v0, v1, emit=False, auto=auto). The emit=False parameter prevents xlim_changed/ylim_changed callbacks from being triggered on shared axes, even though their view limits have been updated.\",\n  \"exploration_notes\": \"The bug is in lines 1240-1248 of axis.py. The _set_lim method is called by set_xlim/set_ylim methods in _base.py via self.xaxis._set_lim(left, right, emit=emit, auto=auto). The method uses self._get_shared_axes() to find shared axes and calls their _set_lim with emit=False. The test target test_xylim_changed_shared should verify that callbacks are triggered on shared axes when limits change on any axis in the shared group.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 13,
+  "timestamp": "2026-04-13T13:15:22Z"
+}

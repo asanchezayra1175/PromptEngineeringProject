@@ -1,0 +1,269 @@
+{
+  "instance_id": "django__django-14787",
+  "status": "success",
+  "attempt": 1,
+  "relevant_files": [
+    "/testbed/django/utils/decorators.py"
+  ],
+  "relevant_symbols": [
+    "_multi_decorate"
+  ],
+  "bug_analysis": "The _multi_decorate function creates a bound_method using functools.partial(method.__get__(self, type(self))), which returns a partial object. When decorators are applied to this partial object in the loop 'for dec in decorators: bound_method = dec(bound_method)', decorators that access function attributes like __name__, __module__, etc. fail because partial objects don't have these attributes. This causes AttributeError when decorators try to access func.__name__ on the partial object.",
+  "exploration_notes": "The issue occurs in the _multi_decorate function around line 39 where bound_method = partial(method.__get__(self, type(self))) creates a partial object, then decorators are applied to it without ensuring it has the expected function attributes. The method_decorator function calls _multi_decorate, and tests in /testbed/tests/decorators/tests.py verify that method_decorator should preserve attributes like __name__ and __doc__. The _update_method_wrapper function exists to handle wrapper attribute copying but is not used for the bound_method before decorators are applied.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explore the following repository and produce a localization report identifying where the bug lives.\n\n<instance_id>django__django-14787</instance_id>\n\n<problem_statement>\nmethod_decorator() should preserve wrapper assignments\nDescription\n\t\nthe function that is passed to the decorator is a partial object and does not have any of the attributes expected from a function i.e. __name__, __module__ etc...\nconsider the following case\ndef logger(func):\n\t@wraps(func)\n\tdef inner(*args, **kwargs):\n\t\ttry:\n\t\t\tresult = func(*args, **kwargs)\n\t\texcept Exception as e:\n\t\t\tresult = str(e)\n\t\tfinally:\n\t\t\tlogger.debug(f\"{func.__name__} called with args: {args} and kwargs: {kwargs} resulting: {result}\")\n\treturn inner\nclass Test:\n\t@method_decorator(logger)\n\tdef hello_world(self):\n\t\treturn \"hello\"\nTest().test_method()\nThis results in the following exception\nAttributeError: 'functools.partial' object has no attribute '__name__'\n\n</problem_statement>\n\n<hints>\n\n</hints>\n\n<repo>django/django</repo>\n<base_commit>004b4620f6f4ad87261e149898940f2dcd5757ef</base_commit>\n\n<test_targets>\nThese tests must pass after the fix \u2014 use them to find the relevant module.\n[\n  \"@method_decorator preserves wrapper assignments.\"\n]\n</test_targets>\n\nBegin by reading the problem statement, then grep for the key term. Output the JSON report when you have identified the relevant files and symbols.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLooking at the problem statement, I can see:\n1. The issue is with `method_decorator()` not preserving wrapper assignments\n2. The specific problem is that when a decorator is applied using `method_decorator`, the resulting function is a `functools.partial` object that lacks expected function attributes like `__name__`, `__module__`, etc.\n3. The test target mentions \"@method_decorator preserves wrapper assignments\"\n\nMy plan:\n1. First, I need to find where `method_decorator` is defined in the Django codebase\n2. Look at the implementation to understand how it works currently\n3. Understand what's causing the `functools.partial` object to be returned instead of a properly wrapped function\n4. Identify the specific code that needs to be changed\n\nLet me start by searching for `method_decorator` in the codebase.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DDfKE6dQTvniChwtu4A1Fb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -r \"def method_decorator\" /testbed"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DDfKE6dQTvniChwtu4A1Fb",
+          "content": "[exit_code=0]\n/testbed/django/utils/decorators.py:def method_decorator(decorator, name=''):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nGreat! I found that `method_decorator` is defined in `/testbed/django/utils/decorators.py`. Let me read this file to understand the current implementation.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XxbSRxMBqwACTk7dYM9vkM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/utils/decorators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XxbSRxMBqwACTk7dYM9vkM",
+          "content": "[exit_code=0]\n\"Functions that help with dynamically creating decorators for views.\"\n\nfrom functools import partial, update_wrapper, wraps\n\n\nclass classonlymethod(classmethod):\n    def __get__(self, instance, cls=None):\n        if instance is not None:\n            raise AttributeError(\"This method is available only on the class, not on instances.\")\n        return super().__get__(instance, cls)\n\n\ndef _update_method_wrapper(_wrapper, decorator):\n    # _multi_decorate()'s bound_method isn't available in this scope. Cheat by\n    # using it on a dummy function.\n    @decorator\n    def dummy(*args, **kwargs):\n        pass\n    update_wrapper(_wrapper, dummy)\n\n\ndef _multi_decorate(decorators, method):\n    \"\"\"\n    Decorate `method` with one or more function decorators. `decorators` can be\n    a single decorator or an iterable of decorators.\n    \"\"\"\n    if hasattr(decorators, '__iter__'):\n        # Apply a list/tuple of decorators if 'decorators' is one. Decorator\n        # functions are applied so that the call order is the same as the\n        # order in which they appear in the iterable.\n        decorators = decorators[::-1]\n    else:\n        decorators = [decorators]\n\n    def _wrapper(self, *args, **kwargs):\n        # bound_method has the signature that 'decorator' expects i.e. no\n        # 'self' argument, but it's a closure over self so it can call\n        # 'func'. Also, wrap method.__get__() in a function because new\n        # attributes can't be set on bound method objects, only on functions.\n        bound_method = partial(method.__get__(self, type(self)))\n        for dec in decorators:\n            bound_method = dec(bound_method)\n        return bound_method(*args, **kwargs)\n\n    # Copy any attributes that a decorator adds to the function it decorates.\n    for dec in decorators:\n        _update_method_wrapper(_wrapper, dec)\n    # Preserve any existing attributes of 'method', including the name.\n    update_wrapper(_wrapper, method)\n    return _wrapper\n\n\ndef method_decorator(decorator, name=''):\n    \"\"\"\n    Convert a function decorator into a method decorator\n    \"\"\"\n    # 'obj' can be a class or a function. If 'obj' is a function at the time it\n    # is passed to _dec,  it will eventually be a method of the class it is\n    # defined on. If 'obj' is a class, the 'name' is required to be the name\n    # of the method that will be decorated.\n    def _dec(obj):\n        if not isinstance(obj, type):\n            return _multi_decorate(decorator, obj)\n        if not (name and hasattr(obj, name)):\n            raise ValueError(\n                \"The keyword argument `name` must be the name of a method \"\n                \"of the decorated class: %s. Got '%s' instead.\" % (obj, name)\n            )\n        method = getattr(obj, name)\n        if not callable(method):\n            raise TypeError(\n                \"Cannot decorate '%s' as it isn't a callable attribute of \"\n                \"%s (%s).\" % (name, obj, method)\n            )\n        _wrapper = _multi_decorate(decorator, method)\n        setattr(obj, name, _wrapper)\n        return obj\n\n    # Don't worry about making _dec look similar to a list/tuple as it's rather\n    # meaningless.\n    if not hasattr(decorator, '__iter__'):\n        update_wrapper(_dec, decorator)\n    # Change the name to aid debugging.\n    obj = decorator if hasattr(decorator, '__name__') else decorator.__class__\n    _dec.__name__ = 'method_decorator(%s)' % obj.__name__\n    return _dec\n\n\ndef decorator_from_middleware_with_args(middleware_class):\n    \"\"\"\n    Like decorator_from_middleware, but return a function\n    that accepts the arguments to be passed to the middleware_class.\n    Use like::\n\n         cache_page = decorator_from_middleware_with_args(CacheMiddleware)\n         # ...\n\n         @cache_page(3600)\n         def my_view(request):\n             # ...\n    \"\"\"\n    return make_middleware_decorator(middleware_class)\n\n\ndef decorator_from_middleware(middleware_class):\n    \"\"\"\n    Given a middleware class (not an instance), return a view decorator. This\n    lets you use middleware functionality on a per-view basis. The middleware\n    is created with no params passed.\n    \"\"\"\n    return make_middleware_decorator(middleware_class)()\n\n\ndef make_middleware_decorator(middleware_class):\n    def _make_decorator(*m_args, **m_kwargs):\n        def _decorator(view_func):\n            middleware = middleware_class(view_func, *m_args, **m_kwargs)\n\n            @wraps(view_func)\n            def _wrapped_view(request, *args, **kwargs):\n                if hasattr(middleware, 'process_request'):\n                    result = middleware.process_request(request)\n                    if result is not None:\n                        return result\n                if hasattr(middleware, 'process_view'):\n                    result = middleware.process_view(request, view_func, args, kwargs)\n                    if result is not None:\n                        return result\n                try:\n                    response = view_func(request, *args, **kwargs)\n                except Exception as e:\n                    if hasattr(middleware, 'process_exception'):\n                        result = middleware.process_exception(request, e)\n                        if result is not None:\n                            return result\n                    raise\n                if hasattr(response, 'render') and callable(response.render):\n                    if hasattr(middleware, 'process_template_response'):\n                        response = middleware.process_template_response(request, response)\n                    # Defer running of process_response until after the template\n                    # has been rendered:\n                    if hasattr(middleware, 'process_response'):\n                        def callback(response):\n                            return middleware.process_response(request, response)\n                        response.add_post_render_callback(callback)\n                else:\n                    if hasattr(middleware, 'process_response'):\n                        return middleware.process_response(request, response)\n                return response\n            return _wrapped_view\n        return _decorator\n    return _make_decorator\n\n\ndef sync_and_async_middleware(func):\n    \"\"\"\n    Mark a middleware factory as returning a hybrid middleware supporting both\n    types of request.\n    \"\"\"\n    func.sync_capable = True\n    func.async_capable = True\n    return func\n\n\ndef sync_only_middleware(func):\n    \"\"\"\n    Mark a middleware factory as returning a sync middleware.\n    This is the default.\n    \"\"\"\n    func.sync_capable = True\n    func.async_capable = False\n    return func\n\n\ndef async_only_middleware(func):\n    \"\"\"Mark a middleware factory as returning an async middleware.\"\"\"\n    func.sync_capable = False\n    func.async_capable = True\n    return func"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I can see the issue! Looking at the `_multi_decorate` function, specifically this line:\n```python\nbound_method = partial(method.__get__(self, type(self)))\n```\n\nThis creates a `functools.partial` object. Then when decorators are applied:\n```python\nfor dec in decorators:\n    bound_method = dec(bound_method)\n```\n\nThe decorator (`logger` in the example) gets a `partial` object instead of a regular function, which is why `func.__name__` fails - `partial` objects don't have `__name__` attributes.\n\nThe issue is that when the decorator is applied to the `partial` object, the decorator expects a function-like object with attributes like `__name__`, `__module__`, etc., but `partial` doesn't have these.\n\nLet me look at the test to see what exactly should be tested:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01W1sQMiauvoy8yp8SZuJTc5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -r \"method_decorator preserves wrapper assignments\" /testbed"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01W1sQMiauvoy8yp8SZuJTc5",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe exact test text didn't match. Let me search more broadly for tests related to method_decorator:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0199DtmJRvqkHe1CDBdKF2YF",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed -name \"*.py\" -exec grep -l \"method_decorator\" {} \\;"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0199DtmJRvqkHe1CDBdKF2YF",
+          "content": "[exit_code=0]\n/testbed/django/contrib/admin/options.py\n/testbed/django/contrib/admin/sites.py\n/testbed/django/contrib/admindocs/views.py\n/testbed/django/contrib/auth/admin.py\n/testbed/django/contrib/auth/views.py\n/testbed/django/utils/decorators.py\n/testbed/django/views/decorators/cache.py\n/testbed/django/views/decorators/debug.py\n/testbed/tests/decorators/tests.py\n/testbed/tests/generic_views/views.py\n/testbed/tests/middleware/views.py\n/testbed/tests/test_client/views.py\n/testbed/tests/view_tests/tests/test_debug.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_016bquw8ZgMnYVRxnRhyd5b5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 10 -B 5 \"wrapper assignments\" /testbed/tests/decorators/tests.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016bquw8ZgMnYVRxnRhyd5b5",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01EDinvdQZMRFc4uvfQAT8Sh",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/tests/decorators/tests.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EDinvdQZMRFc4uvfQAT8Sh",
+          "content": "[exit_code=0]\nfrom functools import update_wrapper, wraps\nfrom unittest import TestCase\n\nfrom django.contrib.admin.views.decorators import staff_member_required\nfrom django.contrib.auth.decorators import (\n    login_required, permission_required, user_passes_test,\n)\nfrom django.http import HttpRequest, HttpResponse, HttpResponseNotAllowed\nfrom django.middleware.clickjacking import XFrameOptionsMiddleware\nfrom django.test import SimpleTestCase\nfrom django.utils.decorators import method_decorator\nfrom django.utils.functional import keep_lazy, keep_lazy_text, lazy\nfrom django.utils.safestring import mark_safe\nfrom django.views.decorators.cache import (\n    cache_control, cache_page, never_cache,\n)\nfrom django.views.decorators.clickjacking import (\n    xframe_options_deny, xframe_options_exempt, xframe_options_sameorigin,\n)\nfrom django.views.decorators.http import (\n    condition, require_GET, require_http_methods, require_POST, require_safe,\n)\nfrom django.views.decorators.vary import vary_on_cookie, vary_on_headers\n\n\ndef fully_decorated(request):\n    \"\"\"Expected __doc__\"\"\"\n    return HttpResponse('<html><body>dummy</body></html>')\n\n\nfully_decorated.anything = \"Expected __dict__\"\n\n\ndef compose(*functions):\n    # compose(f, g)(*args, **kwargs) == f(g(*args, **kwargs))\n    functions = list(reversed(functions))\n\n    def _inner(*args, **kwargs):\n        result = functions[0](*args, **kwargs)\n        for f in functions[1:]:\n            result = f(result)\n        return result\n    return _inner\n\n\nfull_decorator = compose(\n    # django.views.decorators.http\n    require_http_methods([\"GET\"]),\n    require_GET,\n    require_POST,\n    require_safe,\n    condition(lambda r: None, lambda r: None),\n\n    # django.views.decorators.vary\n    vary_on_headers('Accept-language'),\n    vary_on_cookie,\n\n    # django.views.decorators.cache\n    cache_page(60 * 15),\n    cache_control(private=True),\n    never_cache,\n\n    # django.contrib.auth.decorators\n    # Apply user_passes_test twice to check #9474\n    user_passes_test(lambda u: True),\n    login_required,\n    permission_required('change_world'),\n\n    # django.contrib.admin.views.decorators\n    staff_member_required,\n\n    # django.utils.functional\n    keep_lazy(HttpResponse),\n    keep_lazy_text,\n    lazy,\n\n    # django.utils.safestring\n    mark_safe,\n)\n\nfully_decorated = full_decorator(fully_decorated)\n\n\nclass DecoratorsTest(TestCase):\n\n    def test_attributes(self):\n        \"\"\"\n        Built-in decorators set certain attributes of the wrapped function.\n        \"\"\"\n        self.assertEqual(fully_decorated.__name__, 'fully_decorated')\n        self.assertEqual(fully_decorated.__doc__, 'Expected __doc__')\n        self.assertEqual(fully_decorated.__dict__['anything'], 'Expected __dict__')\n\n    def test_user_passes_test_composition(self):\n        \"\"\"\n        The user_passes_test decorator can be applied multiple times (#9474).\n        \"\"\"\n        def test1(user):\n            user.decorators_applied.append('test1')\n            return True\n\n        def test2(user):\n            user.decorators_applied.append('test2')\n            return True\n\n        def callback(request):\n            return request.user.decorators_applied\n\n        callback = user_passes_test(test1)(callback)\n        callback = user_passes_test(test2)(callback)\n\n        class DummyUser:\n            pass\n\n        class DummyRequest:\n            pass\n\n        request = DummyRequest()\n        request.user = DummyUser()\n        request.user.decorators_applied = []\n        response = callback(request)\n\n        self.assertEqual(response, ['test2', 'test1'])\n\n    def test_cache_page(self):\n        def my_view(request):\n            return \"response\"\n        my_view_cached = cache_page(123)(my_view)\n        self.assertEqual(my_view_cached(HttpRequest()), \"response\")\n        my_view_cached2 = cache_page(123, key_prefix=\"test\")(my_view)\n        self.assertEqual(my_view_cached2(HttpRequest()), \"response\")\n\n    def test_require_safe_accepts_only_safe_methods(self):\n        \"\"\"\n        Test for the require_safe decorator.\n        A view returns either a response or an exception.\n        Refs #15637.\n        \"\"\"\n        def my_view(request):\n            return HttpResponse(\"OK\")\n        my_safe_view = require_safe(my_view)\n        request = HttpRequest()\n        request.method = 'GET'\n        self.assertIsInstance(my_safe_view(request), HttpResponse)\n        request.method = 'HEAD'\n        self.assertIsInstance(my_safe_view(request), HttpResponse)\n        request.method = 'POST'\n        self.assertIsInstance(my_safe_view(request), HttpResponseNotAllowed)\n        request.method = 'PUT'\n        self.assertIsInstance(my_safe_view(request), HttpResponseNotAllowed)\n        request.method = 'DELETE'\n        self.assertIsInstance(my_safe_view(request), HttpResponseNotAllowed)\n\n\n# For testing method_decorator, a decorator that assumes a single argument.\n# We will get type arguments if there is a mismatch in the number of arguments.\ndef simple_dec(func):\n    def wrap\n...[truncated]...\n  \"\"\"\n        Ensures @xframe_options_exempt properly instructs the\n        XFrameOptionsMiddleware to NOT set the header.\n        \"\"\"\n        @xframe_options_exempt\n        def a_view(request):\n            return HttpResponse()\n        req = HttpRequest()\n        resp = a_view(req)\n        self.assertIsNone(resp.get('X-Frame-Options', None))\n        self.assertTrue(resp.xframe_options_exempt)\n\n        # Since the real purpose of the exempt decorator is to suppress\n        # the middleware's functionality, let's make sure it actually works...\n        r = XFrameOptionsMiddleware(a_view)(req)\n        self.assertIsNone(r.get('X-Frame-Options', None))\n\n\nclass NeverCacheDecoratorTest(SimpleTestCase):\n    def test_never_cache_decorator(self):\n        @never_cache\n        def a_view(request):\n            return HttpResponse()\n        r = a_view(HttpRequest())\n        self.assertEqual(\n            set(r.headers['Cache-Control'].split(', ')),\n            {'max-age=0', 'no-cache', 'no-store', 'must-revalidate', 'private'},\n        )\n\n    def test_never_cache_decorator_http_request(self):\n        class MyClass:\n            @never_cache\n            def a_view(self, request):\n                return HttpResponse()\n        msg = (\n            \"never_cache didn't receive an HttpRequest. If you are decorating \"\n            \"a classmethod, be sure to use @method_decorator.\"\n        )\n        with self.assertRaisesMessage(TypeError, msg):\n            MyClass().a_view(HttpRequest())\n\n\nclass CacheControlDecoratorTest(SimpleTestCase):\n    def test_cache_control_decorator_http_request(self):\n        class MyClass:\n            @cache_control(a='b')\n            def a_view(self, request):\n                return HttpResponse()\n\n        msg = (\n            \"cache_control didn't receive an HttpRequest. If you are \"\n            \"decorating a classmethod, be sure to use @method_decorator.\"\n        )\n        with self.assertRaisesMessage(TypeError, msg):\n            MyClass().a_view(HttpRequest())"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nI found the test file for decorators, but the file seems truncated. Let me search more specifically for the method_decorator test. Looking at the problem statement again, the issue is about `method_decorator` not preserving wrapper assignments, which means attributes like `__name__`, `__module__`, etc. should be preserved when a function decorator is converted to a method decorator.\n\nLet me search for more specific tests related to method_decorator:\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012rzmYG4gT3DZ3iyzW2EKP5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 20 -B 5 \"method_decorator\" /testbed/tests/decorators/tests.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012rzmYG4gT3DZ3iyzW2EKP5",
+          "content": "[exit_code=0]\nlogin_required, permission_required, user_passes_test,\n)\nfrom django.http import HttpRequest, HttpResponse, HttpResponseNotAllowed\nfrom django.middleware.clickjacking import XFrameOptionsMiddleware\nfrom django.test import SimpleTestCase\nfrom django.utils.decorators import method_decorator\nfrom django.utils.functional import keep_lazy, keep_lazy_text, lazy\nfrom django.utils.safestring import mark_safe\nfrom django.views.decorators.cache import (\n    cache_control, cache_page, never_cache,\n)\nfrom django.views.decorators.clickjacking import (\n    xframe_options_deny, xframe_options_exempt, xframe_options_sameorigin,\n)\nfrom django.views.decorators.http import (\n    condition, require_GET, require_http_methods, require_POST, require_safe,\n)\nfrom django.views.decorators.vary import vary_on_cookie, vary_on_headers\n\n\ndef fully_decorated(request):\n    \"\"\"Expected __doc__\"\"\"\n    return HttpResponse('<html><body>dummy</body></html>')\n\n\nfully_decorated.anything = \"Expected __dict__\"\n--\n        self.assertIsInstance(my_safe_view(request), HttpResponseNotAllowed)\n        request.method = 'DELETE'\n        self.assertIsInstance(my_safe_view(request), HttpResponseNotAllowed)\n\n\n# For testing method_decorator, a decorator that assumes a single argument.\n# We will get type arguments if there is a mismatch in the number of arguments.\ndef simple_dec(func):\n    def wrapper(arg):\n        return func(\"test:\" + arg)\n    return wraps(func)(wrapper)\n\n\nsimple_dec_m = method_decorator(simple_dec)\n\n\n# For testing method_decorator, two decorators that add an attribute to the function\ndef myattr_dec(func):\n    def wrapper(*args, **kwargs):\n        return func(*args, **kwargs)\n    wrapper.myattr = True\n    return wrapper\n\n\nmyattr_dec_m = method_decorator(myattr_dec)\n\n\ndef myattr2_dec(func):\n    def wrapper(*args, **kwargs):\n        return func(*args, **kwargs)\n    wrapper.myattr2 = True\n    return wrapper\n\n\nmyattr2_dec_m = method_decorator(myattr2_dec)\n\n\nclass ClsDec:\n    def __init__(self, myattr):\n        self.myattr = myattr\n\n    def __call__(self, f):\n\n        def wrapped():\n            return f() and self.myattr\n        return update_wrapper(wrapped, f)\n\n\nclass MethodDecoratorTests(SimpleTestCase):\n    \"\"\"\n    Tests for method_decorator\n    \"\"\"\n    def test_preserve_signature(self):\n        class Test:\n            @simple_dec_m\n            def say(self, arg):\n                return arg\n\n        self.assertEqual(\"test:hello\", Test().say(\"hello\"))\n\n    def test_preserve_attributes(self):\n        # Sanity check myattr_dec and myattr2_dec\n        @myattr_dec\n        def func():\n            pass\n        self.assertIs(getattr(func, 'myattr', False), True)\n\n        @myattr2_dec\n        def func():\n            pass\n        self.assertIs(getattr(func, 'myattr2', False), True)\n--\n            pass\n\n        self.assertIs(getattr(func, 'myattr', False), True)\n        self.assertIs(getattr(func, 'myattr2', False), False)\n\n        # Decorate using method_decorator() on the method.\n        class TestPlain:\n            @myattr_dec_m\n            @myattr2_dec_m\n            def method(self):\n                \"A method\"\n                pass\n\n        # Decorate using method_decorator() on both the class and the method.\n        # The decorators applied to the methods are applied before the ones\n        # applied to the class.\n        @method_decorator(myattr_dec_m, \"method\")\n        class TestMethodAndClass:\n            @method_decorator(myattr2_dec_m)\n            def method(self):\n                \"A method\"\n                pass\n\n        # Decorate using an iterable of function decorators.\n        @method_decorator((myattr_dec, myattr2_dec), 'method')\n        class TestFunctionIterable:\n            def method(self):\n                \"A method\"\n                pass\n\n        # Decorate using an iterable of method decorators.\n        decorators = (myattr_dec_m, myattr2_dec_m)\n\n        @method_decorator(decorators, \"method\")\n        class TestMethodIterable:\n            def method(self):\n                \"A method\"\n                pass\n\n        tests = (TestPlain, TestMethodAndClass, TestFunctionIterable, TestMethodIterable)\n        for Test in tests:\n            with self.subTest(Test=Test):\n                self.assertIs(getattr(Test().method, 'myattr', False), True)\n                self.assertIs(getattr(Test().method, 'myattr2', False), True)\n                self.assertIs(getattr(Test.method, 'myattr', False), True)\n                self.assertIs(getattr(Test.method, 'myattr2', False), True)\n                self.assertEqual(Test.method.__doc__, 'A method')\n                self.assertEqual(Test.method.__name__, 'method')\n\n    def test_new_attribute(self):\n        \"\"\"A decorator that sets a new attribute on the method.\"\"\"\n        def decorate(func):\n            func.x = 1\n            return func\n\n        class MyClass:\n            @method_decorator(decorate)\n            def method(self):\n                return True\n\n        obj = MyClass()\n        self.assertEqual(ob\n...[truncated]...\n           @classmethod\n                def __module__(cls):\n                    return \"tests\"\n\n    def test_invalid_method_name_to_decorate(self):\n        \"\"\"\n        @method_decorator on a nonexistent method raises an error.\n        \"\"\"\n        msg = (\n            \"The keyword argument `name` must be the name of a method of the \"\n            \"decorated class: <class 'Test'>. Got 'nonexistent_method' instead\"\n        )\n        with self.assertRaisesMessage(ValueError, msg):\n            @method_decorator(lambda: None, name='nonexistent_method')\n            class Test:\n                @classmethod\n                def __module__(cls):\n                    return \"tests\"\n\n\nclass XFrameOptionsDecoratorsTests(TestCase):\n    \"\"\"\n    Tests for the X-Frame-Options decorators.\n    \"\"\"\n    def test_deny_decorator(self):\n        \"\"\"\n        Ensures @xframe_options_deny properly sets the X-Frame-Options header.\n        \"\"\"\n        @xframe_options_deny\n        def a_view(request):\n            return HttpResponse()\n        r = a_view(HttpRequest())\n        self.assertEqual(r.headers['X-Frame-Options'], 'DENY')\n\n--\n            @never_cache\n            def a_view(self, request):\n                return HttpResponse()\n        msg = (\n            \"never_cache didn't receive an HttpRequest. If you are decorating \"\n            \"a classmethod, be sure to use @method_decorator.\"\n        )\n        with self.assertRaisesMessage(TypeError, msg):\n            MyClass().a_view(HttpRequest())\n\n\nclass CacheControlDecoratorTest(SimpleTestCase):\n    def test_cache_control_decorator_http_request(self):\n        class MyClass:\n            @cache_control(a='b')\n            def a_view(self, request):\n                return HttpResponse()\n\n        msg = (\n            \"cache_control didn't receive an HttpRequest. If you are \"\n            \"decorating a classmethod, be sure to use @method_decorator.\"\n        )\n        with self.assertRaisesMessage(TypeError, msg):\n            MyClass().a_view(HttpRequest())"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nPerfect! I can see the test that's relevant. In the `test_preserve_attributes` method, there are these assertions:\n\n```python\nself.assertEqual(Test.method.__doc__, 'A method')\nself.assertEqual(Test.method.__name__, 'method')\n```\n\nThis confirms that method_decorator should preserve wrapper assignments like `__doc__` and `__name__`. \n\nLooking at the problem in the `_multi_decorate` function again, the issue is clear:\n\n1. `bound_method = partial(method.__get__(self, type(self)))` creates a `partial` object\n2. When the decorator is applied: `bound_method = dec(bound_method)`, the decorator receives a `partial` object instead of a function\n3. `partial` objects don't have `__name__`, `__module__`, etc. attributes that function decorators expect\n\nThe core issue is in `/testbed/django/utils/decorators.py` in the `_multi_decorate` function. The `bound_method` is a `partial` object that doesn't have the function attributes that decorators expect.\n\nLet me confirm by reading the issue description again and understanding exactly what needs to be fixed.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XYsrgpnBc22EKrz1tvJAtG",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 5 -B 5 \"def _update_method_wrapper\" /testbed/django/utils/decorators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XYsrgpnBc22EKrz1tvJAtG",
+          "content": "[exit_code=0]\nif instance is not None:\n            raise AttributeError(\"This method is available only on the class, not on instances.\")\n        return super().__get__(instance, cls)\n\n\ndef _update_method_wrapper(_wrapper, decorator):\n    # _multi_decorate()'s bound_method isn't available in this scope. Cheat by\n    # using it on a dummy function.\n    @decorator\n    def dummy(*args, **kwargs):\n        pass"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I understand the full picture. Looking at the code:\n\n1. In `_multi_decorate()`, the line `bound_method = partial(method.__get__(self, type(self)))` creates a partial object\n2. Then `for dec in decorators: bound_method = dec(bound_method)` applies decorators to this partial object\n3. The problem is that decorators like the `logger` decorator in the problem statement expect function-like objects with `__name__`, `__module__`, etc. attributes\n4. But `functools.partial` objects don't have these attributes, causing `AttributeError: 'functools.partial' object has no attribute '__name__'`\n\nThe bug is in the `_multi_decorate` function where it uses `partial(method.__get__(self, type(self)))` without ensuring that the resulting object has the necessary function attributes that decorators might expect.\n\nThe existing `_update_method_wrapper` function seems to be trying to address this by creating a dummy function and applying the decorator to it to copy attributes, but this isn't being applied to the `bound_method` before decorators are applied to it.\n\nI have enough information now to write the localization report.\n</think>\n\n```json\n{\n  \"relevant_files\": [\"/testbed/django/utils/decorators.py\"],\n  \"relevant_symbols\": [\"_multi_decorate\"],\n  \"bug_analysis\": \"The _multi_decorate function creates a bound_method using functools.partial(method.__get__(self, type(self))), which returns a partial object. When decorators are applied to this partial object in the loop 'for dec in decorators: bound_method = dec(bound_method)', decorators that access function attributes like __name__, __module__, etc. fail because partial objects don't have these attributes. This causes AttributeError when decorators try to access func.__name__ on the partial object.\",\n  \"exploration_notes\": \"The issue occurs in the _multi_decorate function around line 39 where bound_method = partial(method.__get__(self, type(self))) creates a partial object, then decorators are applied to it without ensuring it has the expected function attributes. The method_decorator function calls _multi_decorate, and tests in /testbed/tests/decorators/tests.py verify that method_decorator should preserve attributes like __name__ and __doc__. The _update_method_wrapper function exists to handle wrapper attribute copying but is not used for the bound_method before decorators are applied.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T10:08:40Z"
+}
