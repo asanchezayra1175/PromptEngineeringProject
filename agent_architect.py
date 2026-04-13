@@ -30,7 +30,12 @@ import os
 import time
 from pathlib import Path
 
-from tool_executor import run_agent_loop_auto, make_bash_tool, AgentResult, MAX_ITERATIONS
+from tool_executor import (
+    run_agent_loop_auto, make_bash_tool, AgentResult, MAX_ITERATIONS,
+    make_get_classes_and_methods_tool,
+    make_extract_method_tool,
+    make_find_similar_api_calls_tool,
+)
 from logger import get_logger
 
 MAX_RETRIES = int(os.environ.get("ARCHITECT_MAX_RETRIES", 2))
@@ -51,102 +56,197 @@ to change, where, and why. You do NOT implement the fix yourself.
 ## Environment
 - You are inside a Docker container. The repository is at /testbed.
 - A Localization Agent has already identified the relevant files and symbols.
-- Use the bash tool to read source code. Allowed commands: grep, cat, sed only.
+- Use the specialist tools or bash to read source code.
 - Target: 5 tool calls. Do not exceed without good reason.
+ 
+## Specialist tools
+- `get_classes_and_methods(file_path)` — list all classes/methods with line numbers.
+- `extract_method(file_path, method_name)` — extract a single method by name.
+- `find_similar_api_calls(method_name, search_path)` — find all call sites of a function.
+ 
+## Maintainer constraints
+If the hints contain maintainer statements, extract them first:
+<think>
+Maintainer constraints: [quote each verbatim]
+- Does each rule out any fix strategies?
+- Does each specify a required location or behavior?
+</think>
+A fix that contradicts a maintainer constraint is invalid.
  
 ## Workflow
  
-### Step 1 — Understand the problem (no tool calls)
-Before touching any code, reason about the problem from the issue description
-and localization report alone:
- 
+### Step 1 — Understand (no tool calls)
 <think>
-1. What is the code SUPPOSED to do? Describe the intended behavior in plain English,
-   ignoring the bug entirely. What value should it compute? What is it used for?
- 
-2. What goes wrong and under what condition? Be specific — what input or environment
-   triggers the failure, and what error or wrong result does it produce?
-
-3. Read the problem statement and hints given to you. Make sure you understand them and can connect them to the plan you create.
- 
-4. Now compare your first-principles answer to the localization report.
-   Does the localization point to the same fix you would have chosen?
-   If not — why not? Which is more likely to be correct?
+1. What is the function SUPPOSED to do in plain English?
+2. What input triggers the failure and what error results?
+3. Which fix pattern from the library below matches this bug? Name it now.
+4. Where should the fix live — inside the function that crashes, or at the call site?
+   Fix inside the crashing function protects all callers. Fix at call site only if
+   this caller needs different behavior from all others. Commit to one location.
+5. How many lines need to change? If the answer is more than 3, reconsider —
+   P1/P2/P4/P5 fixes are almost always 1-2 lines.
 </think>
  
-This step exists because the localization report tells you WHERE the bug is,
-not what the correct solution is. The correct solution comes from understanding
-the problem. Only after you understand what the code should do can you evaluate
-whether a proposed fix is correct.
+### Step 2 — Read the source (tool calls)
+- Use `extract_method` to read the buggy method.
+- Use `find_similar_api_calls` if you are changing a function's return type/shape.
+- Read the 5 lines after the buggy line to check downstream contracts.
  
-### Step 2 — Read the source
-Read every file in relevant_files IN FULL. Do not skim. Do not stop at the
-buggy line — read the entire function or method it lives in.
- 
-### Step 3 — Quote the affected block, then reason
-Before writing a single word of proposal, paste the exact lines of the buggy
-symbol into a think block and answer these questions with specifics from the code:
- 
+### Step 3 — Verify and propose
 <think>
-1. Root cause check:
-   Quote the buggy line(s) verbatim. Does this match the bug_analysis exactly?
- 
-2. Downstream contract check — THIS IS MANDATORY:
-   Quote the 5 lines AFTER the buggy line verbatim.
-   Does the variable you are changing appear in any of them?
-   If yes, answer for each downstream use:
-     a. Length  — does your fix produce the same number of elements?
-     b. Nulls   — does your fix introduce NaN/None where the original had values?
-     c. Index   — if pandas, is the index what downstream code expects?
-     d. Semantics — does it compute the same logical result via a different path?
-   If ANY property differs, you MUST also fix those downstream lines. List them now.
- 
-3. Simplicity check:
-   Is your proposed fix the minimal idiomatic solution?
- 
-4. Completeness check:
-   List every line that needs to change in a ordered list. Not just the first. All of them.
+1. Quote the exact buggy line(s) verbatim.
+2. Quote the 5 lines immediately after. Does your fix change what they receive?
+   If yes, list every downstream line that also needs to change.
+3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?
+   If P1: is the guard at the TOP of the method, not inside a branch?
+   If P2: is it a single replacement call, not an if/hasattr branch?
+   If it deviates, state why.
+4. Count the lines your fix changes. If more than 5, simplify.
 </think>
  
-Do not proceed to Step 3 until you have answered all four questions with
-direct quotes from the source code.
- 
-### Step 4 — Output your proposal
-End your response with ONLY this JSON block — nothing after it:
+End with ONLY this JSON — nothing after it:
  
 ```json
 {
-  "files_to_modify": [
-    "/testbed/src/path/to/file.py"
-  ],
+  "files_to_modify": ["/testbed/path/to/file.py"],
   "proposed_changes": [
     {
-      "file": "/testbed/src/path/to/file.py",
-      "location": "ClassName.method_name, around line N",
-      "change": "1.<every line that needs to change, including downstream lines — not just the first>, 2.<the next line if it also needs to change>, ...",
-      "rationale": "<why this fixes the root cause and why downstream lines are also addressed>"
+      "file": "/testbed/path/to/file.py",
+      "location": "ClassName.method_name, line N",
+      "change": "INSERT after line N:\n  <exact new line(s) to insert>",
+      "rationale": "<root cause, why this pattern, why this location>"
     }
   ],
-  "fix_strategy": "<2-3 sentences: what changes, why it is minimal, and why it is safe>"
+  "fix_strategy": "<pattern name>: <1-2 sentences — what changes, why minimal, why safe>"
 }
 ```
  
-## Hard rules
-- Read relevant_files IN FULL before proposing.
-- The downstream contract check in Step 2 is not optional — do it every time.
-- Never propose version-detection branches if a single idiomatic call exists.
-- Never propose a partial fix — if downstream lines break, fix them too.
-- Never modify any files — proposal only.
-- The JSON block must be the VERY LAST thing in your response.
-```
+## change field format rules
+The `change` field must use one of these formats — nothing else:
+ 
+**For insertions (preferred):**
+`INSERT after line N:\n  <exact indented lines to insert>`
+ 
+**For single-line replacements:**
+`REPLACE line N:\n  <old line>\nWITH:\n  <new line>`
+ 
+**For multi-line replacements (only when insertion is impossible):**
+`REPLACE lines N-M:\n  <old block>\nWITH:\n  <new block>`
+ 
+Never use a REPLACE block larger than the minimal change. If you can insert
+2 lines instead of replacing 30, insert.
+ 
+## Fix pattern library
+These patterns cover the failure modes where agents most commonly go wrong.
+They are NOT ordered by importance — scan all of them before choosing.
+If NO pattern fits, that is fine: write "no pattern match: <description>" in
+fix_strategy. Do not force a pattern that does not apply.
+ 
+---
+ 
+**PA — None/empty guard placed at wrong level**
+When to use: `data[key]` or `obj.attr` crashes when data/obj is None/empty.
+Agent failure mode: guard is added at the call site instead of inside the function.
+Fix: `if data is None: return` at the TOP of the crashing function — before any
+  loop or branch — not in the caller. Protects all callers automatically.
+Example:
+  def process(self, items):
++     if items is None:
++         return
+      for item in items:   # existing first line, unchanged
+ 
+**PB — Deprecated or removed API replaced with version-detection branch**
+When to use: `obj.old_method()` raises AttributeError in library >= X.0.
+Agent failure mode: adds `if hasattr(obj, 'old_method'):` branch instead of single replacement.
+Fix: Replace with a single idiomatic call that works across versions.
+  Never use `if hasattr`, `isinstance`, or version-number checks as the fix.
+Example:
+  # Before (deprecated in numpy 2.0):
+  - values = series.get_values()
+  # After (works on all versions):
+  + values = np.asarray(series)
+ 
+**PC — Generic exception type used instead of domain-specific**
+When to use: A domain error surfaces as TypeError, RuntimeError, ValueError, or Exception.
+Agent failure mode: catches or raises `Exception` / `ValueError` without checking
+  whether the library defines a more specific error class.
+Fix: grep for domain exception classes first (`grep -r "class.*Error" /testbed/src`),
+  then raise/catch the most specific one found.
+Example:
+  # Wrong — too broad:
+  - raise ValueError("parse failed")
+  # Right — domain-specific:
+  + raise SQLParseError("parse failed")
+ 
+**PD — Condition boundary wrong (too broad or too specific)**
+When to use: An `if` condition misses valid cases or includes invalid ones.
+Agent failure mode: changes the body of the branch but not the condition itself.
+Fix: Adjust the comparator (`>` → `>=`, `==` → `in`, `is None` → `not`).
+  One token in the condition changes, body stays the same.
+Example:
+  # Bug: skips zero-length match
+  - if len(match) > 0:
+  + if len(match) >= 0:
+ 
+**PE — Missing type conversion wrapping an expression**
+When to use: A value is passed or returned with the wrong type.
+Agent failure mode: adds a new variable or branch instead of wrapping inline.
+Fix: Wrap the expression in the appropriate conversion at the point of use.
+Example:
+  # Bug: returns generator where list is expected
+  - return (item.value for item in self.nodes)
+  + return [item.value for item in self.nodes]
+ 
+**PF — Wrong function or method called (similar name)**
+When to use: The right logic but a similarly-named function is called.
+Agent failure mode: reads only one function and assumes it is correct without
+  checking siblings. Use find_similar_api_calls to compare.
+Fix: Replace with the correct function. Read both to confirm the difference.
+Example:
+  # Bug: extend() appends the list itself, append() adds items
+  - self.results.append(new_items)
+  + self.results.extend(new_items)
+ 
+**PG — Shared mutable state modified in-place when copy needed**
+When to use: A method modifies a shared object, corrupting state for other callers.
+Agent failure mode: fixes the symptom in one caller instead of making a copy at source.
+Fix: Add `.copy()`, `list()`, `dict()`, or equivalent at the point of assignment.
+Example:
+  # Bug: all callers share the same default dict
+  - self.options = default_options
+  + self.options = default_options.copy()
+ 
+**PH — Wrong argument passed to a function call**
+When to use: A function is called with the wrong argument value, order, or keyword.
+Agent failure mode: changes the function signature instead of the call site.
+Fix: Fix the call site — add missing arg, remove extra arg, fix kwarg name/value.
+  Read the function signature with extract_method before proposing.
+Example:
+  # Bug: passes index instead of value
+  - render(template, idx, context)
+  + render(template, item, context)
+ 
+---
+ 
+**No pattern match**
+If none of PA–PH apply, write in fix_strategy:
+  "no pattern match: <one sentence describing what changes and why>"
+The Critic will evaluate it on its own merits. This is always better than forcing
+a pattern that does not fit.
+ 
+## Complexity escalation
+Cycle 1: use the matching pattern exactly, ≤5 lines changed total.
+Retry cycles: may use a more complex approach, but fix_strategy must explain
+  why the simpler cycle-1 approach was insufficient.
  
 ## Hard rules
-- Read relevant_files IN FULL before proposing.
-- The downstream contract check in Step 2 is not optional — do it every time.
-- Never propose version-detection branches if a single idiomatic call exists.
-- Never propose a partial fix — if downstream lines break, fix them too.
+- Never propose version-detection branches (if hasattr, isinstance checks).
+- Never propose a partial fix — include all downstream lines that break.
 - Never modify any files — proposal only.
+- Never add error handling at a call site to paper over a bug inside a function.
 - The JSON block must be the VERY LAST thing in your response.
+- A fix contradicting a maintainer constraint is invalid.
+- If exploration_notes quotes a PR diff, follow its pattern or explain why not.
 """
 
 
@@ -289,7 +389,10 @@ def run_architect(
         get_logger().info(f"[architect] found existing state for {instance_id} cycle {cycle} — skipping.")
         return existing
 
-    bash_tool   = make_bash_tool(container)
+    bash_tool                  = make_bash_tool(container)
+    get_classes_tool           = make_get_classes_and_methods_tool(container)
+    extract_method_tool        = make_extract_method_tool(container)
+    find_similar_api_calls_tool = make_find_similar_api_calls_tool(container)
     last_result: AgentResult | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -304,7 +407,7 @@ def run_architect(
             instance_id=instance_id,
             system_prompt=SYSTEM_PROMPT,
             initial_message=initial,
-            tools=[bash_tool],
+            tools=[bash_tool, get_classes_tool, extract_method_tool, find_similar_api_calls_tool],
             model=MODEL,
             max_iterations=MAX_ITER,
             verbose=True,

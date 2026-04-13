@@ -36,7 +36,6 @@ from agent_localization import run_localization
 from agent_architect import run_architect
 from agent_editor import run_editor
 from agent_critic import run_critic, build_critic_context
-from localization import get_localization_context
 
 DATASET_NAME            = os.environ.get("DATASET_NAME", "princeton-nlp/SWE-bench_Lite")
 SPLIT                   = os.environ.get("SPLIT", "dev")
@@ -48,7 +47,6 @@ LOG_DIR = os.environ.get("LOG_DIR", "./logs")
 INSTANCE_IDS_FILTER = [
     i.strip() for i in os.environ.get("INSTANCE_IDS", "").split(",") if i.strip()
 ]
-LOCALIZATION_ENABLED = os.environ.get("LOCALIZATION_ENABLED", "false").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +148,11 @@ def teardown_container(container, logger: SwebenchCompatLogger):
 # ---------------------------------------------------------------------------
 
 def apply_patch(container, patch: str, logger: SwebenchCompatLogger) -> bool:
+    import tempfile, os
+    from pathlib import Path
+    from swebench.harness.docker_utils import copy_to_container
+    from pathlib import PurePosixPath
+
     reset_code, reset_out = container.exec_run(
         ["bash", "-lc", "git checkout -- ."],
         workdir="/testbed",
@@ -157,23 +160,37 @@ def apply_patch(container, patch: str, logger: SwebenchCompatLogger) -> bool:
     if reset_code != 0:
         logger.warning(f"git checkout failed: {reset_out.decode().strip()}")
 
-    container.exec_run(
-        ["bash", "-lc", f"cat > /tmp/agent2.patch << 'PATCHEOF'\n{patch}\nPATCHEOF"],
-        workdir="/testbed",
-    )
+    # Write patch to a temp file and copy into container — avoids heredoc
+    # corruption from special characters (quotes, backslashes, etc.)
+    with tempfile.NamedTemporaryFile(
+        mode="wb", suffix=".patch", delete=False
+    ) as f:
+        normalized = patch.replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.endswith("\n"):
+            normalized += "\n"
+        f.write(normalized.encode("utf-8"))
+        patch_path = f.name
 
-    apply_code, apply_out = container.exec_run(
-        ["bash", "-lc", "git apply /tmp/agent2.patch"],
-        workdir="/testbed",
-    )
-    apply_out_str = apply_out.decode().strip()
+    try:
+        copy_to_container(container, Path(patch_path), PurePosixPath("/tmp/fix.patch"))
+    finally:
+        os.unlink(patch_path)
 
-    if apply_code != 0:
-        logger.error(f"Patch application failed:\n{apply_out_str}")
-        return False
+    # Try multiple apply strategies, same as the official harness
+    for cmd in ["git apply /tmp/fix.patch",
+                "git apply --whitespace=fix /tmp/fix.patch",
+                "patch --batch --fuzz=5 -p1 -i /tmp/fix.patch"]:
+        apply_code, apply_out = container.exec_run(
+            ["bash", "-lc", cmd],
+            workdir="/testbed",
+        )
+        if apply_code == 0:
+            logger.info(f"Patch applied successfully via: {cmd}")
+            return True
+        logger.warning(f"Apply attempt failed ({cmd}): {apply_out.decode().strip()[:200]}")
 
-    logger.info("Patch applied successfully.")
-    return True
+    logger.error("All patch application strategies failed.")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +275,7 @@ def extract_repo_context(instance: dict, container) -> str:
     )
 
 
-def build_agent1_context(instance: dict, container, localization_context: str = "") -> dict:
+def build_agent1_context(instance: dict, container) -> dict:
     """
     Assemble the context bundle passed to Agent 1. Localization is included
     here so it propagates automatically to Agents 2 and 3 via ** spreading.
@@ -280,7 +297,6 @@ def build_agent1_context(instance: dict, container, localization_context: str = 
         "version":           instance["version"],
         "fail_to_pass":      json.loads(instance["FAIL_TO_PASS"]),
         "container_name":    container.name,
-        "localization":      localization_context,
         "repo_context":      repo_context,  # pre-extracted test patterns and fixtures
     }
 
@@ -328,14 +344,7 @@ def run_pipeline(instance: dict, client: docker.DockerClient, logger: SwebenchCo
         container, test_spec = setup_environment(instance, client, logger)
         print(container.name)
 
-        # Optional repo map (LOCALIZATION_ENABLED env var)
-        if LOCALIZATION_ENABLED:
-            logger.info(f"Building repo map for {instance['repo']}...")
-            localization_context = get_localization_context(instance, container)
-        else:
-            localization_context = ""
-
-        agent_context = build_agent1_context(instance, container, localization_context)
+        agent_context = build_agent1_context(instance, container)
 
         # -------------------------------------------------------
         # Stage 1: Localization
@@ -406,40 +415,95 @@ critic_output=(
             # Orchestrator applies the patch before Critic runs
             patch_ok = apply_patch(container, editor_state["patch"], logger)
             if not patch_ok:
-                logger.error(f"Patch application failed on cycle {cycle}.")
-                return {"instance_id": instance_id, "status": "failed_patch_apply",
-                        "cycle": cycle, "localization": localization_state,
-                        "architect": architect_state, "editor": editor_state}
+                logger.warning(f"Patch application failed on cycle {cycle} — treating as Critic fail, retrying.")
+                # Synthesize a critic failure so the retry loop feeds back to the Architect
+                critic_state = {
+                    "status":            "success",
+                    "verdict":           "fail",
+                    "correctness":       "fail",
+                    "completeness":      "fail",
+                    "alignment":         "fail",
+                    "safety":            "fail",
+                    "issues":            ["Patch could not be applied — it is malformed or corrupt."],
+                    "regressions":       [],
+                    "regression_report": (
+                        "The Editor produced a malformed or corrupt patch that could not be "
+                        "applied with git apply or patch. This usually means the diff is "
+                        "truncated, has incorrect line endings, or contains invalid hunk headers. "
+                        "Propose a simpler, minimal change. Avoid large multi-hunk diffs. "
+                        "Make sure the change field contains exact before/after lines."
+                    ),
+                    "iterations":  0,
+                    "cycle":       cycle,
+                    "timestamp":   "",
+                }
+                # Fall through to the retry logic below — skip Critic agent
+            else:
+                # Syntax check — run py_compile on all modified Python files
+                # before spending tokens on the Critic agent
+                modified_files = architect_state.get("files_to_modify", [])
+                syntax_errors  = []
+                for fpath in modified_files:
+                    if fpath.endswith(".py"):
+                        check_code, check_out = container.exec_run(
+                            ["bash", "-lc", f"python -m py_compile {fpath} 2>&1"],
+                            workdir="/testbed",
+                        )
+                        if check_code != 0:
+                            syntax_errors.append(
+                                f"{fpath}: {check_out.decode('utf-8', errors='replace').strip()}"
+                            )
 
-            # Critic — code review for correctness, completeness, alignment, safety
-            make_agent_logger(RUN_ID, instance_id, f"critic_cycle{cycle}")
-            critic_context = build_critic_context(
-                agent_context, instance, editor_state,
-                localization_state=localization_state,
-                architect_state=architect_state,
-            )
-            critic_state = run_critic(critic_context, container, cycle=cycle)
+                if syntax_errors:
+                    logger.warning(f"Syntax errors detected on cycle {cycle}: {syntax_errors}")
+                    critic_state = {
+                        "status":            "success",
+                        "verdict":           "fail",
+                        "correctness":       "fail",
+                        "completeness":      "fail",
+                        "alignment":         "fail",
+                        "safety":            "fail",
+                        "issues":            [f"Syntax error: {e}" for e in syntax_errors],
+                        "regressions":       [],
+                        "regression_report": (
+                            f"The patch introduced syntax errors in the modified files: "
+                            f"{'; '.join(syntax_errors)}. "
+                            f"Fix the syntax errors before proposing the change."
+                        ),
+                        "iterations":  0,
+                        "cycle":       cycle,
+                        "timestamp":   "",
+                    }
+                else:
+                    # Critic — code review for correctness, completeness, alignment, safety
+                    make_agent_logger(RUN_ID, instance_id, f"critic_cycle{cycle}")
+                    critic_context = build_critic_context(
+                        agent_context, instance, editor_state,
+                        localization_state=localization_state,
+                        architect_state=architect_state,
+                    )
+                    critic_state = run_critic(critic_context, container, cycle=cycle)
 
-            if critic_state["status"] != "success":
-                logger.error(f"Critic failed to produce output on cycle {cycle}.")
-                return {"instance_id": instance_id, "status": "failed_at_critic",
-                        "cycle": cycle, "localization": localization_state,
-                        "architect": architect_state, "editor": editor_state,
-                        "critic": critic_state}
+                if critic_state["status"] != "success":
+                    logger.error(f"Critic failed to produce output on cycle {cycle}.")
+                    return {"instance_id": instance_id, "status": "failed_at_critic",
+                            "cycle": cycle, "localization": localization_state,
+                            "architect": architect_state, "editor": editor_state,
+                            "critic": critic_state}
 
-            verdict = critic_state["verdict"]
-            logger.info(f"Critic verdict on cycle {cycle}: {verdict}")
+                verdict = critic_state["verdict"]
+                logger.info(f"Critic verdict on cycle {cycle}: {verdict}")
 
-            if verdict == "pass":
-                logger.info(f"Pipeline complete — fix verified for {instance_id}.")
-                return {"instance_id": instance_id, "status": "success",
-                        "cycles": cycle, "localization": localization_state,
-                        "architect": architect_state, "editor": editor_state,
-                        "critic": critic_state}
+                if verdict == "pass":
+                    logger.info(f"Pipeline complete — fix verified for {instance_id}.")
+                    return {"instance_id": instance_id, "status": "success",
+                            "cycles": cycle, "localization": localization_state,
+                            "architect": architect_state, "editor": editor_state,
+                            "critic": critic_state}
 
-            # Fail — reset editor/critic state, loop back to Architect with context
+            # Fail — reset state, loop back to Architect with Critic feedback
             regressions = critic_state.get("regressions", [])
-            logger.warning(f"Critic fail on cycle {cycle}. Regressions: {regressions}. Retrying.")
+            logger.warning(f"Critic fail on cycle {cycle}. Retrying with feedback.")
 
             # Clear cycle state files so next cycle runs fresh
             for agent_name in [f"architect_cycle{cycle}", f"editor_cycle{cycle}", f"critic_cycle{cycle}"]:
@@ -474,6 +538,9 @@ def main():
     if INSTANCE_IDS_FILTER:
         instances = [i for i in instances if i["instance_id"] in INSTANCE_IDS_FILTER]
         logger.info(f"Filtered to {len(instances)} instance(s): {INSTANCE_IDS_FILTER}")
+
+    # Run from the 7th instance onwards (limit to 100 total)
+    instances = instances[6:106]
 
     total = len(instances)
     logger.info(f"Running pipeline on {total} instance(s) from '{SPLIT}' split.")
