@@ -1,0 +1,336 @@
+{
+  "instance_id": "psf__requests-2674",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/requests/adapters.py b/requests/adapters.py\nindex 841cbbf..201d78c 100644\n--- a/requests/adapters.py\n+++ b/requests/adapters.py\n@@ -27,6 +27,7 @@ from .packages.urllib3.exceptions import ProtocolError\n from .packages.urllib3.exceptions import ReadTimeoutError\n from .packages.urllib3.exceptions import SSLError as _SSLError\n from .packages.urllib3.exceptions import ResponseError\n+from .packages.urllib3.exceptions import ClosedPoolError\n from .cookies import extract_cookies_to_jar\n from .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\n                          ProxyError, RetryError)\n@@ -412,6 +413,9 @@ class HTTPAdapter(BaseAdapter):\n         except (ProtocolError, socket.error) as err:\n             raise ConnectionError(err, request=request)\n \n+        except ClosedPoolError as e:\n+            raise ConnectionError(e, request=request)\n+\n         except MaxRetryError as e:\n             if isinstance(e.reason, ConnectTimeoutError):\n                 raise ConnectTimeout(e, request=request)",
+  "implementation_notes": "Added import for ClosedPoolError from packages.urllib3.exceptions and added exception handler in HTTPAdapter.send to catch ClosedPoolError and wrap it in requests.ConnectionError, following the established pattern for connection-related urllib3 exceptions.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>psf__requests-2674</instance_id>\n\n<problem_statement>\nurllib3 exceptions passing through requests API\nI don't know if it's a design goal of requests to hide urllib3's exceptions and wrap them around requests.exceptions types.\n\n(If it's not IMHO it should be, but that's another discussion)\n\nIf it is, I have at least two of them passing through that I have to catch in addition to requests' exceptions. They are requests.packages.urllib3.exceptions.DecodeError and requests.packages.urllib3.exceptions.TimeoutError (this one I get when a proxy timeouts)\n\nThanks!\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The HTTPAdapter.send method in adapters.py catches various urllib3 exceptions and wraps them in requests exceptions, but it does not catch ClosedPoolError. When a urllib3 connection pool is closed and a request tries to get a connection from it, ClosedPoolError is raised from urllib3's connectionpool.py and passes through the requests API unwrapped.\nExploration notes: ClosedPoolError needs to be imported from packages.urllib3.exceptions at the top of adapters.py (around lines 22-29). The exception handling block starting around line 413 in HTTPAdapter.send method should catch ClosedPoolError and wrap it in a requests ConnectionError, following the same pattern as other connection-related exceptions. The existing exception handling already properly wraps MaxRetryError, ProxyError, SSLError, and HTTPError but is missing ClosedPoolError coverage.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: adding missing exception handler to maintain API boundary. The HTTPAdapter.send method already catches various urllib3 exceptions and wraps them in appropriate requests exceptions, but ClosedPoolError was missing from the exception handling block. This fix adds the missing handler to wrap ClosedPoolError in ConnectionError, following the established pattern for other connection-related exceptions.\n\nFiles to modify: [\n  \"/testbed/requests/adapters.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/requests/adapters.py\n  Location: imports section, line 27\n  Change  : INSERT after line 27:\nfrom .packages.urllib3.exceptions import ClosedPoolError\n  Rationale: Need to import ClosedPoolError to catch it in the exception handling block\n\nChange 2:\n  File    : /testbed/requests/adapters.py\n  Location: HTTPAdapter.send, line 407\n  Change  : INSERT after line 407:\n\n        except ClosedPoolError as e:\n            raise ConnectionError(e, request=request)\n  Rationale: ClosedPoolError represents a connection issue when pool is closed, so should be wrapped in requests.ConnectionError following the same pattern as other connection-related exceptions\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll help you implement this solution. Let me start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01ErBFKG3Wb9zTzWZVkRQarM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -50 requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ErBFKG3Wb9zTzWZVkRQarM",
+          "content": "[exit_code=0]\n# -*- coding: utf-8 -*-\n\n\"\"\"\nrequests.adapters\n~~~~~~~~~~~~~~~~~\n\nThis module contains the transport adapters that Requests uses to define\nand maintain connections.\n\"\"\"\n\nimport socket\n\nfrom .models import Response\nfrom .packages.urllib3.poolmanager import PoolManager, proxy_from_url\nfrom .packages.urllib3.response import HTTPResponse\nfrom .packages.urllib3.util import Timeout as TimeoutSauce\nfrom .packages.urllib3.util.retry import Retry\nfrom .compat import urlparse, basestring\nfrom .utils import (DEFAULT_CA_BUNDLE_PATH, get_encoding_from_headers,\n                    prepend_scheme_if_needed, get_auth_from_url, urldefragauth)\nfrom .structures import CaseInsensitiveDict\nfrom .packages.urllib3.exceptions import ConnectTimeoutError\nfrom .packages.urllib3.exceptions import HTTPError as _HTTPError\nfrom .packages.urllib3.exceptions import MaxRetryError\nfrom .packages.urllib3.exceptions import ProxyError as _ProxyError\nfrom .packages.urllib3.exceptions import ProtocolError\nfrom .packages.urllib3.exceptions import ReadTimeoutError\nfrom .packages.urllib3.exceptions import SSLError as _SSLError\nfrom .packages.urllib3.exceptions import ResponseError\nfrom .cookies import extract_cookies_to_jar\nfrom .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\n                         ProxyError, RetryError)\nfrom .auth import _basic_auth_str\n\nDEFAULT_POOLBLOCK = False\nDEFAULT_POOLSIZE = 10\nDEFAULT_RETRIES = 0\nDEFAULT_POOL_TIMEOUT = None\n\n\nclass BaseAdapter(object):\n    \"\"\"The Base Transport Adapter\"\"\"\n\n    def __init__(self):\n        super(BaseAdapter, self).__init__()\n\n    def send(self):\n        raise NotImplementedError\n\n    def close(self):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me read more to see the exception handling section in HTTPAdapter.send:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HxUEbcE3zm9bnhMPWJfwnD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '400,430p' requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HxUEbcE3zm9bnhMPWJfwnD",
+          "content": "[exit_code=0]\nr,\n                        pool=conn,\n                        connection=low_conn,\n                        preload_content=False,\n                        decode_content=False\n                    )\n                except:\n                    # If we hit any problems here, clean up the connection.\n                    # Then, reraise so that we can handle the actual exception.\n                    low_conn.close()\n                    raise\n\n        except (ProtocolError, socket.error) as err:\n            raise ConnectionError(err, request=request)\n\n        except MaxRetryError as e:\n            if isinstance(e.reason, ConnectTimeoutError):\n                raise ConnectTimeout(e, request=request)\n\n            if isinstance(e.reason, ResponseError):\n                raise RetryError(e, request=request)\n\n            raise ConnectionError(e, request=request)\n\n        except _ProxyError as e:\n            raise ProxyError(e)\n\n        except (_SSLError, _HTTPError) as e:\n            if isinstance(e, _SSLError):\n                raise SSLError(e, request=request)\n            elif isinstance(e, ReadTimeoutError):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me see more of the exception handling block:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01T8iQ5o49FFMAKfpQ5VYUAj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '410,445p' requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01T8iQ5o49FFMAKfpQ5VYUAj",
+          "content": "[exit_code=0]\nraise\n\n        except (ProtocolError, socket.error) as err:\n            raise ConnectionError(err, request=request)\n\n        except MaxRetryError as e:\n            if isinstance(e.reason, ConnectTimeoutError):\n                raise ConnectTimeout(e, request=request)\n\n            if isinstance(e.reason, ResponseError):\n                raise RetryError(e, request=request)\n\n            raise ConnectionError(e, request=request)\n\n        except _ProxyError as e:\n            raise ProxyError(e)\n\n        except (_SSLError, _HTTPError) as e:\n            if isinstance(e, _SSLError):\n                raise SSLError(e, request=request)\n            elif isinstance(e, ReadTimeoutError):\n                raise ReadTimeout(e, request=request)\n            else:\n                raise\n\n        return self.build_response(request, resp)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I understand the structure. Let me look at the imports section more carefully to determine the exact line where to add the import:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DzUNzpsRjotZ53qh18BXK7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '20,33p' requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DzUNzpsRjotZ53qh18BXK7",
+          "content": "[exit_code=0]\nprepend_scheme_if_needed, get_auth_from_url, urldefragauth)\nfrom .structures import CaseInsensitiveDict\nfrom .packages.urllib3.exceptions import ConnectTimeoutError\nfrom .packages.urllib3.exceptions import HTTPError as _HTTPError\nfrom .packages.urllib3.exceptions import MaxRetryError\nfrom .packages.urllib3.exceptions import ProxyError as _ProxyError\nfrom .packages.urllib3.exceptions import ProtocolError\nfrom .packages.urllib3.exceptions import ReadTimeoutError\nfrom .packages.urllib3.exceptions import SSLError as _SSLError\nfrom .packages.urllib3.exceptions import ResponseError\nfrom .cookies import extract_cookies_to_jar\nfrom .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\n                         ProxyError, RetryError)\nfrom .auth import _basic_auth_str"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check the exact line numbers around the exception handling to find the best insertion point:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FC6E52qCkcLGBSa65vG8Xc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '410,435p' requests/adapters.py | nl -v 410"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FC6E52qCkcLGBSa65vG8Xc",
+          "content": "[exit_code=0]\n410\t                    raise\n       \n   411\t        except (ProtocolError, socket.error) as err:\n   412\t            raise ConnectionError(err, request=request)\n       \n   413\t        except MaxRetryError as e:\n   414\t            if isinstance(e.reason, ConnectTimeoutError):\n   415\t                raise ConnectTimeout(e, request=request)\n       \n   416\t            if isinstance(e.reason, ResponseError):\n   417\t                raise RetryError(e, request=request)\n       \n   418\t            raise ConnectionError(e, request=request)\n       \n   419\t        except _ProxyError as e:\n   420\t            raise ProxyError(e)\n       \n   421\t        except (_SSLError, _HTTPError) as e:\n   422\t            if isinstance(e, _SSLError):\n   423\t                raise SSLError(e, request=request)\n   424\t            elif isinstance(e, ReadTimeoutError):\n   425\t                raise ReadTimeout(e, request=request)\n   426\t            else:\n   427\t                raise\n       \n   428\t        return self.build_response(request, resp)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I have a clear picture. I need to:\n1. Add the import for ClosedPoolError after line 27 (after ResponseError import line)\n2. Add exception handling for ClosedPoolError after line 412 (after the ProtocolError/socket.error handler)\n\nLet me start implementing:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HbgA1Fd81sxQeniBEPtQAh",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat requests/adapters.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HbgA1Fd81sxQeniBEPtQAh",
+          "content": "[exit_code=0]\n# -*- coding: utf-8 -*-\n\n\"\"\"\nrequests.adapters\n~~~~~~~~~~~~~~~~~\n\nThis module contains the transport adapters that Requests uses to define\nand maintain connections.\n\"\"\"\n\nimport socket\n\nfrom .models import Response\nfrom .packages.urllib3.poolmanager import PoolManager, proxy_from_url\nfrom .packages.urllib3.response import HTTPResponse\nfrom .packages.urllib3.util import Timeout as TimeoutSauce\nfrom .packages.urllib3.util.retry import Retry\nfrom .compat import urlparse, basestring\nfrom .utils import (DEFAULT_CA_BUNDLE_PATH, get_encoding_from_headers,\n                    prepend_scheme_if_needed, get_auth_from_url, urldefragauth)\nfrom .structures import CaseInsensitiveDict\nfrom .packages.urllib3.exceptions import ConnectTimeoutError\nfrom .packages.urllib3.exceptions import HTTPError as _HTTPError\nfrom .packages.urllib3.exceptions import MaxRetryError\nfrom .packages.urllib3.exceptions import ProxyError as _ProxyError\nfrom .packages.urllib3.exceptions import ProtocolError\nfrom .packages.urllib3.exceptions import ReadTimeoutError\nfrom .packages.urllib3.exceptions import SSLError as _SSLError\nfrom .packages.urllib3.exceptions import ResponseError\nfrom .cookies import extract_cookies_to_jar"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me use Python to make the changes more reliably:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FbNS8SxACN7u2rSRgnVRQE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('requests/adapters.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line with ResponseError import and add ClosedPoolError import after it\ninsert_import_idx = None\nfor i, line in enumerate(lines):\n    if 'from .packages.urllib3.exceptions import ResponseError' in line:\n        insert_import_idx = i\n        break\n\nif insert_import_idx is not None:\n    # Insert the new import after ResponseError\n    lines.insert(insert_import_idx + 1, 'from .packages.urllib3.exceptions import ClosedPoolError\\n')\n    print(f\"Added import at line {insert_import_idx + 1}\")\nelse:\n    print(\"Could not find ResponseError import\")\n\n# Now find where to add the exception handler\n# We need to find the line with \"(ProtocolError, socket.error) as err:\" and add after it\nexception_handler_idx = None\nfor i, line in enumerate(lines):\n    if 'except (ProtocolError, socket.error) as err:' in line:\n        exception_handler_idx = i\n        break\n\nif exception_handler_idx is not None:\n    # Find the line after the ConnectionError raise\n    for i in range(exception_handler_idx + 1, len(lines)):\n        if 'raise ConnectionError(err, request=request)' in lines[i]:\n            # Insert the new exception handler after this line\n            insert_exception_idx = i + 1\n            # Add a blank line and the new exception handler\n            lines.insert(insert_exception_idx, '\\n')\n            lines.insert(insert_exception_idx + 1, '        except ClosedPoolError as e:\\n')\n            lines.insert(insert_exception_idx + 2, '            raise ConnectionError(e, request=request)\\n')\n            print(f\"Added exception handler at line {insert_exception_idx + 1}\")\n            break\nelse:\n    print(\"Could not find ProtocolError exception handler\")\n\n# Write the file back\nwith open('requests/adapters.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"File updated successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FbNS8SxACN7u2rSRgnVRQE",
+          "content": "[exit_code=0]\nAdded import at line 29\nAdded exception handler at line 415\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the changes by checking the modified file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01StSsmFCiiNLtGYKEzfdhKX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '20,35p' requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01StSsmFCiiNLtGYKEzfdhKX",
+          "content": "[exit_code=0]\nprepend_scheme_if_needed, get_auth_from_url, urldefragauth)\nfrom .structures import CaseInsensitiveDict\nfrom .packages.urllib3.exceptions import ConnectTimeoutError\nfrom .packages.urllib3.exceptions import HTTPError as _HTTPError\nfrom .packages.urllib3.exceptions import MaxRetryError\nfrom .packages.urllib3.exceptions import ProxyError as _ProxyError\nfrom .packages.urllib3.exceptions import ProtocolError\nfrom .packages.urllib3.exceptions import ReadTimeoutError\nfrom .packages.urllib3.exceptions import SSLError as _SSLError\nfrom .packages.urllib3.exceptions import ResponseError\nfrom .packages.urllib3.exceptions import ClosedPoolError\nfrom .cookies import extract_cookies_to_jar\nfrom .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\n                         ProxyError, RetryError)\nfrom .auth import _basic_auth_str"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The import was added. Now let me check the exception handler:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BmqGfKbLV2YaQ1Mi4ejZgw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '410,430p' requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BmqGfKbLV2YaQ1Mi4ejZgw",
+          "content": "[exit_code=0]\nlow_conn.close()\n                    raise\n\n        except (ProtocolError, socket.error) as err:\n            raise ConnectionError(err, request=request)\n\n        except ClosedPoolError as e:\n            raise ConnectionError(e, request=request)\n\n        except MaxRetryError as e:\n            if isinstance(e.reason, ConnectTimeoutError):\n                raise ConnectTimeout(e, request=request)\n\n            if isinstance(e.reason, ResponseError):\n                raise RetryError(e, request=request)\n\n            raise ConnectionError(e, request=request)\n\n        except _ProxyError as e:\n            raise ProxyError(e)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The changes have been applied correctly. Now let me run git diff to verify the complete patch:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FXx3Ad7oXj5Mzeny47yaTW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FXx3Ad7oXj5Mzeny47yaTW",
+          "content": "[exit_code=0]\ndiff --git a/requests/adapters.py b/requests/adapters.py\nindex 841cbbf..201d78c 100644\n--- a/requests/adapters.py\n+++ b/requests/adapters.py\n@@ -27,6 +27,7 @@ from .packages.urllib3.exceptions import ProtocolError\n from .packages.urllib3.exceptions import ReadTimeoutError\n from .packages.urllib3.exceptions import SSLError as _SSLError\n from .packages.urllib3.exceptions import ResponseError\n+from .packages.urllib3.exceptions import ClosedPoolError\n from .cookies import extract_cookies_to_jar\n from .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\n                          ProxyError, RetryError)\n@@ -412,6 +413,9 @@ class HTTPAdapter(BaseAdapter):\n         except (ProtocolError, socket.error) as err:\n             raise ConnectionError(err, request=request)\n \n+        except ClosedPoolError as e:\n+            raise ConnectionError(e, request=request)\n+\n         except MaxRetryError as e:\n             if isinstance(e.reason, ConnectTimeoutError):\n                 raise ConnectTimeout(e, request=request)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows the changes are exactly as intended:\n1. Added the import for ClosedPoolError from `.packages.urllib3.exceptions` on line 30\n2. Added the exception handler for ClosedPoolError that wraps it in ConnectionError, placed after the ProtocolError/socket.error handler\n\nThe patch is clean and minimal, only modifying what was specified in the solution proposal. Let me output the final JSON result:\n\n```json\n{\n  \"patch\": \"diff --git a/requests/adapters.py b/requests/adapters.py\\nindex 841cbbf..201d78c 100644\\n--- a/requests/adapters.py\\n+++ b/requests/adapters.py\\n@@ -27,6 +27,7 @@ from .packages.urllib3.exceptions import ProtocolError\\n from .packages.urllib3.exceptions import ReadTimeoutError\\n from .packages.urllib3.exceptions import SSLError as _SSLError\\n from .packages.urllib3.exceptions import ResponseError\\n+from .packages.urllib3.exceptions import ClosedPoolError\\n from .cookies import extract_cookies_to_jar\\n from .exceptions import (ConnectionError, ConnectTimeout, ReadTimeout, SSLError,\\n                          ProxyError, RetryError)\\n@@ -412,6 +413,9 @@ class HTTPAdapter(BaseAdapter):\\n         except (ProtocolError, socket.error) as err:\\n             raise ConnectionError(err, request=request)\\n \\n+        except ClosedPoolError as e:\\n+            raise ConnectionError(e, request=request)\\n+\\n         except MaxRetryError as e:\\n             if isinstance(e.reason, ConnectTimeoutError):\\n                 raise ConnectTimeout(e, request=request)\",\n  \"implementation_notes\": \"Added import for ClosedPoolError from packages.urllib3.exceptions and added exception handler in HTTPAdapter.send to catch ClosedPoolError and wrap it in requests.ConnectionError, following the established pattern for connection-related urllib3 exceptions.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 11,
+  "timestamp": "2026-04-13T13:14:50Z"
+}

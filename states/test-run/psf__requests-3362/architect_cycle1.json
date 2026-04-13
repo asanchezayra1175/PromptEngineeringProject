@@ -1,0 +1,199 @@
+{
+  "instance_id": "psf__requests-3362",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/requests/utils.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/requests/utils.py",
+      "location": "stream_decode_response_unicode, line 362",
+      "change": "REPLACE lines 362-365:\n    if r.encoding is None:\n        for item in iterator:\n            yield item\n        return\nWITH:\n    encoding = r.encoding\n    if encoding is None:\n        encoding = r.apparent_encoding",
+      "rationale": "The function currently returns raw bytes when r.encoding is None, but it should fall back to r.apparent_encoding like the text property does. This makes iter_content(decode_unicode=True) consistent with the text property's encoding detection behavior."
+    },
+    {
+      "file": "/testbed/requests/utils.py",
+      "location": "stream_decode_response_unicode, line 367",
+      "change": "REPLACE line 367:\n    decoder = codecs.getincrementaldecoder(r.encoding)(errors='replace')\nWITH:\n    decoder = codecs.getincrementaldecoder(encoding)(errors='replace')",
+      "rationale": "Use the encoding variable that now includes the fallback logic instead of r.encoding directly."
+    }
+  ],
+  "fix_strategy": "no pattern match: Make stream_decode_response_unicode consistent with the text property by implementing the same encoding fallback logic when r.encoding is None, using r.apparent_encoding as the fallback instead of returning raw bytes.",
+  "full_response": "<think>\nNow I understand the bug:\n\n1. The `text` property has fallback logic: if `self.encoding` is None, it uses `self.apparent_encoding` which uses chardet to auto-detect the encoding.\n\n2. The `stream_decode_response_unicode` function used by `iter_content(decode_unicode=True)` does NOT have this fallback. When `r.encoding is None`, it just yields the raw bytes without any decoding.\n\n3. The maintainer confirmed this is genuinely bad behavior and should be considered a bug, suggesting we should have the same logic as in `text`.\n\nThe fix should be to modify `stream_decode_response_unicode` to use the same fallback logic as the `text` property when `r.encoding` is None.\n\nLooking at the fix pattern library:\n- This matches **PB \u2014 Deprecated or removed API replaced with version-detection branch** in that the current implementation has inconsistent behavior, but that's not quite right since there's no deprecated API.\n- Actually, this is more like **PA \u2014 None/empty guard placed at wrong level** - the function returns bytes when encoding is None instead of properly handling the None case.\n- Actually, it's closest to **no pattern match** since this is about making two APIs consistent rather than fixing a crash or type error.\n\nThe fix should be inside `stream_decode_response_unicode` to make it consistent with the `text` property's behavior.\n</think>\n\nNow I'll analyze the current implementation and propose a fix.\n\n<think>\n1. What is the function SUPPOSED to do in plain English?\n   `stream_decode_response_unicode` should decode bytes from an iterator into unicode strings when `decode_unicode=True` is used with `iter_content()`. It should behave consistently with the `text` property.\n\n2. What input triggers the failure and what error results?\n   When `r.encoding` is None, the function yields raw bytes instead of decoded unicode strings, causing `iter_content(decode_unicode=True)` to return bytes instead of strings.\n\n3. Which fix pattern from the library below matches this bug?\n   No pattern match: This is about making two APIs consistent. The function needs to implement the same fallback logic as the `text` property.\n\n4. Where should the fix live \u2014 inside the function that crashes, or at the call site?\n   Inside `stream_decode_response_unicode` to protect all callers and make the behavior consistent.\n\n5. How many lines need to change?\n   Should be 1-2 lines - just need to change the condition from `if r.encoding is None:` to use `r.apparent_encoding` as fallback.\n</think>\n\nLooking at the buggy code, I can see that when `r.encoding is None`, the function just yields raw bytes without decoding. The `text` property handles this by falling back to `r.apparent_encoding`. I need to implement the same fallback logic.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/requests/utils.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/requests/utils.py\",\n      \"location\": \"stream_decode_response_unicode, line 362\",\n      \"change\": \"REPLACE lines 362-365:\\n    if r.encoding is None:\\n        for item in iterator:\\n            yield item\\n        return\\nWITH:\\n    encoding = r.encoding\\n    if encoding is None:\\n        encoding = r.apparent_encoding\",\n      \"rationale\": \"The function currently returns raw bytes when r.encoding is None, but it should fall back to r.apparent_encoding like the text property does. This makes iter_content(decode_unicode=True) consistent with the text property's encoding detection behavior.\"\n    },\n    {\n      \"file\": \"/testbed/requests/utils.py\",\n      \"location\": \"stream_decode_response_unicode, line 367\",\n      \"change\": \"REPLACE line 367:\\n    decoder = codecs.getincrementaldecoder(r.encoding)(errors='replace')\\nWITH:\\n    decoder = codecs.getincrementaldecoder(encoding)(errors='replace')\",\n      \"rationale\": \"Use the encoding variable that now includes the fallback logic instead of r.encoding directly.\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: Make stream_decode_response_unicode consistent with the text property by implementing the same encoding fallback logic when r.encoding is None, using r.apparent_encoding as the fallback instead of returning raw bytes.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>psf__requests-3362</instance_id>\n\n<problem_statement>\nUncertain about content/text vs iter_content(decode_unicode=True/False)\nWhen requesting an application/json document, I'm seeing `next(r.iter_content(16*1024, decode_unicode=True))` returning bytes, whereas `r.text` returns unicode. My understanding was that both should return a unicode object. In essence, I thought \"iter_content\" was equivalent to \"iter_text\" when decode_unicode was True. Have I misunderstood something? I can provide an example if needed.\n\nFor reference, I'm using python 3.5.1 and requests 2.10.0.\n\nThanks!\n\n\n</problem_statement>\n\n<hints>\nwhat does (your response object).encoding return?\n\nThere's at least one key difference: `decode_unicode=True` doesn't fall back to `apparent_encoding`, which means it'll never autodetect the encoding. This means if `response.encoding` is None it is a no-op: in fact, it's a no-op that yields bytes.\n\nThat behaviour seems genuinely bad to me, so I think we should consider it a bug. I'd rather we had the same logic as in `text` for this.\n\n`r.encoding` returns `None`.\n\nOn a related note, `iter_text` might be clearer/more consistent than `iter_content(decode_unicode=True)` if there's room for change in the APIs future (and `iter_content_lines` and `iter_text_lines` I guess), assuming you don't see that as bloat.\n\n@mikepelley The API is presently frozen so I don't think we'll be adding those three methods. Besides, `iter_text` likely wouldn't provide much extra value outside of calling `iter_content(decode_unicode=True)`.\n\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/requests/utils.py\"\n]\nRelevant symbols: [\n  \"stream_decode_response_unicode\"\n]\nBug analysis: The stream_decode_response_unicode function returns raw bytes when r.encoding is None instead of trying to decode with a fallback encoding. When r.encoding is None, the function yields items from the iterator without any decoding, causing iter_content(decode_unicode=True) to return bytes instead of unicode strings.\nExploration notes: The function is called from Response.iter_content in /testbed/requests/models.py when decode_unicode=True. The text property in /testbed/requests/models.py handles None encoding by falling back to self.apparent_encoding, but stream_decode_response_unicode does not implement this fallback. The test_response_decode_unicode test in /testbed/tests/test_requests.py expects all chunks to be str instances when decode_unicode=True.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the bug by reading the relevant code and understanding the issue with `iter_content(decode_unicode=True)` not falling back to apparent encoding when `response.encoding` is None.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01M7pbFXW86eHwvV2vZaj7JK",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/requests/utils.py",
+            "method_name": "stream_decode_response_unicode"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01M7pbFXW86eHwvV2vZaj7JK",
+          "content": "[exit_code=0]\n--- stream_decode_response_unicode (lines 359-374) ---\ndef stream_decode_response_unicode(iterator, r):\n    \"\"\"Stream decodes a iterator.\"\"\"\n\n    if r.encoding is None:\n        for item in iterator:\n            yield item\n        return\n\n    decoder = codecs.getincrementaldecoder(r.encoding)(errors='replace')\n    for chunk in iterator:\n        rv = decoder.decode(chunk)\n        if rv:\n            yield rv\n    rv = decoder.decode(b'', final=True)\n    if rv:\n        yield rv"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me examine how the text property handles the None encoding case for comparison:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FfaLFV7W9uuDa9dFHyfM3A",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 20 \"def text\" /testbed/requests/models.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FfaLFV7W9uuDa9dFHyfM3A",
+          "content": "[exit_code=0]\n758:    def text(self):\n759-        \"\"\"Content of the response, in unicode.\n760-\n761-        If Response.encoding is None, encoding will be guessed using\n762-        ``chardet``.\n763-\n764-        The encoding of the response content is determined based solely on HTTP\n765-        headers, following RFC 2616 to the letter. If you can take advantage of\n766-        non-HTTP knowledge to make a better guess at the encoding, you should\n767-        set ``r.encoding`` appropriately before accessing this property.\n768-        \"\"\"\n769-\n770-        # Try charset from content-type\n771-        content = None\n772-        encoding = self.encoding\n773-\n774-        if not self.content:\n775-            return str('')\n776-\n777-        # Fallback to auto-detected encoding.\n778-        if self.encoding is None:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get more of the text property implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Y8qYowBTRWufLMJmF6EbkU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 30 \"def text\" /testbed/requests/models.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Y8qYowBTRWufLMJmF6EbkU",
+          "content": "[exit_code=0]\n758:    def text(self):\n759-        \"\"\"Content of the response, in unicode.\n760-\n761-        If Response.encoding is None, encoding will be guessed using\n762-        ``chardet``.\n763-\n764-        The encoding of the response content is determined based solely on HTTP\n765-        headers, following RFC 2616 to the letter. If you can take advantage of\n766-        non-HTTP knowledge to make a better guess at the encoding, you should\n767-        set ``r.encoding`` appropriately before accessing this property.\n768-        \"\"\"\n769-\n770-        # Try charset from content-type\n771-        content = None\n772-        encoding = self.encoding\n773-\n774-        if not self.content:\n775-            return str('')\n776-\n777-        # Fallback to auto-detected encoding.\n778-        if self.encoding is None:\n779-            encoding = self.apparent_encoding\n780-\n781-        # Decode unicode from given encoding.\n782-        try:\n783-            content = str(self.content, encoding, errors='replace')\n784-        except (LookupError, TypeError):\n785-            # A LookupError is raised if the encoding was not found which could\n786-            # indicate a misspelling or similar mistake.\n787-            #\n788-            # A TypeError can be raised if encoding is None"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check how `iter_content` calls `stream_decode_response_unicode`:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018SnYGXzxZGmzzPEzZnNhpq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 20 -B 5 \"stream_decode_response_unicode\" /testbed/requests/models.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018SnYGXzxZGmzzPEzZnNhpq",
+          "content": "[exit_code=0]\n24-from .exceptions import (\n25-    HTTPError, MissingSchema, InvalidURL, ChunkedEncodingError,\n26-    ContentDecodingError, ConnectionError, StreamConsumedError)\n27-from .utils import (\n28-    guess_filename, get_auth_from_url, requote_uri,\n29:    stream_decode_response_unicode, to_key_val_list, parse_header_links,\n30-    iter_slices, guess_json_utf, super_len, to_native_string)\n31-from .compat import (\n32-    cookielib, urlunparse, urlsplit, urlencode, str, bytes, StringIO,\n33-    is_py2, chardet, builtin_str, basestring)\n34-from .compat import json as complexjson\n35-from .status_codes import codes\n36-\n37-#: The set of HTTP status codes that indicate an automatically\n38-#: processable redirect.\n39-REDIRECT_STATI = (\n40-    codes.moved,              # 301\n41-    codes.found,              # 302\n42-    codes.other,              # 303\n43-    codes.temporary_redirect, # 307\n44-    codes.permanent_redirect, # 308\n45-)\n46-\n47-DEFAULT_REDIRECT_LIMIT = 30\n48-CONTENT_CHUNK_SIZE = 10 * 1024\n49-ITER_CHUNK_SIZE = 512\n--\n693-        stream_chunks = generate()\n694-\n695-        chunks = reused_chunks if self._content_consumed else stream_chunks\n696-\n697-        if decode_unicode:\n698:            chunks = stream_decode_response_unicode(chunks, self)\n699-\n700-        return chunks\n701-\n702-    def iter_lines(self, chunk_size=ITER_CHUNK_SIZE, decode_unicode=None, delimiter=None):\n703-        \"\"\"Iterates over the response data, one line at a time.  When\n704-        stream=True is set on the request, this avoids reading the\n705-        content at once into memory for large responses.\n706-\n707-        .. note:: This method is not reentrant safe.\n708-        \"\"\"\n709-\n710-        pending = None\n711-\n712-        for chunk in self.iter_content(chunk_size=chunk_size, decode_unicode=decode_unicode):\n713-\n714-            if pending is not None:\n715-                chunk = pending + chunk\n716-\n717-            if delimiter:\n718-                lines = chunk.split(delimiter)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check what `apparent_encoding` is to understand the fallback mechanism:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Vshd45uTaDLYAZKwmUZLiT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 10 -B 5 \"apparent_encoding\" /testbed/requests/models.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Vshd45uTaDLYAZKwmUZLiT",
+          "content": "[exit_code=0]\n644-    def is_permanent_redirect(self):\n645-        \"\"\"True if this Response one of the permanent versions of redirect\"\"\"\n646-        return ('location' in self.headers and self.status_code in (codes.moved_permanently, codes.permanent_redirect))\n647-\n648-    @property\n649:    def apparent_encoding(self):\n650-        \"\"\"The apparent encoding, provided by the chardet library\"\"\"\n651-        return chardet.detect(self.content)['encoding']\n652-\n653-    def iter_content(self, chunk_size=1, decode_unicode=False):\n654-        \"\"\"Iterates over the response data.  When stream=True is set on the\n655-        request, this avoids reading the content at once into memory for\n656-        large responses.  The chunk size is the number of bytes it should\n657-        read into memory.  This is not necessarily the length of each item\n658-        returned as decoding can take place.\n659-\n--\n774-        if not self.content:\n775-            return str('')\n776-\n777-        # Fallback to auto-detected encoding.\n778-        if self.encoding is None:\n779:            encoding = self.apparent_encoding\n780-\n781-        # Decode unicode from given encoding.\n782-        try:\n783-            content = str(self.content, encoding, errors='replace')\n784-        except (LookupError, TypeError):\n785-            # A LookupError is raised if the encoding was not found which could\n786-            # indicate a misspelling or similar mistake.\n787-            #\n788-            # A TypeError can be raised if encoding is None\n789-            #"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I understand the bug:\n\n1. The `text` property has fallback logic: if `self.encoding` is None, it uses `self.apparent_encoding` which uses chardet to auto-detect the encoding.\n\n2. The `stream_decode_response_unicode` function used by `iter_content(decode_unicode=True)` does NOT have this fallback. When `r.encoding is None`, it just yields the raw bytes without any decoding.\n\n3. The maintainer confirmed this is genuinely bad behavior and should be considered a bug, suggesting we should have the same logic as in `text`.\n\nThe fix should be to modify `stream_decode_response_unicode` to use the same fallback logic as the `text` property when `r.encoding` is None.\n\nLooking at the fix pattern library:\n- This matches **PB \u2014 Deprecated or removed API replaced with version-detection branch** in that the current implementation has inconsistent behavior, but that's not quite right since there's no deprecated API.\n- Actually, this is more like **PA \u2014 None/empty guard placed at wrong level** - the function returns bytes when encoding is None instead of properly handling the None case.\n- Actually, it's closest to **no pattern match** since this is about making two APIs consistent rather than fixing a crash or type error.\n\nThe fix should be inside `stream_decode_response_unicode` to make it consistent with the `text` property's behavior.\n</think>\n\nNow I'll analyze the current implementation and propose a fix.\n\n<think>\n1. What is the function SUPPOSED to do in plain English?\n   `stream_decode_response_unicode` should decode bytes from an iterator into unicode strings when `decode_unicode=True` is used with `iter_content()`. It should behave consistently with the `text` property.\n\n2. What input triggers the failure and what error results?\n   When `r.encoding` is None, the function yields raw bytes instead of decoded unicode strings, causing `iter_content(decode_unicode=True)` to return bytes instead of strings.\n\n3. Which fix pattern from the library below matches this bug?\n   No pattern match: This is about making two APIs consistent. The function needs to implement the same fallback logic as the `text` property.\n\n4. Where should the fix live \u2014 inside the function that crashes, or at the call site?\n   Inside `stream_decode_response_unicode` to protect all callers and make the behavior consistent.\n\n5. How many lines need to change?\n   Should be 1-2 lines - just need to change the condition from `if r.encoding is None:` to use `r.apparent_encoding` as fallback.\n</think>\n\nLooking at the buggy code, I can see that when `r.encoding is None`, the function just yields raw bytes without decoding. The `text` property handles this by falling back to `r.apparent_encoding`. I need to implement the same fallback logic.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/requests/utils.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/requests/utils.py\",\n      \"location\": \"stream_decode_response_unicode, line 362\",\n      \"change\": \"REPLACE lines 362-365:\\n    if r.encoding is None:\\n        for item in iterator:\\n            yield item\\n        return\\nWITH:\\n    encoding = r.encoding\\n    if encoding is None:\\n        encoding = r.apparent_encoding\",\n      \"rationale\": \"The function currently returns raw bytes when r.encoding is None, but it should fall back to r.apparent_encoding like the text property does. This makes iter_content(decode_unicode=True) consistent with the text property's encoding detection behavior.\"\n    },\n    {\n      \"file\": \"/testbed/requests/utils.py\",\n      \"location\": \"stream_decode_response_unicode, line 367\",\n      \"change\": \"REPLACE line 367:\\n    decoder = codecs.getincrementaldecoder(r.encoding)(errors='replace')\\nWITH:\\n    decoder = codecs.getincrementaldecoder(encoding)(errors='replace')\",\n      \"rationale\": \"Use the encoding variable that now includes the fallback logic instead of r.encoding directly.\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: Make stream_decode_response_unicode consistent with the text property by implementing the same encoding fallback logic when r.encoding is None, using r.apparent_encoding as the fallback instead of returning raw bytes.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T13:17:25Z"
+}

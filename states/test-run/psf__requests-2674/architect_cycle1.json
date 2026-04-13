@@ -1,0 +1,200 @@
+{
+  "instance_id": "psf__requests-2674",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/requests/adapters.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/requests/adapters.py",
+      "location": "imports section, line 27",
+      "change": "INSERT after line 27:\nfrom .packages.urllib3.exceptions import ClosedPoolError",
+      "rationale": "Need to import ClosedPoolError to catch it in the exception handling block"
+    },
+    {
+      "file": "/testbed/requests/adapters.py",
+      "location": "HTTPAdapter.send, line 407",
+      "change": "INSERT after line 407:\n\n        except ClosedPoolError as e:\n            raise ConnectionError(e, request=request)",
+      "rationale": "ClosedPoolError represents a connection issue when pool is closed, so should be wrapped in requests.ConnectionError following the same pattern as other connection-related exceptions"
+    }
+  ],
+  "fix_strategy": "no pattern match: adding missing exception handler to maintain API boundary. The HTTPAdapter.send method already catches various urllib3 exceptions and wraps them in appropriate requests exceptions, but ClosedPoolError was missing from the exception handling block. This fix adds the missing handler to wrap ClosedPoolError in ConnectionError, following the established pattern for other connection-related exceptions.",
+  "full_response": "<think>\nNow I have all the information I need:\n\n1. The exact buggy lines: The exception handling block in HTTPAdapter.send starting around line 400 is missing a catch clause for ClosedPoolError.\n\n2. The lines after: The method continues with building and returning the response. My fix won't change what downstream code receives.\n\n3. Pattern match: This doesn't exactly match any of the PA-PH patterns. It's about adding a missing exception handler. I would call this \"no pattern match: adding missing exception handler to maintain API boundary\".\n\n4. Lines to change: I need to:\n   - Add import for ClosedPoolError (1 line)\n   - Add exception handler clause (2 lines following the existing pattern)\n   Total: 3 lines, which is within the limit.\n\nThe fix should catch ClosedPoolError and wrap it in ConnectionError, following the same pattern as other connection-related exceptions like MaxRetryError and ProtocolError.\n</think>\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/requests/adapters.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/requests/adapters.py\",\n      \"location\": \"imports section, line 27\",\n      \"change\": \"INSERT after line 27:\\nfrom .packages.urllib3.exceptions import ClosedPoolError\",\n      \"rationale\": \"Need to import ClosedPoolError to catch it in the exception handling block\"\n    },\n    {\n      \"file\": \"/testbed/requests/adapters.py\", \n      \"location\": \"HTTPAdapter.send, line 407\",\n      \"change\": \"INSERT after line 407:\\n\\n        except ClosedPoolError as e:\\n            raise ConnectionError(e, request=request)\",\n      \"rationale\": \"ClosedPoolError represents a connection issue when pool is closed, so should be wrapped in requests.ConnectionError following the same pattern as other connection-related exceptions\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: adding missing exception handler to maintain API boundary. The HTTPAdapter.send method already catches various urllib3 exceptions and wraps them in appropriate requests exceptions, but ClosedPoolError was missing from the exception handling block. This fix adds the missing handler to wrap ClosedPoolError in ConnectionError, following the established pattern for other connection-related exceptions.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>psf__requests-2674</instance_id>\n\n<problem_statement>\nurllib3 exceptions passing through requests API\nI don't know if it's a design goal of requests to hide urllib3's exceptions and wrap them around requests.exceptions types.\n\n(If it's not IMHO it should be, but that's another discussion)\n\nIf it is, I have at least two of them passing through that I have to catch in addition to requests' exceptions. They are requests.packages.urllib3.exceptions.DecodeError and requests.packages.urllib3.exceptions.TimeoutError (this one I get when a proxy timeouts)\n\nThanks!\n\n\n</problem_statement>\n\n<hints>\nI definitely agree with you and would agree that these should be wrapped.\n\nCould you give us stack-traces so we can find where they're bleeding through?\n\nSorry I don't have stack traces readily available :/\n\nNo worries. I have ideas as to where the DecodeError might be coming from but I'm not certain where the TimeoutError could be coming from.\n\nIf you run into them again, please save us the stack traces. =) Thanks for reporting them. (We'll never know what we're missing until someone tells us.)\n\n`TimeoutError` is almost certainly being raised from either [`HTTPConnectionPool.urlopen()`](https://github.com/kennethreitz/requests/blob/master/requests/adapters.py#L282-L293) or from [`HTTPConnection.putrequest()`](https://github.com/kennethreitz/requests/blob/master/requests/adapters.py#L301). Adding a new clause to [here](https://github.com/kennethreitz/requests/blob/master/requests/adapters.py#L323-L335) should cover us.\n\nActually, that can't be right, we should be catching and rethrowing as a Requests `Timeout` exception in that block. Hmm, I'll do another spin through the code to see if I can see the problem.\n\nYeah, a quick search of the `urllib3` code reveals that the only place that `TimeoutError`s are thrown is from `HTTPConnectionPool.urlopen()`. These should not be leaking. We really need a stack trace to track this down.\n\nI've added a few logs to get the traces if they happen again. What may have confused me for the TimeoutError is that requests' Timeout actually wraps the urllib3's TimeoutError and we were logging the content of the error as well. \n\nSo DecodeError was definitely being thrown but probably not TimeoutError, sorry for the confusion. I'll report here it I ever see it happening now that we're watching for it.\n\nThanks for the help!\n\nI also got urllib3 exceptions passing through when use Session in several threads, trace:\n\n```\n......\n  File \"C:\\Python27\\lib\\site-packages\\requests\\sessions.py\", line 347, in get\n    return self.request('GET', url, **kwargs)\n  File \"C:\\Python27\\lib\\site-packages\\requests\\sessions.py\", line 335, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"C:\\Python27\\lib\\site-packages\\requests\\sessions.py\", line 438, in send\n    r = adapter.send(request, **kwargs)\n  File \"C:\\Python27\\lib\\site-packages\\requests\\adapters.py\", line 292, in send\n    timeout=timeout\n  File \"C:\\Python27\\lib\\site-packages\\requests\\packages\\urllib3\\connectionpool.py\", line 423, in url\nopen\n    conn = self._get_conn(timeout=pool_timeout)\n  File \"C:\\Python27\\lib\\site-packages\\requests\\packages\\urllib3\\connectionpool.py\", line 224, in _ge\nt_conn\n    raise ClosedPoolError(self, \"Pool is closed.\")\nClosedPoolError: HTTPConnectionPool(host='......', port=80): Pool is closed.\n```\n\nAh, we should rewrap that `ClosedPoolError` too.\n\nBut it's still the summer... How can any pool be closed? :smirk_cat: \n\nBut yes :+1:\n\nI've added a fix for the `ClosedPoolError` to #1475. Which apparently broke in the last month for no adequately understandable reason.\n\nIf it's still needed, here is the traceback of DecodeError I got using proxy on requests 2.0.0:\n\n```\nTraceback (most recent call last):\n  File \"/home/krat/Projects/Grubhub/source/Pit/pit/web.py\", line 52, in request\n    response = session.request(method, url, **kw)\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/sessions.py\", line 357, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/sessions.py\", line 460, in send\n    r = adapter.send(request, **kwargs)\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/adapters.py\", line 367, in send\n    r.content\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/models.py\", line 633, in content\n    self._content = bytes().join(self.iter_content(CONTENT_CHUNK_SIZE)) or bytes()\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/models.py\", line 572, in generate\n    decode_content=True):\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/packages/urllib3/response.py\", line 225, in stream\n    data = self.read(amt=amt, decode_content=decode_content)\n  File \"/home/krat/.virtualenvs/grubhub/local/lib/python2.7/site-packages/requests/packages/urllib3/response.py\", line 193, in read\n    e)\nDecodeError: ('Received response with content-encoding: gzip, but failed to decode it.', error('Error -3 while decompressing: incorrect header check',))\n```\n\nSlightly different to the above, but urllib3's LocationParseError leaks through which could probably do with being wrapped in InvalidURL.\n\n```\nTraceback (most recent call last):\n  File \"/home/oliver/wc/trunk/mtmCore/python/asagent/samplers/net/web.py\", line 255, in process_url\n    resp = self.request(self.params.httpverb, url, data=data)\n  File \"/home/oliver/wc/trunk/mtmCore/python/asagent/samplers/net/web.py\", line 320, in request\n    verb, url, data=data))\n  File \"abilisoft/requests/opt/abilisoft.com/thirdparty/requests/lib/python2.7/site-packages/requests/sessions.py\", line 286, in prepare_request\n  File \"abilisoft/requests/opt/abilisoft.com/thirdparty/requests/lib/python2.7/site-packages/requests/models.py\", line 286, in prepare\n  File \"abilisoft/requests/opt/abilisoft.com/thirdparty/requests/lib/python2.7/site-packages/requests/models.py\", line 333, in prepare_url\n  File \"abilisoft/requests/opt/abilisoft.com/thirdparty/requests/lib/python2.7/site-packages/requests/packages/urllib3/util.py\", line 397, in parse_url\nLocationParseError: Failed to parse: Failed to parse: fe80::5054:ff:fe5a:fc0\n```\n\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/requests/adapters.py\"\n]\nRelevant symbols: [\n  \"HTTPAdapter.send\"\n]\nBug analysis: The HTTPAdapter.send method in adapters.py catches various urllib3 exceptions and wraps them in requests exceptions, but it does not catch ClosedPoolError. When a urllib3 connection pool is closed and a request tries to get a connection from it, ClosedPoolError is raised from urllib3's connectionpool.py and passes through the requests API unwrapped.\nExploration notes: ClosedPoolError needs to be imported from packages.urllib3.exceptions at the top of adapters.py (around lines 22-29). The exception handling block starting around line 413 in HTTPAdapter.send method should catch ClosedPoolError and wrap it in a requests ConnectionError, following the same pattern as other connection-related exceptions. The existing exception handling already properly wraps MaxRetryError, ProxyError, SSLError, and HTTPError but is missing ClosedPoolError coverage.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLet me understand this bug:\n\n1. The function SUPPOSED to do: The `HTTPAdapter.send` method should catch all urllib3 exceptions and wrap them in appropriate requests exceptions to maintain API consistency.\n\n2. Input that triggers failure: When using a connection pool that gets closed (especially in multi-threaded scenarios), urllib3 raises `ClosedPoolError` which passes through unwrapped.\n\n3. Fix pattern: This matches **PA - None/empty guard placed at wrong level**. Actually, no, this is more like adding a missing exception handler. Looking at the patterns, this doesn't exactly match any of them. It's about adding a missing exception catch clause.\n\n4. Where should the fix live: Inside the `HTTPAdapter.send` method where other urllib3 exceptions are already being caught and wrapped. This protects all callers.\n\n5. How many lines: Should be 1-2 lines to add the new exception catch clause following the existing pattern.\n\nLet me examine the code to understand the current exception handling structure.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MGxJF9eeJSr8HTnoNpf37x",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/requests/adapters.py",
+            "method_name": "send"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MGxJF9eeJSr8HTnoNpf37x",
+          "content": "[exit_code=0]\n--- send (lines 47-48) ---\n    def send(self):\n        raise NotImplementedError\n\n--- send (lines 324-435) ---\n    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):\n        \"\"\"Sends PreparedRequest object. Returns Response object.\n\n        :param request: The :class:`PreparedRequest <PreparedRequest>` being sent.\n        :param stream: (optional) Whether to stream the request content.\n        :param timeout: (optional) How long to wait for the server to send\n            data before giving up, as a float, or a (`connect timeout, read\n            timeout <user/advanced.html#timeouts>`_) tuple.\n        :type timeout: float or tuple\n        :param verify: (optional) Whether to verify SSL certificates.\n        :param cert: (optional) Any user-provided SSL certificate to be trusted.\n        :param proxies: (optional) The proxies dictionary to apply to the request.\n        \"\"\"\n\n        conn = self.get_connection(request.url, proxies)\n\n        self.cert_verify(conn, request.url, verify, cert)\n        url = self.request_url(request, proxies)\n        self.add_headers(request)\n\n        chunked = not (request.body is None or 'Content-Length' in request.headers)\n\n        if isinstance(timeout, tuple):\n            try:\n                connect, read = timeout\n                timeout = TimeoutSauce(connect=connect, read=read)\n            except ValueError as e:\n                # this may raise a string formatting error.\n                err = (\"Invalid timeout {0}. Pass a (connect, read) \"\n                       \"timeout tuple, or a single float to set \"\n                       \"both timeouts to the same value\".format(timeout))\n                raise ValueError(err)\n        else:\n            timeout = TimeoutSauce(connect=timeout, read=timeout)\n\n        try:\n            if not chunked:\n                resp = conn.urlopen(\n                    method=request.method,\n                    url=url,\n                    body=request.body,\n                    headers=request.headers,\n                    redirect=False,\n                    assert_same_host=False,\n                    preload_content=False,\n                    decode_content=False,\n                    retries=self.max_retries,\n                    timeout=timeout\n                )\n\n            # Send the request.\n            else:\n                if hasattr(conn, 'proxy_pool'):\n                    conn = conn.proxy_pool\n\n                low_conn = conn._get_conn(timeout=DEFAULT_POOL_TIMEOUT)\n\n                try:\n                    low_conn.putrequest(request.method,\n                                        url,\n                                        skip_accept_encoding=True)\n\n                    for header, value in request.headers.items():\n                        low_conn.putheader(header, value)\n\n                    low_conn.endheaders()\n\n                    for i in request.body:\n                        low_conn.send(hex(len(i))[2:].encode('utf-8'))\n                        low_conn.send(b'\\r\\n')\n                        low_conn.send(i)\n                        low_conn.send(b'\\r\\n')\n                    low_conn.send(b'0\\r\\n\\r\\n')\n\n                    r = low_conn.getresponse()\n                    resp = HTTPResponse.from_httplib(\n                        r,\n                        pool=conn,\n                        connection=low_conn,\n                        preload_content=False,\n                        decode_content=False\n                    )\n                except:\n                    # If we hit any problems here, clean up the connection.\n                    # Then, reraise so that we can handle the actual exception.\n                    low_conn.close()\n                    raise\n\n        except (ProtocolError, socket.error) as err:\n            raise ConnectionError(err, request=request)\n\n        except MaxRetryError as e:\n            if isinstance(e.reason, ConnectTimeoutError):\n                raise ConnectTimeout(e, request=request)\n\n            if isinstance(e.reason, ResponseError):\n                raise RetryError(e, request=request)\n\n            raise ConnectionError(e, request=request)\n\n        except _ProxyError as e:\n            raise ProxyError(e)\n\n        except (_SSLError, _HTTPError) as e:\n            if isinstance(e, _SSLError):\n                raise SSLError(e, request=request)\n            elif isinstance(e, ReadTimeoutError):\n                raise ReadTimeout(e, request=request)\n            else:\n                raise\n\n        return self.build_response(request, resp)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I need to see what exceptions are already imported to understand the pattern:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01K2nsev7bKJrrTQ9wHKiFv6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "head -30 /testbed/requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01K2nsev7bKJrrTQ9wHKiFv6",
+          "content": "[exit_code=0]\n# -*- coding: utf-8 -*-\n\n\"\"\"\nrequests.adapters\n~~~~~~~~~~~~~~~~~\n\nThis module contains the transport adapters that Requests uses to define\nand maintain connections.\n\"\"\"\n\nimport socket\n\nfrom .models import Response\nfrom .packages.urllib3.poolmanager import PoolManager, proxy_from_url\nfrom .packages.urllib3.response import HTTPResponse\nfrom .packages.urllib3.util import Timeout as TimeoutSauce\nfrom .packages.urllib3.util.retry import Retry\nfrom .compat import urlparse, basestring\nfrom .utils import (DEFAULT_CA_BUNDLE_PATH, get_encoding_from_headers,\n                    prepend_scheme_if_needed, get_auth_from_url, urldefragauth)\nfrom .structures import CaseInsensitiveDict\nfrom .packages.urllib3.exceptions import ConnectTimeoutError\nfrom .packages.urllib3.exceptions import HTTPError as _HTTPError\nfrom .packages.urllib3.exceptions import MaxRetryError\nfrom .packages.urllib3.exceptions import ProxyError as _ProxyError\nfrom .packages.urllib3.exceptions import ProtocolError\nfrom .packages.urllib3.exceptions import ReadTimeoutError\nfrom .packages.urllib3.exceptions import SSLError as _SSLError\nfrom .packages.urllib3.exceptions import ResponseError\nfrom .cookies import extract_cookies_to_jar"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I need to check if ClosedPoolError is already imported:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MXUG8SXELqVRwpLXYvS3Yi",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"ClosedPoolError\" /testbed/requests/adapters.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MXUG8SXELqVRwpLXYvS3Yi",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "It's not imported. Let me check what the requests exceptions look like to see what it should be wrapped in:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01H5uPmRgkt51kUVifJC8eza",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed -name \"exceptions.py\" | grep requests | head -1 | xargs cat"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01H5uPmRgkt51kUVifJC8eza",
+          "content": "[exit_code=0]\n# -*- coding: utf-8 -*-\n\n\"\"\"\nrequests.exceptions\n~~~~~~~~~~~~~~~~~~~\n\nThis module contains the set of Requests' exceptions.\n\n\"\"\"\nfrom .packages.urllib3.exceptions import HTTPError as BaseHTTPError\n\n\nclass RequestException(IOError):\n    \"\"\"There was an ambiguous exception that occurred while handling your\n    request.\"\"\"\n\n    def __init__(self, *args, **kwargs):\n        \"\"\"\n        Initialize RequestException with `request` and `response` objects.\n        \"\"\"\n        response = kwargs.pop('response', None)\n        self.response = response\n        self.request = kwargs.pop('request', None)\n        if (response is not None and not self.request and\n                hasattr(response, 'request')):\n            self.request = self.response.request\n        super(RequestException, self).__init__(*args, **kwargs)\n\n\nclass HTTPError(RequestException):\n    \"\"\"An HTTP error occurred.\"\"\"\n\n\nclass ConnectionError(RequestException):\n    \"\"\"A Connection error occurred.\"\"\"\n\n\nclass ProxyError(ConnectionError):\n    \"\"\"A proxy error occurred.\"\"\"\n\n\nclass SSLError(ConnectionError):\n    \"\"\"An SSL error occurred.\"\"\"\n\n\nclass Timeout(RequestException):\n    \"\"\"The request timed out.\n\n    Catching this error will catch both\n    :exc:`~requests.exceptions.ConnectTimeout` and\n    :exc:`~requests.exceptions.ReadTimeout` errors.\n    \"\"\"\n\n\nclass ConnectTimeout(ConnectionError, Timeout):\n    \"\"\"The request timed out while trying to connect to the remote server.\n\n    Requests that produced this error are safe to retry.\n    \"\"\"\n\n\nclass ReadTimeout(Timeout):\n    \"\"\"The server did not send any data in the allotted amount of time.\"\"\"\n\n\nclass URLRequired(RequestException):\n    \"\"\"A valid URL is required to make a request.\"\"\"\n\n\nclass TooManyRedirects(RequestException):\n    \"\"\"Too many redirects.\"\"\"\n\n\nclass MissingSchema(RequestException, ValueError):\n    \"\"\"The URL schema (e.g. http or https) is missing.\"\"\"\n\n\nclass InvalidSchema(RequestException, ValueError):\n    \"\"\"See defaults.py for valid schemas.\"\"\"\n\n\nclass InvalidURL(RequestException, ValueError):\n    \"\"\" The URL provided was somehow invalid. \"\"\"\n\n\nclass ChunkedEncodingError(RequestException):\n    \"\"\"The server declared chunked encoding but sent an invalid chunk.\"\"\"\n\n\nclass ContentDecodingError(RequestException, BaseHTTPError):\n    \"\"\"Failed to decode response content\"\"\"\n\n\nclass StreamConsumedError(RequestException, TypeError):\n    \"\"\"The content for this response was already consumed\"\"\"\n\n\nclass RetryError(RequestException):\n    \"\"\"Custom retries logic failed\"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Based on the traceback in the hints, the `ClosedPoolError` occurs when trying to get a connection from a closed pool. Looking at the existing exception handling, connection-related errors are wrapped in `ConnectionError`. This makes sense since a closed pool represents a connection issue.\n\nLet me now find similar API calls to understand how this should be handled:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JwXP8GZzakqGbnC6EVPHDT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "method_name": "ClosedPoolError",
+            "search_path": "/testbed"
+          },
+          "name": "find_similar_api_calls",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JwXP8GZzakqGbnC6EVPHDT",
+          "content": "[exit_code=0]\n/testbed/requests/packages/urllib3/connectionpool.py:227:            raise ClosedPoolError(self, \"Pool is closed.\")\n/testbed/requests/packages/urllib3/connectionpool.py-228-\n--\n/testbed/requests/packages/urllib3/exceptions.py:121:class ClosedPoolError(PoolError):\n/testbed/requests/packages/urllib3/exceptions.py-122-    \"Raised when a request enters a pool after the pool has been closed.\"\n--\n/testbed/build/lib/requests/packages/urllib3/connectionpool.py:227:            raise ClosedPoolError(self, \"Pool is closed.\")\n/testbed/build/lib/requests/packages/urllib3/connectionpool.py-228-\n--\n/testbed/build/lib/requests/packages/urllib3/exceptions.py:121:class ClosedPoolError(PoolError):\n/testbed/build/lib/requests/packages/urllib3/exceptions.py-122-    \"Raised when a request enters a pool after the pool has been closed.\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I have all the information I need:\n\n1. The exact buggy lines: The exception handling block in HTTPAdapter.send starting around line 400 is missing a catch clause for ClosedPoolError.\n\n2. The lines after: The method continues with building and returning the response. My fix won't change what downstream code receives.\n\n3. Pattern match: This doesn't exactly match any of the PA-PH patterns. It's about adding a missing exception handler. I would call this \"no pattern match: adding missing exception handler to maintain API boundary\".\n\n4. Lines to change: I need to:\n   - Add import for ClosedPoolError (1 line)\n   - Add exception handler clause (2 lines following the existing pattern)\n   Total: 3 lines, which is within the limit.\n\nThe fix should catch ClosedPoolError and wrap it in ConnectionError, following the same pattern as other connection-related exceptions like MaxRetryError and ProtocolError.\n</think>\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/requests/adapters.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/requests/adapters.py\",\n      \"location\": \"imports section, line 27\",\n      \"change\": \"INSERT after line 27:\\nfrom .packages.urllib3.exceptions import ClosedPoolError\",\n      \"rationale\": \"Need to import ClosedPoolError to catch it in the exception handling block\"\n    },\n    {\n      \"file\": \"/testbed/requests/adapters.py\", \n      \"location\": \"HTTPAdapter.send, line 407\",\n      \"change\": \"INSERT after line 407:\\n\\n        except ClosedPoolError as e:\\n            raise ConnectionError(e, request=request)\",\n      \"rationale\": \"ClosedPoolError represents a connection issue when pool is closed, so should be wrapped in requests.ConnectionError following the same pattern as other connection-related exceptions\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: adding missing exception handler to maintain API boundary. The HTTPAdapter.send method already catches various urllib3 exceptions and wraps them in appropriate requests exceptions, but ClosedPoolError was missing from the exception handling block. This fix adds the missing handler to wrap ClosedPoolError in ConnectionError, following the established pattern for other connection-related exceptions.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T13:14:27Z"
+}

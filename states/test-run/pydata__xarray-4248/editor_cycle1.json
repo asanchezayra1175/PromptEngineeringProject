@@ -1,0 +1,212 @@
+{
+  "instance_id": "pydata__xarray-4248",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/xarray/core/formatting.py b/xarray/core/formatting.py\nindex 28eaae5f..23c357a2 100644\n--- a/xarray/core/formatting.py\n+++ b/xarray/core/formatting.py\n@@ -261,6 +261,8 @@ def inline_variable_array_repr(var, max_width):\n         return inline_dask_repr(var.data)\n     elif isinstance(var._data, sparse_array_type):\n         return inline_sparse_repr(var.data)\n+    elif hasattr(var._data, \"_repr_short_\"):\n+        return var._data._repr_short_(max_width)\n     elif hasattr(var._data, \"__array_function__\"):\n         return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n     else:",
+  "implementation_notes": "Added support for duck array protocol _repr_short_(max_width) method in inline_variable_array_repr function. This allows duck arrays like pint quantities to provide custom short representations that preserve unit information in dataset repr, positioned before the generic __array_function__ fallback.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>pydata__xarray-4248</instance_id>\n\n<problem_statement>\nFeature request: show units in dataset overview\nHere's a hypothetical dataset:\r\n\r\n```\r\n<xarray.Dataset>\r\nDimensions:  (time: 3, x: 988, y: 822)\r\nCoordinates:\r\n  * x         (x) float64 ...\r\n  * y         (y) float64 ...\r\n  * time      (time) datetime64[ns] ...\r\nData variables:\r\n    rainfall  (time, y, x) float32 ...\r\n    max_temp  (time, y, x) float32 ...\r\n```\r\n\r\nIt would be really nice if the units of the coordinates and of the data variables were shown in the `Dataset` repr, for example as:\r\n\r\n```\r\n<xarray.Dataset>\r\nDimensions:  (time: 3, x: 988, y: 822)\r\nCoordinates:\r\n  * x, in metres         (x)            float64 ...\r\n  * y, in metres         (y)            float64 ...\r\n  * time                 (time)         datetime64[ns] ...\r\nData variables:\r\n    rainfall, in mm      (time, y, x)   float32 ...\r\n    max_temp, in deg C   (time, y, x)   float32 ...\r\n```\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The inline_variable_array_repr function builds one-line summaries of variable data but does not check for a _repr_short_ method on duck arrays. When duck arrays like pint quantities have a _repr_short_ method that provides unit-aware short representations, the function bypasses it and uses the generic __array_function__ branch or default repr, which truncates unit information.\nExploration notes: The inline_variable_array_repr function is at lines 256-268 in formatting.py. It currently handles dask arrays, sparse arrays, and arrays with __array_function__ but lacks a check for _repr_short_(self, length) method. The function is called by summarize_variable (line 289) which is used by summarize_coord and summarize_datavar for dataset repr. The test target test_inline_variable_array_repr_custom_repr does not exist yet and needs to be created.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Add support for _repr_short_(length) duck array protocol before the generic __array_function__ fallback, allowing unit-aware arrays to provide custom short representations that preserve unit information in dataset display.\n\nFiles to modify: [\n  \"/testbed/xarray/core/formatting.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/xarray/core/formatting.py\n  Location: inline_variable_array_repr, line 262\n  Change  : INSERT after line 262:\n    elif hasattr(var._data, \"_repr_short_\"):\n        return var._data._repr_short_(max_width)\n  Rationale: Duck arrays like pint quantities need to provide their own unit-aware short representations. The _repr_short_(length) method allows duck arrays to control their formatting in dataset repr, ensuring units are displayed properly instead of being truncated by the generic repr() call.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal by modifying the formatting.py file. Let me start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012RoiPRq3CoCpSmaZpzyqdp",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/xarray/core/formatting.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012RoiPRq3CoCpSmaZpzyqdp",
+          "content": "[exit_code=0]\n\"\"\"String formatting routines for __repr__.\n\"\"\"\nimport contextlib\nimport functools\nfrom datetime import datetime, timedelta\nfrom itertools import chain, zip_longest\nfrom typing import Hashable\n\nimport numpy as np\nimport pandas as pd\nfrom pandas.errors import OutOfBoundsDatetime\n\nfrom .duck_array_ops import array_equiv\nfrom .options import OPTIONS\nfrom .pycompat import dask_array_type, sparse_array_type\n\n\ndef pretty_print(x, numchars: int):\n    \"\"\"Given an object `x`, call `str(x)` and format the returned string so\n    that it is numchars long, padding with trailing spaces or truncating with\n    ellipses as necessary\n    \"\"\"\n    s = maybe_truncate(x, numchars)\n    return s + \" \" * max(numchars - len(s), 0)\n\n\ndef maybe_truncate(obj, maxlen=500):\n    s = str(obj)\n    if len(s) > maxlen:\n        s = s[: (maxlen - 3)] + \"...\"\n    return s\n\n\ndef wrap_indent(text, start=\"\", length=None):\n    if length is None:\n        length = len(start)\n    indent = \"\\n\" + \" \" * length\n    return start + indent.join(x for x in text.splitlines())\n\n\ndef _get_indexer_at_least_n_items(shape, n_desired, from_end):\n    assert 0 < n_desired <= np.prod(shape)\n    cum_items = np.cumprod(shape[::-1])\n    n_steps = np.argmax(cum_items >= n_desired)\n    stop = int(np.ceil(float(n_desired) / np.r_[1, cum_items][n_steps]))\n    indexer = (\n        ((-1 if from_end else 0),) * (len(shape) - 1 - n_steps)\n        + ((slice(-stop, None) if from_end else slice(stop)),)\n        + (slice(None),) * n_steps\n    )\n    return indexer\n\n\ndef first_n_items(array, n_desired):\n    \"\"\"Returns the first n_desired items of an array\"\"\"\n    # Unfortunately, we can't just do array.flat[:n_desired] here because it\n    # might not be a numpy.ndarray. Moreover, access to elements of the array\n    # could be very expensive (e.g. if it's only available over DAP), so go out\n    # of our way to get them in a single call to __getitem__ using only slices.\n    if n_desired < 1:\n        raise ValueError(\"must request at least one item\")\n\n    if array.size == 0:\n        # work around for https://github.com/numpy/numpy/issues/5195\n        return []\n\n    if n_desired < array.size:\n        indexer = _get_indexer_at_least_n_items(array.shape, n_desired, from_end=False)\n        array = array[indexer]\n    return np.asarray(array).flat[:n_desired]\n\n\ndef last_n_items(array, n_desired):\n    \"\"\"Returns the last n_desired items of an array\"\"\"\n    # Unfortunately, we can't just do array.flat[-n_desired:] here because it\n    # might not be a numpy.ndarray. Moreover, access to elements of the array\n    # could be very expensive (e.g. if it's only available over DAP), so go out\n    # of our way to get them in a single call to __getitem__ using only slices.\n    if (n_desired == 0) or (array.size == 0):\n        return []\n\n    if n_desired < array.size:\n        indexer = _get_indexer_at_least_n_items(array.shape, n_desired, from_end=True)\n        array = array[indexer]\n    return np.asarray(array).flat[-n_desired:]\n\n\ndef last_item(array):\n    \"\"\"Returns the last item of an array in a list or an empty list.\"\"\"\n    if array.size == 0:\n        # work around for https://github.com/numpy/numpy/issues/5195\n        return []\n\n    indexer = (slice(-1, None),) * array.ndim\n    return np.ravel(np.asarray(array[indexer])).tolist()\n\n\ndef format_timestamp(t):\n    \"\"\"Cast given object to a Timestamp and return a nicely formatted string\"\"\"\n    # Timestamp is only valid for 1678 to 2262\n    try:\n        datetime_str = str(pd.Timestamp(t))\n    except OutOfBoundsDatetime:\n        datetime_str = str(t)\n\n    try:\n        date_str, time_str = datetime_str.split()\n    except ValueError:\n        # catch NaT and others that don't split nicely\n        return datetime_str\n    else:\n        if time_str == \"00:00:00\":\n            return date_str\n        else:\n            return f\"{date_str}T{time_str}\"\n\n\ndef format_timedelta(t, timedelta_format=None):\n    \"\"\"Cast given object to a Timestamp and return a nicely formatted string\"\"\"\n    timedelta_str = str(pd.Timedelta(t))\n    try:\n        days_str, time_str = timedelta_str.split(\" days \")\n    except ValueError:\n        # catch NaT and others that don't split nicely\n        return timedelta_str\n    else:\n        if timedelta_format == \"date\":\n            return days_str + \" days\"\n        elif timedelta_format == \"time\":\n            return time_str\n        else:\n            return timedelta_str\n\n\ndef format_item(x, timedelta_format=None, quote_strings=True):\n    \"\"\"Returns a succinct summary of an object as a string\"\"\"\n    if isinstance(x, (np.datetime64, datetime)):\n        return format_timestamp(x)\n    if isinstance(x, (np.timedelta64, timedelta)):\n        return format_timedelta(x, timedelta_format=timedelta_format)\n    elif isinstance(x, (str, bytes)):\n        return repr(x) if quote_strings else x\n    elif isinstance(x, (float, np.float_)):\n        return f\"{x:.4}\"\n    else:\n        return str(x)\n\n\ndef format_items(x):\n    \"\"\"Returns a succinct summaries of all items in \n...[truncated]...\n= functools.partial(\n    _diff_mapping_repr, title=\"Attributes\", summarizer=summarize_attr\n)\n\n\ndef _compat_to_str(compat):\n    if callable(compat):\n        compat = compat.__name__\n\n    if compat == \"equals\":\n        return \"equal\"\n    elif compat == \"allclose\":\n        return \"close\"\n    else:\n        return compat\n\n\ndef diff_array_repr(a, b, compat):\n    # used for DataArray, Variable and IndexVariable\n    summary = [\n        \"Left and right {} objects are not {}\".format(\n            type(a).__name__, _compat_to_str(compat)\n        )\n    ]\n\n    summary.append(diff_dim_summary(a, b))\n    if callable(compat):\n        equiv = compat\n    else:\n        equiv = array_equiv\n\n    if not equiv(a.data, b.data):\n        temp = [wrap_indent(short_numpy_repr(obj), start=\"    \") for obj in (a, b)]\n        diff_data_repr = [\n            ab_side + \"\\n\" + ab_data_repr\n            for ab_side, ab_data_repr in zip((\"L\", \"R\"), temp)\n        ]\n        summary += [\"Differing values:\"] + diff_data_repr\n\n    if hasattr(a, \"coords\"):\n        col_width = _calculate_col_width(set(a.coords) | set(b.coords))\n        summary.append(\n            diff_coords_repr(a.coords, b.coords, compat, col_width=col_width)\n        )\n\n    if compat == \"identical\":\n        summary.append(diff_attrs_repr(a.attrs, b.attrs, compat))\n\n    return \"\\n\".join(summary)\n\n\ndef diff_dataset_repr(a, b, compat):\n    summary = [\n        \"Left and right {} objects are not {}\".format(\n            type(a).__name__, _compat_to_str(compat)\n        )\n    ]\n\n    col_width = _calculate_col_width(\n        set(_get_col_items(a.variables) + _get_col_items(b.variables))\n    )\n\n    summary.append(diff_dim_summary(a, b))\n    summary.append(diff_coords_repr(a.coords, b.coords, compat, col_width=col_width))\n    summary.append(\n        diff_data_vars_repr(a.data_vars, b.data_vars, compat, col_width=col_width)\n    )\n\n    if compat == \"identical\":\n        summary.append(diff_attrs_repr(a.attrs, b.attrs, compat))\n\n    return \"\\n\".join(summary)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me see the specific area around line 256-268 where `inline_variable_array_repr` is defined:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011y7dAh4PzW1hhWoTy7CrrA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '250,280p' /testbed/xarray/core/formatting.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011y7dAh4PzW1hhWoTy7CrrA",
+          "content": "[exit_code=0]\nassert isinstance(array, sparse_array_type), array\n    return \"<{}: nnz={:d}, fill_value={!s}>\".format(\n        type(array).__name__, array.nnz, array.fill_value\n    )\n\n\ndef inline_variable_array_repr(var, max_width):\n    \"\"\"Build a one-line summary of a variable's data.\"\"\"\n    if var._in_memory:\n        return format_array_flat(var, max_width)\n    elif isinstance(var._data, dask_array_type):\n        return inline_dask_repr(var.data)\n    elif isinstance(var._data, sparse_array_type):\n        return inline_sparse_repr(var.data)\n    elif hasattr(var._data, \"__array_function__\"):\n        return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n    else:\n        # internal xarray array type\n        return \"...\"\n\n\ndef summarize_variable(\n    name: Hashable, var, col_width: int, marker: str = \" \", max_width: int = None\n):\n    \"\"\"Summarize a variable in one line, e.g., for the Dataset.__repr__.\"\"\"\n    if max_width is None:\n        max_width_options = OPTIONS[\"display_width\"]\n        if not isinstance(max_width_options, int):\n            raise TypeError(f\"`max_width` value of `{max_width}` is not a valid int\")\n        else:\n            max_width = max_width_options"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the `inline_variable_array_repr` function. According to the solution proposal, I need to add a check for `_repr_short_` method after line 262 (the sparse array check) and before the `__array_function__` check. Let me apply this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019FGgQPHUyiAUBN3hQ1UoXr",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_formatting.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/xarray/core/formatting.py', 'r') as f:\n    content = f.read()\n\n# Find the function and add the new condition\n# The function starts at \"def inline_variable_array_repr\" and we need to insert\n# after the sparse_array_type check and before the __array_function__ check\n\nold_code = \"\"\"def inline_variable_array_repr(var, max_width):\n    \"\"\"Build a one-line summary of a variable's data.\"\"\"\n    if var._in_memory:\n        return format_array_flat(var, max_width)\n    elif isinstance(var._data, dask_array_type):\n        return inline_dask_repr(var.data)\n    elif isinstance(var._data, sparse_array_type):\n        return inline_sparse_repr(var.data)\n    elif hasattr(var._data, \"__array_function__\"):\n        return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n    else:\n        # internal xarray array type\n        return \"...\" \"\"\"\n\nnew_code = \"\"\"def inline_variable_array_repr(var, max_width):\n    \"\"\"Build a one-line summary of a variable's data.\"\"\"\n    if var._in_memory:\n        return format_array_flat(var, max_width)\n    elif isinstance(var._data, dask_array_type):\n        return inline_dask_repr(var.data)\n    elif isinstance(var._data, sparse_array_type):\n        return inline_sparse_repr(var.data)\n    elif hasattr(var._data, \"_repr_short_\"):\n        return var._data._repr_short_(max_width)\n    elif hasattr(var._data, \"__array_function__\"):\n        return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n    else:\n        # internal xarray array type\n        return \"...\" \"\"\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    with open('/testbed/xarray/core/formatting.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully applied the fix\")\nelse:\n    print(\"ERROR: Could not find the expected code pattern\")\n    sys.exit(1)\nEOF\npython /tmp/fix_formatting.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019FGgQPHUyiAUBN3hQ1UoXr",
+          "content": "[exit_code=1]\nFile \"/tmp/fix_formatting.py\", line 12\n    \"\"\"Build a one-line summary of a variable's data.\"\"\"\n                                             ^\nSyntaxError: unterminated string literal (detected at line 12)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me fix the Python script with proper string escaping:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WBnmQMYEzEnz35rwrdc7ZH",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_formatting.py << 'PYEOF'\nimport sys\n\n# Read the file\nwith open('/testbed/xarray/core/formatting.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line with sparse_array_type check and insert after it\nfound = False\nfor i, line in enumerate(lines):\n    if 'isinstance(var._data, sparse_array_type)' in line and 'return inline_sparse_repr' in lines[i+1]:\n        # Found the sparse array section at lines[i] and lines[i+1]\n        # Insert the new condition after line i+1\n        # Need to find the line that says \"elif hasattr(var._data, \"__array_function__\")\"\n        if 'elif hasattr(var._data, \"__array_function__\")' in lines[i+2]:\n            # Insert the new condition between i+1 and i+2\n            new_line = '    elif hasattr(var._data, \"_repr_short_\"):\\n'\n            return_line = '        return var._data._repr_short_(max_width)\\n'\n            lines.insert(i+2, new_line)\n            lines.insert(i+3, return_line)\n            found = True\n            break\n\nif found:\n    with open('/testbed/xarray/core/formatting.py', 'w') as f:\n        f.writelines(lines)\n    print(\"Successfully applied the fix\")\nelse:\n    print(\"ERROR: Could not find the expected code pattern\")\n    sys.exit(1)\nPYEOF\npython /tmp/fix_formatting.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WBnmQMYEzEnz35rwrdc7ZH",
+          "content": "[exit_code=0]\nSuccessfully applied the fix"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Go16WsVTLphjuypEQ4unwe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '256,275p' /testbed/xarray/core/formatting.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Go16WsVTLphjuypEQ4unwe",
+          "content": "[exit_code=0]\ndef inline_variable_array_repr(var, max_width):\n    \"\"\"Build a one-line summary of a variable's data.\"\"\"\n    if var._in_memory:\n        return format_array_flat(var, max_width)\n    elif isinstance(var._data, dask_array_type):\n        return inline_dask_repr(var.data)\n    elif isinstance(var._data, sparse_array_type):\n        return inline_sparse_repr(var.data)\n    elif hasattr(var._data, \"_repr_short_\"):\n        return var._data._repr_short_(max_width)\n    elif hasattr(var._data, \"__array_function__\"):\n        return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n    else:\n        # internal xarray array type\n        return \"...\"\n\n\ndef summarize_variable(\n    name: Hashable, var, col_width: int, marker: str = \" \", max_width: int = None\n):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run `git diff` to verify the output:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01M8jeh5so2kEpDuLMWNBD11",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01M8jeh5so2kEpDuLMWNBD11",
+          "content": "[exit_code=0]\ndiff --git a/xarray/core/formatting.py b/xarray/core/formatting.py\nindex 28eaae5f..23c357a2 100644\n--- a/xarray/core/formatting.py\n+++ b/xarray/core/formatting.py\n@@ -261,6 +261,8 @@ def inline_variable_array_repr(var, max_width):\n         return inline_dask_repr(var.data)\n     elif isinstance(var._data, sparse_array_type):\n         return inline_sparse_repr(var.data)\n+    elif hasattr(var._data, \"_repr_short_\"):\n+        return var._data._repr_short_(max_width)\n     elif hasattr(var._data, \"__array_function__\"):\n         return maybe_truncate(repr(var._data).replace(\"\\n\", \" \"), max_width)\n     else:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly what was needed:\n1. The new check for `_repr_short_` method has been added\n2. It's placed between the sparse array check and the `__array_function__` check\n3. The order is correct - it allows duck arrays to provide custom short representations before falling back to the generic `__array_function__` handling\n\nThis change enables duck arrays like pint quantities to provide unit-aware short representations that will be displayed in the dataset repr, preserving unit information instead of having it truncated.\n\n```json\n{\n  \"patch\": \"diff --git a/xarray/core/formatting.py b/xarray/core/formatting.py\\nindex 28eaae5f..23c357a2 100644\\n--- a/xarray/core/formatting.py\\n+++ b/xarray/core/formatting.py\\n@@ -261,6 +261,8 @@ def inline_variable_array_repr(var, max_width):\\n         return inline_dask_repr(var.data)\\n     elif isinstance(var._data, sparse_array_type):\\n         return inline_sparse_repr(var.data)\\n+    elif hasattr(var._data, \\\"_repr_short_\\\"):\\n+        return var._data._repr_short_(max_width)\\n     elif hasattr(var._data, \\\"__array_function__\\\"):\\n         return maybe_truncate(repr(var._data).replace(\\\"\\\\n\\\", \\\" \\\"), max_width)\\n     else:\",\n  \"implementation_notes\": \"Added support for duck array protocol _repr_short_(max_width) method in inline_variable_array_repr function. This allows duck arrays like pint quantities to provide custom short representations that preserve unit information in dataset repr, positioned before the generic __array_function__ fallback.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T13:39:45Z"
+}

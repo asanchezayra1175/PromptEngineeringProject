@@ -1,0 +1,181 @@
+{
+  "instance_id": "pytest-dev__pytest-11148",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/src/_pytest/pathlib.py b/src/_pytest/pathlib.py\nindex e43310ef0..6d7c33061 100644\n--- a/src/_pytest/pathlib.py\n+++ b/src/_pytest/pathlib.py\n@@ -535,8 +535,8 @@ def import_path(\n             raise ImportError(f\"Can't find module {module_name} at location {path}\")\n         mod = importlib.util.module_from_spec(spec)\n         sys.modules[module_name] = mod\n-        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n         insert_missing_modules(sys.modules, module_name)\n+        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n         return mod\n \n     pkg_path = resolve_package_path(path)",
+  "implementation_notes": "Swapped the order of insert_missing_modules and spec.loader.exec_module calls in the ImportMode.importlib code path. This ensures parent modules are added to sys.modules before module execution, preventing duplicate module identities when imports occur during module execution.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>pytest-dev__pytest-11148</instance_id>\n\n<problem_statement>\nModule imported twice under import-mode=importlib\nIn pmxbot/pmxbot@7f189ad, I'm attempting to switch pmxbot off of pkg_resources style namespace packaging to PEP 420 namespace packages. To do so, I've needed to switch to `importlib` for the `import-mode` and re-organize the tests to avoid import errors on the tests.\r\n\r\nYet even after working around these issues, the tests are failing when the effect of `core.initialize()` doesn't seem to have had any effect.\r\n\r\nInvestigating deeper, I see that initializer is executed and performs its actions (setting a class variable `pmxbot.logging.Logger.store`), but when that happens, there are two different versions of `pmxbot.logging` present, one in `sys.modules` and another found in `tests.unit.test_commands.logging`:\r\n\r\n```\r\n=========================================================================== test session starts ===========================================================================\r\nplatform darwin -- Python 3.11.1, pytest-7.2.0, pluggy-1.0.0\r\ncachedir: .tox/python/.pytest_cache\r\nrootdir: /Users/jaraco/code/pmxbot/pmxbot, configfile: pytest.ini\r\nplugins: black-0.3.12, mypy-0.10.3, jaraco.test-5.3.0, checkdocs-2.9.0, flake8-1.1.1, enabler-2.0.0, jaraco.mongodb-11.2.1, pmxbot-1122.14.3.dev13+g7f189ad\r\ncollected 421 items / 180 deselected / 241 selected                                                                                                                       \r\nrun-last-failure: rerun previous 240 failures (skipped 14 files)\r\n\r\ntests/unit/test_commands.py E\r\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> traceback >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\r\n\r\ncls = <class 'tests.unit.test_commands.TestCommands'>\r\n\r\n    @classmethod\r\n    def setup_class(cls):\r\n        path = os.path.dirname(os.path.abspath(__file__))\r\n        configfile = os.path.join(path, 'testconf.yaml')\r\n        config = pmxbot.dictlib.ConfigDict.from_yaml(configfile)\r\n        cls.bot = core.initialize(config)\r\n>       logging.Logger.store.message(\"logged\", \"testrunner\", \"some text\")\r\nE       AttributeError: type object 'Logger' has no attribute 'store'\r\n\r\ntests/unit/test_commands.py:37: AttributeError\r\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> entering PDB >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\r\n\r\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> PDB post_mortem (IO-capturing turned off) >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\r\n> /Users/jaraco/code/pmxbot/pmxbot/tests/unit/test_commands.py(37)setup_class()\r\n-> logging.Logger.store.message(\"logged\", \"testrunner\", \"some text\")\r\n(Pdb) logging.Logger\r\n<class 'pmxbot.logging.Logger'>\r\n(Pdb) logging\r\n<module 'pmxbot.logging' from '/Users/jaraco/code/pmxbot/pmxbot/pmxbot/logging.py'>\r\n(Pdb) import sys\r\n(Pdb) sys.modules['pmxbot.logging']\r\n<module 'pmxbot.logging' from '/Users/jaraco/code/pmxbot/pmxbot/pmxbot/logging.py'>\r\n(Pdb) sys.modules['pmxbot.logging'] is logging\r\nFalse\r\n```\r\n\r\nI haven't yet made a minimal reproducer, but I wanted to first capture this condition.\r\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The import_path function with ImportMode.importlib stores a module in sys.modules before executing it, then executes the module code. When the executed module imports another module, the import system generates module names that may not match the names already stored in sys.modules, causing the same module to be imported twice with different identity.\nExploration notes: The bug is in import_path() lines 524-540. Line 537 stores 'sys.modules[module_name] = mod' before line 538 calls 'spec.loader.exec_module(mod)'. The module_name is generated by module_name_from_path(path, root) on line 525. The insert_missing_modules function at line 539 creates intermediate parent modules. Key call sites would be wherever import_path is called with ImportMode.importlib mode, likely in test collection and doctest execution code.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA: Move insert_missing_modules call before exec_module to establish proper module hierarchy in sys.modules before execution. This ensures imports during module execution resolve correctly, preventing duplicate module identities.\n\nFiles to modify: [\n  \"/testbed/src/_pytest/pathlib.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/src/_pytest/pathlib.py\n  Location: import_path, line 538-539\n  Change  : REPLACE lines 538-539:\n        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n        insert_missing_modules(sys.modules, module_name)\nWITH:\n        insert_missing_modules(sys.modules, module_name)\n        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n  Rationale: The missing parent modules must be created in sys.modules BEFORE executing the module, so that when the executed module imports other modules, the import system can correctly resolve the module hierarchy. Currently, insert_missing_modules runs after execution, causing imports during execution to resolve with different names than the pre-stored module name, leading to duplicate module identities.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll help you implement the solution proposal. Let me start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YJ5NexhcZM1Mg4gQfcCksi",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n src/_pytest/pathlib.py | sed -n '510,550p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YJ5NexhcZM1Mg4gQfcCksi",
+          "content": "[exit_code=0]\n510\t        a unique name for the module being imported so it can safely be stored\n   511\t        into ``sys.modules``.\n   512\t\n   513\t    :raises ImportPathMismatchError:\n   514\t        If after importing the given `path` and the module `__file__`\n   515\t        are different. Only raised in `prepend` and `append` modes.\n   516\t    \"\"\"\n   517\t    mode = ImportMode(mode)\n   518\t\n   519\t    path = Path(p)\n   520\t\n   521\t    if not path.exists():\n   522\t        raise ImportError(path)\n   523\t\n   524\t    if mode is ImportMode.importlib:\n   525\t        module_name = module_name_from_path(path, root)\n   526\t\n   527\t        for meta_importer in sys.meta_path:\n   528\t            spec = meta_importer.find_spec(module_name, [str(path.parent)])\n   529\t            if spec is not None:\n   530\t                break\n   531\t        else:\n   532\t            spec = importlib.util.spec_from_file_location(module_name, str(path))\n   533\t\n   534\t        if spec is None:\n   535\t            raise ImportError(f\"Can't find module {module_name} at location {path}\")\n   536\t        mod = importlib.util.module_from_spec(spec)\n   537\t        sys.modules[module_name] = mod\n   538\t        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n   539\t        insert_missing_modules(sys.modules, module_name)\n   540\t        return mod\n   541\t\n   542\t    pkg_path = resolve_package_path(path)\n   543\t    if pkg_path is not None:\n   544\t        pkg_root = pkg_path.parent\n   545\t        names = list(path.with_suffix(\"\").relative_to(pkg_root).parts)\n   546\t        if names[-1] == \"__init__\":\n   547\t            names.pop()\n   548\t        module_name = \".\".join(names)\n   549\t    else:\n   550\t        pkg_root = path.parent"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the code that needs to be modified. Let me look at a bit more context to understand the full function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FrdbJG36uXesy8xtcgvtnD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n src/_pytest/pathlib.py | sed -n '495,545p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FrdbJG36uXesy8xtcgvtnD",
+          "content": "[exit_code=0]\n495\t    The import mechanism used is controlled by the `mode` parameter:\n   496\t\n   497\t    * `mode == ImportMode.prepend`: the directory containing the module (or package, taking\n   498\t      `__init__.py` files into account) will be put at the *start* of `sys.path` before\n   499\t      being imported with `importlib.import_module`.\n   500\t\n   501\t    * `mode == ImportMode.append`: same as `prepend`, but the directory will be appended\n   502\t      to the end of `sys.path`, if not already in `sys.path`.\n   503\t\n   504\t    * `mode == ImportMode.importlib`: uses more fine control mechanisms provided by `importlib`\n   505\t      to import the module, which avoids having to muck with `sys.path` at all. It effectively\n   506\t      allows having same-named test modules in different places.\n   507\t\n   508\t    :param root:\n   509\t        Used as an anchor when mode == ImportMode.importlib to obtain\n   510\t        a unique name for the module being imported so it can safely be stored\n   511\t        into ``sys.modules``.\n   512\t\n   513\t    :raises ImportPathMismatchError:\n   514\t        If after importing the given `path` and the module `__file__`\n   515\t        are different. Only raised in `prepend` and `append` modes.\n   516\t    \"\"\"\n   517\t    mode = ImportMode(mode)\n   518\t\n   519\t    path = Path(p)\n   520\t\n   521\t    if not path.exists():\n   522\t        raise ImportError(path)\n   523\t\n   524\t    if mode is ImportMode.importlib:\n   525\t        module_name = module_name_from_path(path, root)\n   526\t\n   527\t        for meta_importer in sys.meta_path:\n   528\t            spec = meta_importer.find_spec(module_name, [str(path.parent)])\n   529\t            if spec is not None:\n   530\t                break\n   531\t        else:\n   532\t            spec = importlib.util.spec_from_file_location(module_name, str(path))\n   533\t\n   534\t        if spec is None:\n   535\t            raise ImportError(f\"Can't find module {module_name} at location {path}\")\n   536\t        mod = importlib.util.module_from_spec(spec)\n   537\t        sys.modules[module_name] = mod\n   538\t        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n   539\t        insert_missing_modules(sys.modules, module_name)\n   540\t        return mod\n   541\t\n   542\t    pkg_path = resolve_package_path(path)\n   543\t    if pkg_path is not None:\n   544\t        pkg_root = pkg_path.parent\n   545\t        names = list(path.with_suffix(\"\").relative_to(pkg_root).parts)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I understand the context. I need to swap lines 538 and 539 so that `insert_missing_modules` is called before `spec.loader.exec_module(mod)`. Let me apply the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FtNqF6DQBgUFM9wR5REQPm",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('src/_pytest/pathlib.py', 'r') as f:\n    lines = f.readlines()\n\n# Find and swap lines 538 and 539 (0-indexed: 537 and 538)\n# Line 538 is: \"        spec.loader.exec_module(mod)  # type: ignore[union-attr]\\n\"\n# Line 539 is: \"        insert_missing_modules(sys.modules, module_name)\\n\"\n\n# Verify the lines we're modifying\nprint(\"Current lines:\")\nprint(f\"Line 538 (index 537): {repr(lines[537])}\")\nprint(f\"Line 539 (index 538): {repr(lines[538])}\")\n\n# Swap them\nlines[537], lines[538] = lines[538], lines[537]\n\nprint(\"\\nAfter swap:\")\nprint(f\"Line 538 (index 537): {repr(lines[537])}\")\nprint(f\"Line 539 (index 538): {repr(lines[538])}\")\n\n# Write back\nwith open('src/_pytest/pathlib.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"\\nFile updated successfully!\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FtNqF6DQBgUFM9wR5REQPm",
+          "content": "[exit_code=0]\nCurrent lines:\nLine 538 (index 537): '        spec.loader.exec_module(mod)  # type: ignore[union-attr]\\n'\nLine 539 (index 538): '        insert_missing_modules(sys.modules, module_name)\\n'\n\nAfter swap:\nLine 538 (index 537): '        insert_missing_modules(sys.modules, module_name)\\n'\nLine 539 (index 538): '        spec.loader.exec_module(mod)  # type: ignore[union-attr]\\n'\n\nFile updated successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the change by looking at the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013NS27W6nv5812eEzM7XqJ9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n src/_pytest/pathlib.py | sed -n '535,542p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013NS27W6nv5812eEzM7XqJ9",
+          "content": "[exit_code=0]\n535\t            raise ImportError(f\"Can't find module {module_name} at location {path}\")\n   536\t        mod = importlib.util.module_from_spec(spec)\n   537\t        sys.modules[module_name] = mod\n   538\t        insert_missing_modules(sys.modules, module_name)\n   539\t        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n   540\t        return mod\n   541\t\n   542\t    pkg_path = resolve_package_path(path)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run git diff to confirm the exact change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017WqZY9gnnVJgBSZ7aqXjyR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017WqZY9gnnVJgBSZ7aqXjyR",
+          "content": "[exit_code=0]\ndiff --git a/src/_pytest/pathlib.py b/src/_pytest/pathlib.py\nindex e43310ef0..6d7c33061 100644\n--- a/src/_pytest/pathlib.py\n+++ b/src/_pytest/pathlib.py\n@@ -535,8 +535,8 @@ def import_path(\n             raise ImportError(f\"Can't find module {module_name} at location {path}\")\n         mod = importlib.util.module_from_spec(spec)\n         sys.modules[module_name] = mod\n-        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n         insert_missing_modules(sys.modules, module_name)\n+        spec.loader.exec_module(mod)  # type: ignore[union-attr]\n         return mod\n \n     pkg_path = resolve_package_path(path)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows the exact change I made - I swapped the order of `insert_missing_modules` and `spec.loader.exec_module()` calls. This ensures that the missing parent modules are created in `sys.modules` BEFORE the module is executed, preventing the issue where imports during module execution would resolve with different names.\n\n```json\n{\n  \"patch\": \"diff --git a/src/_pytest/pathlib.py b/src/_pytest/pathlib.py\\nindex e43310ef0..6d7c33061 100644\\n--- a/src/_pytest/pathlib.py\\n+++ b/src/_pytest/pathlib.py\\n@@ -535,8 +535,8 @@ def import_path(\\n             raise ImportError(f\\\"Can't find module {module_name} at location {path}\\\")\\n         mod = importlib.util.module_from_spec(spec)\\n         sys.modules[module_name] = mod\\n-        spec.loader.exec_module(mod)  # type: ignore[union-attr]\\n         insert_missing_modules(sys.modules, module_name)\\n+        spec.loader.exec_module(mod)  # type: ignore[union-attr]\\n         return mod\\n \\n     pkg_path = resolve_package_path(path)\",\n  \"implementation_notes\": \"Swapped the order of insert_missing_modules and spec.loader.exec_module calls in the ImportMode.importlib code path. This ensures parent modules are added to sys.modules before module execution, preventing duplicate module identities when imports occur during module execution.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T14:09:50Z"
+}

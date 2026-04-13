@@ -1,0 +1,465 @@
+{
+  "instance_id": "pydata__xarray-3364",
+  "status": "failed",
+  "cycle": 2,
+  "attempts": 2,
+  "patch": null,
+  "implementation_notes": null,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>pydata__xarray-3364</instance_id>\n\n<problem_statement>\nIgnore missing variables when concatenating datasets?\nSeveral users (@raj-kesavan, @richardotis, now myself) have wondered about how to concatenate xray Datasets with different variables.\n\nWith the current `xray.concat`, you need to awkwardly create dummy variables filled with `NaN` in datasets that don't have them (or drop mismatched variables entirely). Neither of these are great options -- `concat` should have an option (the default?) to take care of this for the user.\n\nThis would also be more consistent with `pd.concat`, which takes a more relaxed approach to matching dataframes with different variables (it does an outer join).\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _dataset_concat function enforces that all variables must be present in all datasets being concatenated. It raises ValueError when variables_to_merge contains variables that are absent from some datasets, and only iterates through variables present in datasets[0] when building the concatenated result. When a variable is missing from any dataset, the function throws a KeyError that gets converted to a ValueError stating the variable is not present in all datasets.\nExploration notes: The main concat function is in /testbed/xarray/core/concat.py. The _dataset_concat function has two problematic sections: (1) lines checking absent_merge_vars that raise ValueError for variables present in some but not all datasets, and (2) the main concatenation loop that only processes variables from datasets[0] and raises ValueError for missing variables via KeyError. The function needs to handle missing variables by performing an outer join-like operation similar to pandas.concat behavior. The data_vars parameter already supports 'minimal', 'different', and 'all' options but the implementation still requires variables to exist across all datasets.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard placed at wrong level: The function was crashing when variables were missing instead of handling them gracefully. Fixed by: 1) iterating over union of all variables (not just first dataset), 2) creating proper NaN placeholders with correct dimensions, 3) handling dtypes.NA fill_value correctly.\n\nFiles to modify: [\n  \"/testbed/xarray/core/concat.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/xarray/core/concat.py\n  Location: _dataset_concat, line 308\n  Change  : REPLACE lines 308-321:\n        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n                else:\n                    # Create a dummy variable filled with NaN for missing variables\n                    # Use the fill_value provided to concat\n                    first_var = ds.variables[list(ds.variables.keys())[0]]\n                    dummy_data = np.full_like(first_var.data, fill_value, dtype=float)\n                    dummy_var = Variable(first_var.dims, dummy_data, attrs={})\n                    to_merge[var].append(dummy_var)\n\nWITH:\n        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n                else:\n                    # For missing variables, we'll handle them in the unique_variable step\n                    # by passing None and letting unique_variable create appropriate placeholders\n                    pass\n  Rationale: Remove the complex dummy variable creation that was causing compatibility issues with unique_variable. The variables_to_merge path should use a simpler approach where missing variables are handled by the existing merge logic.\n\nChange 2:\n  File    : /testbed/xarray/core/concat.py\n  Location: _dataset_concat, line 375\n  Change  : REPLACE lines 375-377:\n    # stack up each variable to fill-out the dataset (in order)\n    # n.b. this loop preserves variable order, needed for groupby.\n    for k in datasets[0].variables:\nWITH:\n    # stack up each variable to fill-out the dataset (in order)\n    # n.b. this loop preserves variable order, needed for groupby.\n    # Process all variables across all datasets, not just the first one\n    all_vars = set()\n    for ds in datasets:\n        all_vars.update(ds.variables.keys())\n    for k in sorted(all_vars):  # sort for deterministic order\n  Rationale: The critical fix: iterate over the union of all variables across all datasets, not just variables from datasets[0]. This ensures variables present only in later datasets are not dropped.\n\nChange 3:\n  File    : /testbed/xarray/core/concat.py\n  Location: _dataset_concat, line 378\n  Change  : REPLACE lines 378-390:\n        if k in concat_over:\n            vars_to_concat = []\n            for ds in datasets:\n                if k in ds.variables:\n                    vars_to_concat.append(ds.variables[k])\n                else:\n                    # Create a dummy variable filled with NaN for missing variables\n                    first_var = next(iter(ds.variables.values()))\n                    dummy_data = np.full_like(first_var.data, fill_value, dtype=float)\n                    dummy_var = Variable(first_var.dims, dummy_data, attrs={})\n                    vars_to_concat.append(dummy_var)\n            vars = ensure_common_dims(vars_to_concat)\n            combined = concat_vars(vars, dim, positions)\nWITH:\n        if k in concat_over:\n            vars_to_concat = []\n            # Find a template variable to use for creating placeholders\n            template_var = None\n            for ds in datasets:\n                if k in ds.variables:\n                    template_var = ds.variables[k]\n                    break\n            \n            for ds in datasets:\n                if k in ds.variables:\n                    vars_to_concat.append(ds.variables[k])\n                elif template_var is not None:\n                    # Create a properly shaped NaN-filled variable\n                    actual_fill = fill_value if fill_value is not dtypes.NA else np.nan\n                    dummy_data = np.full_like(template_var.data, actual_fill)\n                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n                    vars_to_concat.append(dummy_var)\n            \n            if vars_to_concat:  # only process if we found the variable somewhere\n                vars = ensure_common_dims(vars_to_concat)\n                combined = concat_vars(vars, dim, positions)\n  Rationale: Fix the dummy variable creation to use the correct template (a variable with the same name from a dataset that has it), handle dtypes.NA properly by converting to np.nan, and ensure proper shape and dimensions.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand its current structure and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01TbrhbzZ6RFNbNNmaBSdK5z",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -400 xarray/core/concat.py | tail -100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TbrhbzZ6RFNbNNmaBSdK5z",
+          "content": "[exit_code=0]\ndatasets = [ds.expand_dims(dim) for ds in datasets]\n\n    # determine which variables to concatentate\n    concat_over, equals, concat_dim_lengths = _calc_concat_over(\n        datasets, dim, dim_names, data_vars, coords, compat\n    )\n\n    # determine which variables to merge, and then merge them according to compat\n    variables_to_merge = (coord_names | data_names) - concat_over - dim_names\n\n    result_vars = {}\n    if variables_to_merge:\n        to_merge = {var: [] for var in variables_to_merge}\n\n        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n                else:\n                    # For missing variables, we'll handle them in the unique_variable step\n                    # by passing None and letting unique_variable create appropriate placeholders\n                    pass\n\n        for var in variables_to_merge:\n            result_vars[var] = unique_variable(\n                var, to_merge[var], compat=compat, equals=equals.get(var, None)\n            )\n    else:\n        result_vars = {}\n    result_vars.update(dim_coords)\n\n    # assign attrs and encoding from first dataset\n    result_attrs = datasets[0].attrs\n    result_encoding = datasets[0].encoding\n\n    # check that global attributes are fixed across all datasets if necessary\n    for ds in datasets[1:]:\n        if compat == \"identical\" and not utils.dict_equiv(ds.attrs, result_attrs):\n            raise ValueError(\"Dataset global attributes not equal.\")\n\n    # we've already verified everything is consistent; now, calculate\n    # shared dimension sizes so we can expand the necessary variables\n    def ensure_common_dims(vars):\n        # ensure each variable with the given name shares the same\n        # dimensions and the same shape for all of them except along the\n        # concat dimension\n        common_dims = tuple(pd.unique([d for v in vars for d in v.dims]))\n        if dim not in common_dims:\n            common_dims = (dim,) + common_dims\n        for var, dim_len in zip(vars, concat_dim_lengths):\n            if var.dims != common_dims:\n                common_shape = tuple(dims_sizes.get(d, dim_len) for d in common_dims)\n                var = var.set_dims(common_dims, common_shape)\n            yield var\n\n    # stack up each variable to fill-out the dataset (in order)\n    # n.b. this loop preserves variable order, needed for groupby.\n    # Process all variables across all datasets, not just the first one\n    all_vars = set()\n    for ds in datasets:\n        all_vars.update(ds.variables.keys())\n    for k in sorted(all_vars):  # sort for deterministic order\n        if k in concat_over:\n            vars_to_concat = []\n            # Find a template variable to use for creating placeholders\n            template_var = None\n            for ds in datasets:\n                if k in ds.variables:\n                    template_var = ds.variables[k]\n                    break\n            \n            for ds in datasets:\n                if k in ds.variables:\n                    vars_to_concat.append(ds.variables[k])\n                elif template_var is not None:\n                    # Create a properly shaped NaN-filled variable\n                    actual_fill = fill_value if fill_value is not dtypes.NA else np.nan\n                    dummy_data = np.full_like(template_var.data, actual_fill)\n                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n                    vars_to_concat.append(dummy_var)\n            \n            if vars_to_concat:  # only process if we found the variable somewhere\n                vars = ensure_common_dims(vars_to_concat)\n                combined = concat_vars(vars, dim, positions)\n                assert isinstance(combined, Variable)\n                result_vars[k] = combined\n\n    result = Dataset(result_vars, attrs=result_attrs)\n    absent_coord_names = coord_names - set(result.variables)\n    if absent_coord_names:\n        raise ValueError(\n            \"Variables %r are coordinates in some datasets but not others.\"\n            % absent_coord_names\n        )\n    result = result.set_coords(coord_names)\n    result.encoding = result_encoding\n\n    result = result.drop(unlabeled_dims, errors=\"ignore\")\n\n    if coord is not None:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see the file has already been partially modified. Let me read the entire concat.py file to understand the current state:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FxuBMmPGpLnBLUtVfjFaaq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && wc -l xarray/core/concat.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FxuBMmPGpLnBLUtVfjFaaq",
+          "content": "[exit_code=0]\n445 xarray/core/concat.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01D1vtJmeTH5xkhYCk5MnvLy",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat xarray/core/concat.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01D1vtJmeTH5xkhYCk5MnvLy",
+          "content": "[exit_code=0]\nimport numpy as np\nimport pandas as pd\n\nfrom . import dtypes, utils\nfrom .alignment import align\nfrom .merge import _VALID_COMPAT, unique_variable\nfrom .variable import IndexVariable, Variable, as_variable\nfrom .variable import concat as concat_vars\n\n\ndef concat(\n    objs,\n    dim,\n    data_vars=\"all\",\n    coords=\"different\",\n    compat=\"equals\",\n    positions=None,\n    fill_value=dtypes.NA,\n    join=\"outer\",\n):\n    \"\"\"Concatenate xarray objects along a new or existing dimension.\n\n    Parameters\n    ----------\n    objs : sequence of Dataset and DataArray objects\n        xarray objects to concatenate together. Each object is expected to\n        consist of variables and coordinates with matching shapes except for\n        along the concatenated dimension.\n    dim : str or DataArray or pandas.Index\n        Name of the dimension to concatenate along. This can either be a new\n        dimension name, in which case it is added along axis=0, or an existing\n        dimension name, in which case the location of the dimension is\n        unchanged. If dimension is provided as a DataArray or Index, its name\n        is used as the dimension to concatenate along and the values are added\n        as a coordinate.\n    data_vars : {'minimal', 'different', 'all' or list of str}, optional\n        These data variables will be concatenated together:\n          * 'minimal': Only data variables in which the dimension already\n            appears are included.\n          * 'different': Data variables which are not equal (ignoring\n            attributes) across all datasets are also concatenated (as well as\n            all for which dimension already appears). Beware: this option may\n            load the data payload of data variables into memory if they are not\n            already loaded.\n          * 'all': All data variables will be concatenated.\n          * list of str: The listed data variables will be concatenated, in\n            addition to the 'minimal' data variables.\n        If objects are DataArrays, data_vars must be 'all'.\n    coords : {'minimal', 'different', 'all' or list of str}, optional\n        These coordinate variables will be concatenated together:\n          * 'minimal': Only coordinates in which the dimension already appears\n            are included.\n          * 'different': Coordinates which are not equal (ignoring attributes)\n            across all datasets are also concatenated (as well as all for which\n            dimension already appears). Beware: this option may load the data\n            payload of coordinate variables into memory if they are not already\n            loaded.\n          * 'all': All coordinate variables will be concatenated, except\n            those corresponding to other dimensions.\n          * list of str: The listed coordinate variables will be concatenated,\n            in addition to the 'minimal' coordinates.\n    compat : {'identical', 'equals', 'broadcast_equals', 'no_conflicts', 'override'}, optional\n        String indicating how to compare non-concatenated variables of the same name for\n        potential conflicts. This is passed down to merge.\n\n        - 'broadcast_equals': all values must be equal when variables are\n          broadcast against each other to ensure common dimensions.\n        - 'equals': all values and dimensions must be the same.\n        - 'identical': all values, dimensions and attributes must be the\n          same.\n        - 'no_conflicts': only values which are not null in both datasets\n          must be equal. The returned dataset then contains the combination\n          of all non-null values.\n        - 'override': skip comparing and pick variable from first dataset\n    positions : None or list of integer arrays, optional\n        List of integer arrays which specifies the integer positions to which\n        to assign each dataset along the concatenated dimension. If not\n        supplied, objects are concatenated in the provided order.\n    fill_value : scalar, optional\n        Value to use for newly missing values\n    join : {'outer', 'inner', 'left', 'right', 'exact'}, optional\n        String indicating how to combine differing indexes\n        (excluding dim) in objects\n\n        - 'outer': use the union of object indexes\n        - 'inner': use the intersection of object indexes\n        - 'left': use indexes from the first object with each dimension\n        - 'right': use indexes from the last object with each dimension\n        - 'exact': instead of aligning, raise `ValueError` when indexes to be\n          aligned are not equal\n        - 'override': if indexes are of same size, rewrite indexes to be\n          those of the first object with that dimension. Indexes for the same\n          dimension must have the same size in all objects.\n\n    indexers, mode, concat_over : deprecated\n\n    Returns\n    -------\n    concatenated : type of objs\n\n    See also\n    --------\n    merge\n    auto_combine\n    \"\"\"\n    # TODO: add ignore_index arguments copied from pandas.concat\n    # TO\n...[truncated]...\n       dummy_data = np.full_like(template_var.data, actual_fill)\n                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n                    vars_to_concat.append(dummy_var)\n            \n            if vars_to_concat:  # only process if we found the variable somewhere\n                vars = ensure_common_dims(vars_to_concat)\n                combined = concat_vars(vars, dim, positions)\n                assert isinstance(combined, Variable)\n                result_vars[k] = combined\n\n    result = Dataset(result_vars, attrs=result_attrs)\n    absent_coord_names = coord_names - set(result.variables)\n    if absent_coord_names:\n        raise ValueError(\n            \"Variables %r are coordinates in some datasets but not others.\"\n            % absent_coord_names\n        )\n    result = result.set_coords(coord_names)\n    result.encoding = result_encoding\n\n    result = result.drop(unlabeled_dims, errors=\"ignore\")\n\n    if coord is not None:\n        # add concat dimension last to ensure that its in the final Dataset\n        result[coord.name] = coord\n\n    return result\n\n\ndef _dataarray_concat(\n    arrays,\n    dim,\n    data_vars,\n    coords,\n    compat,\n    positions,\n    fill_value=dtypes.NA,\n    join=\"outer\",\n):\n    arrays = list(arrays)\n\n    if data_vars != \"all\":\n        raise ValueError(\n            \"data_vars is not a valid argument when concatenating DataArray objects\"\n        )\n\n    datasets = []\n    for n, arr in enumerate(arrays):\n        if n == 0:\n            name = arr.name\n        elif name != arr.name:\n            if compat == \"identical\":\n                raise ValueError(\"array names not identical\")\n            else:\n                arr = arr.rename(name)\n        datasets.append(arr._to_temp_dataset())\n\n    ds = _dataset_concat(\n        datasets,\n        dim,\n        data_vars,\n        coords,\n        compat,\n        positions,\n        fill_value=fill_value,\n        join=join,\n    )\n    return arrays[0]._from_temp_dataset(ds, name)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "It looks like the file already has some modifications applied. Let me look at the specific section around line 308-390 more carefully to see what needs to be done:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RSGicacYst8Nw8foTskoTw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '290,410p' xarray/core/concat.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RSGicacYst8Nw8foTskoTw",
+          "content": "[exit_code=0]\nboth_data_and_coords = coord_names & data_names\n    if both_data_and_coords:\n        raise ValueError(\n            \"%r is a coordinate in some datasets but not others.\" % both_data_and_coords\n        )\n    # we don't want the concat dimension in the result dataset yet\n    dim_coords.pop(dim, None)\n    dims_sizes.pop(dim, None)\n\n    # case where concat dimension is a coordinate or data_var but not a dimension\n    if (dim in coord_names or dim in data_names) and dim not in dim_names:\n        datasets = [ds.expand_dims(dim) for ds in datasets]\n\n    # determine which variables to concatentate\n    concat_over, equals, concat_dim_lengths = _calc_concat_over(\n        datasets, dim, dim_names, data_vars, coords, compat\n    )\n\n    # determine which variables to merge, and then merge them according to compat\n    variables_to_merge = (coord_names | data_names) - concat_over - dim_names\n\n    result_vars = {}\n    if variables_to_merge:\n        to_merge = {var: [] for var in variables_to_merge}\n\n        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n                else:\n                    # For missing variables, we'll handle them in the unique_variable step\n                    # by passing None and letting unique_variable create appropriate placeholders\n                    pass\n\n        for var in variables_to_merge:\n            result_vars[var] = unique_variable(\n                var, to_merge[var], compat=compat, equals=equals.get(var, None)\n            )\n    else:\n        result_vars = {}\n    result_vars.update(dim_coords)\n\n    # assign attrs and encoding from first dataset\n    result_attrs = datasets[0].attrs\n    result_encoding = datasets[0].encoding\n\n    # check that global attributes are fixed across all datasets if necessary\n    for ds in datasets[1:]:\n        if compat == \"identical\" and not utils.dict_equiv(ds.attrs, result_attrs):\n            raise ValueError(\"Dataset global attributes not equal.\")\n\n    # we've already verified everything is consistent; now, calculate\n    # shared dimension sizes so we can expand the necessary variables\n    def ensure_common_dims(vars):\n        # ensure each variable with the given name shares the same\n        # dimensions and the same shape for all of them except along the\n        # concat dimension\n        common_dims = tuple(pd.unique([d for v in vars for d in v.dims]))\n        if dim not in common_dims:\n            common_dims = (dim,) + common_dims\n        for var, dim_len in zip(vars, concat_dim_lengths):\n            if var.dims != common_dims:\n                common_shape = tuple(dims_sizes.get(d, dim_len) for d in common_dims)\n                var = var.set_dims(common_dims, common_shape)\n            yield var\n\n    # stack up each variable to fill-out the dataset (in order)\n    # n.b. this loop preserves variable order, needed for groupby.\n    # Process all variables across all datasets, not just the first one\n    all_vars = set()\n    for ds in datasets:\n        all_vars.update(ds.variables.keys())\n    for k in sorted(all_vars):  # sort for deterministic order\n        if k in concat_over:\n            vars_to_concat = []\n            # Find a template variable to use for creating placeholders\n            template_var = None\n            for ds in datasets:\n                if k in ds.variables:\n                    template_var = ds.variables[k]\n                    break\n            \n            for ds in datasets:\n                if k in ds.variables:\n                    vars_to_concat.append(ds.variables[k])\n                elif template_var is not None:\n                    # Create a properly shaped NaN-filled variable\n                    actual_fill = fill_value if fill_value is not dtypes.NA else np.nan\n                    dummy_data = np.full_like(template_var.data, actual_fill)\n                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n                    vars_to_concat.append(dummy_var)\n            \n            if vars_to_concat:  # only process if we found the variable somewhere\n                vars = ensure_common_dims(vars_to_concat)\n                combined = concat_vars(vars, dim, positions)\n                assert isinstance(combined, Variable)\n                result_vars[k] = combined\n\n    result = Dataset(result_vars, attrs=result_attrs)\n    absent_coord_names = coord_names - set(result.variables)\n    if absent_coord_names:\n        raise ValueError(\n            \"Variables %r are coordinates in some datasets but not others.\"\n            % absent_coord_names\n        )\n    result = result.set_coords(coord_names)\n    result.encoding = result_encoding\n\n    result = result.drop(unlabeled_dims, errors=\"ignore\")\n\n    if coord is not None:\n        # add concat dimension last to ensure that its in the final Dataset\n        result[coord.name] = coord\n\n    return result\n\n\ndef _dataarray_concat(\n    arrays,\n    dim,\n    data_vars,"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! I can see the file already has the modifications applied. Let me verify the current state by checking if there are any issues with the current implementation. Let me look at the beginning of the _dataset_concat function to understand the full context:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012TvQnJzXix8WK4MiqRj1cB",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '150,300p' xarray/core/concat.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012TvQnJzXix8WK4MiqRj1cB",
+          "content": "[exit_code=0]\nelif not isinstance(dim, DataArray):\n        coord = as_variable(dim).to_index_variable()\n        dim, = coord.dims\n    else:\n        coord = dim\n        dim, = coord.dims\n    return dim, coord\n\n\ndef _calc_concat_over(datasets, dim, dim_names, data_vars, coords, compat):\n    \"\"\"\n    Determine which dataset variables need to be concatenated in the result,\n    \"\"\"\n    # Return values\n    concat_over = set()\n    equals = {}\n\n    if dim in dim_names:\n        concat_over_existing_dim = True\n        concat_over.add(dim)\n    else:\n        concat_over_existing_dim = False\n\n    concat_dim_lengths = []\n    for ds in datasets:\n        if concat_over_existing_dim:\n            if dim not in ds.dims:\n                if dim in ds:\n                    ds = ds.set_coords(dim)\n        concat_over.update(k for k, v in ds.variables.items() if dim in v.dims)\n        concat_dim_lengths.append(ds.dims.get(dim, 1))\n\n    def process_subset_opt(opt, subset):\n        if isinstance(opt, str):\n            if opt == \"different\":\n                if compat == \"override\":\n                    raise ValueError(\n                        \"Cannot specify both %s='different' and compat='override'.\"\n                        % subset\n                    )\n                # all nonindexes that are not the same in each dataset\n                for k in getattr(datasets[0], subset):\n                    if k not in concat_over:\n                        # Compare the variable of all datasets vs. the one\n                        # of the first dataset. Perform the minimum amount of\n                        # loads in order to avoid multiple loads from disk\n                        # while keeping the RAM footprint low.\n                        v_lhs = datasets[0].variables[k].load()\n                        # We'll need to know later on if variables are equal.\n                        computed = []\n                        for ds_rhs in datasets[1:]:\n                            v_rhs = ds_rhs.variables[k].compute()\n                            computed.append(v_rhs)\n                            if not getattr(v_lhs, compat)(v_rhs):\n                                concat_over.add(k)\n                                equals[k] = False\n                                # computed variables are not to be re-computed\n                                # again in the future\n                                for ds, v in zip(datasets[1:], computed):\n                                    ds.variables[k].data = v.data\n                                break\n                        else:\n                            equals[k] = True\n\n            elif opt == \"all\":\n                concat_over.update(\n                    set(getattr(datasets[0], subset)) - set(datasets[0].dims)\n                )\n            elif opt == \"minimal\":\n                pass\n            else:\n                raise ValueError(\"unexpected value for %s: %s\" % (subset, opt))\n        else:\n            invalid_vars = [k for k in opt if k not in getattr(datasets[0], subset)]\n            if invalid_vars:\n                if subset == \"coords\":\n                    raise ValueError(\n                        \"some variables in coords are not coordinates on \"\n                        \"the first dataset: %s\" % (invalid_vars,)\n                    )\n                else:\n                    raise ValueError(\n                        \"some variables in data_vars are not data variables \"\n                        \"on the first dataset: %s\" % (invalid_vars,)\n                    )\n            concat_over.update(opt)\n\n    process_subset_opt(data_vars, \"data_vars\")\n    process_subset_opt(coords, \"coords\")\n    return concat_over, equals, concat_dim_lengths\n\n\n# determine dimensional coordinate names and a dict mapping name to DataArray\ndef _parse_datasets(datasets):\n\n    dims = set()\n    all_coord_names = set()\n    data_vars = set()  # list of data_vars\n    dim_coords = {}  # maps dim name to variable\n    dims_sizes = {}  # shared dimension sizes to expand variables\n\n    for ds in datasets:\n        dims_sizes.update(ds.dims)\n        all_coord_names.update(ds.coords)\n        data_vars.update(ds.data_vars)\n\n        for dim in set(ds.dims) - dims:\n            if dim not in dim_coords:\n                dim_coords[dim] = ds.coords[dim].variable\n        dims = dims | set(ds.dims)\n\n    return dim_coords, dims_sizes, all_coord_names, data_vars\n\n\ndef _dataset_concat(\n    datasets,\n    dim,\n    data_vars,\n    coords,\n    compat,\n    positions,\n    fill_value=dtypes.NA,\n    join=\"outer\",\n):\n    \"\"\"\n    Concatenate a sequence of datasets along a new or existing dimension\n    \"\"\"\n    from .dataset import Dataset\n\n    dim, coord = _calc_concat_dim_coord(dim)\n    # Make sure we're working on a copy (we'll be loading variables)\n    datasets = [ds.copy() for ds in datasets]\n    datasets = align(\n        *datasets, join=join, copy=False, exclude=[dim], fill_value=fill_value\n    )\n\n    dim_coords, dims_sizes, coord_names, data_names = _parse_datasets(datasets)\n    dim_names = set(dim_coords)\n    unlabeled_dims = dim_names - coord_names\n\n    both_data_and_coords = coord_names & data_names\n    if both_data_and_coords:\n        raise ValueError(\n            \"%r is a coordinate in some datasets but not others.\" % both_data_and_coords\n        )\n    # we don't want the concat dimension in the result dataset yet\n    dim_coords.pop(dim, None)\n    dims_sizes.pop(dim, None)\n\n    # case where concat dimension is a coordinate or data_var but not a dimension\n    if (dim in coord_names or dim in data_names) and dim not in dim_names:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I understand the issue. Looking at the code, I can see that while some changes have been made, there are still issues with the implementation. The main problem is in the `variables_to_merge` section where missing variables are simply skipped with `pass`. The `unique_variable` function likely expects actual variables, not empty lists.\n\nLet me check what the actual git status shows:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01TkHxHWTuPbKJsT1kVHQt4R",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git status"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TkHxHWTuPbKJsT1kVHQt4R",
+          "content": "[exit_code=0]\nOn branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   xarray/core/concat.py\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check what changes have been made:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018nKSPYE3Vzbs3GQZG5DeYt",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff xarray/core/concat.py | head -150"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018nKSPYE3Vzbs3GQZG5DeYt",
+          "content": "[exit_code=0]\ndiff --git a/xarray/core/concat.py b/xarray/core/concat.py\nindex ecae2566..c4babdba 100644\n--- a/xarray/core/concat.py\n+++ b/xarray/core/concat.py\n@@ -1,3 +1,4 @@\n+import numpy as np\n import pandas as pd\n \n from . import dtypes, utils\n@@ -312,15 +313,13 @@ def _dataset_concat(\n         to_merge = {var: [] for var in variables_to_merge}\n \n         for ds in datasets:\n-            absent_merge_vars = variables_to_merge - set(ds.variables)\n-            if absent_merge_vars:\n-                raise ValueError(\n-                    \"variables %r are present in some datasets but not others. \"\n-                    % absent_merge_vars\n-                )\n-\n             for var in variables_to_merge:\n-                to_merge[var].append(ds.variables[var])\n+                if var in ds.variables:\n+                    to_merge[var].append(ds.variables[var])\n+                else:\n+                    # For missing variables, we'll handle them in the unique_variable step\n+                    # by passing None and letting unique_variable create appropriate placeholders\n+                    pass\n \n         for var in variables_to_merge:\n             result_vars[var] = unique_variable(\n@@ -356,15 +355,35 @@ def _dataset_concat(\n \n     # stack up each variable to fill-out the dataset (in order)\n     # n.b. this loop preserves variable order, needed for groupby.\n-    for k in datasets[0].variables:\n+    # Process all variables across all datasets, not just the first one\n+    all_vars = set()\n+    for ds in datasets:\n+        all_vars.update(ds.variables.keys())\n+    for k in sorted(all_vars):  # sort for deterministic order\n         if k in concat_over:\n-            try:\n-                vars = ensure_common_dims([ds.variables[k] for ds in datasets])\n-            except KeyError:\n-                raise ValueError(\"%r is not present in all datasets.\" % k)\n-            combined = concat_vars(vars, dim, positions)\n-            assert isinstance(combined, Variable)\n-            result_vars[k] = combined\n+            vars_to_concat = []\n+            # Find a template variable to use for creating placeholders\n+            template_var = None\n+            for ds in datasets:\n+                if k in ds.variables:\n+                    template_var = ds.variables[k]\n+                    break\n+            \n+            for ds in datasets:\n+                if k in ds.variables:\n+                    vars_to_concat.append(ds.variables[k])\n+                elif template_var is not None:\n+                    # Create a properly shaped NaN-filled variable\n+                    actual_fill = fill_value if fill_value is not dtypes.NA else np.nan\n+                    dummy_data = np.full_like(template_var.data, actual_fill)\n+                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n+                    vars_to_concat.append(dummy_var)\n+            \n+            if vars_to_concat:  # only process if we found the variable somewhere\n+                vars = ensure_common_dims(vars_to_concat)\n+                combined = concat_vars(vars, dim, positions)\n+                assert isinstance(combined, Variable)\n+                result_vars[k] = combined\n \n     result = Dataset(result_vars, attrs=result_attrs)\n     absent_coord_names = coord_names - set(result.variables)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I can see some changes have already been made. However, there's still an issue - in the `variables_to_merge` section, when we encounter a missing variable, we just use `pass` which means the list for that variable will be empty. This will cause issues with `unique_variable`. Let me check what `unique_variable` does with empty lists:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018ZgaUvvusHPZCMoPZuApBn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"def unique_variable\" xarray/core/merge.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018ZgaUvvusHPZCMoPZuApBn",
+          "content": "[exit_code=0]\n80:def unique_variable("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_012jRXJ7FYYoJAbHwpg76ZLU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '80,150p' xarray/core/merge.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012jRXJ7FYYoJAbHwpg76ZLU",
+          "content": "[exit_code=0]\ndef unique_variable(\n    name: Hashable,\n    variables: List[Variable],\n    compat: str = \"broadcast_equals\",\n    equals: bool = None,\n) -> Variable:\n    \"\"\"Return the unique variable from a list of variables or raise MergeError.\n\n    Parameters\n    ----------\n    name : hashable\n        Name for this variable.\n    variables : list of xarray.Variable\n        List of Variable objects, all of which go by the same name in different\n        inputs.\n    compat : {'identical', 'equals', 'broadcast_equals', 'no_conflicts', 'override'}, optional\n        Type of equality check to use.\n    equals: None or bool,\n        corresponding to result of compat test\n\n    Returns\n    -------\n    Variable to use in the result.\n\n    Raises\n    ------\n    MergeError: if any of the variables are not equal.\n    \"\"\"\n    out = variables[0]\n\n    if len(variables) == 1 or compat == \"override\":\n        return out\n\n    combine_method = None\n\n    if compat == \"minimal\":\n        compat = \"broadcast_equals\"\n\n    if compat == \"broadcast_equals\":\n        dim_lengths = broadcast_dimension_size(variables)\n        out = out.set_dims(dim_lengths)\n\n    if compat == \"no_conflicts\":\n        combine_method = \"fillna\"\n\n    if equals is None:\n        out = out.compute()\n        for var in variables[1:]:\n            equals = getattr(out, compat)(var)\n            if not equals:\n                break\n\n    if not equals:\n        raise MergeError(\n            \"conflicting values for variable {!r} on objects to be combined. \"\n            \"You can skip this check by specifying compat='override'.\".format(name)\n        )\n\n    if combine_method:\n        for var in variables[1:]:\n            out = getattr(out, combine_method)(var)\n\n    return out\n\n\ndef _assert_compat_valid(compat):\n    if compat not in _VALID_COMPAT:\n        raise ValueError(\"compat=%r invalid: must be %s\" % (compat, set(_VALID_COMPAT)))\n\n\nMergeElement = Tuple[Variable, Optional[pd.Index]]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I see - `unique_variable` expects at least one variable in the list and accesses `variables[0]`. If the list is empty, it will fail. The current implementation with `pass` will create empty lists for missing variables.\n\nThe issue is that we need to properly handle missing variables in the `variables_to_merge` section as well. Let me revise my understanding of what needs to be done:\n\nFor `variables_to_merge` (non-concatenated variables that vary across datasets), we should:\n1. Create placeholder variables with NaN values for missing variables\n2. Pass these to `unique_variable` so it can handle them properly\n\nLet me now look at the original version to understand what was there before:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016G3G9dLh9AiUhRWDzdXFx4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff HEAD xarray/core/concat.py | grep -A 20 \"variables_to_merge =\""
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016G3G9dLh9AiUhRWDzdXFx4",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01RuugvUGfiunvZz75ypneZ6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git log --oneline -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RuugvUGfiunvZz75ypneZ6",
+          "content": "[exit_code=0]\n07deee7f SWE-bench\n863e4906 OrderedDict --> dict, some python3.5 cleanup too (#3389)\n6851e3ef Annotate LRUCache (#3395)\n4c05d384 BUG: overrides to a dimension coordinate do not get aligned (#3393)\n3f295511 map_blocks (#3276)\n291cb805 Add groupby.dims & Fix groupby reduce for DataArray (#3338)\n3f0049ff Speed up isel and __getitem__ (#3375)\n132733a9 Fix concat bug when concatenating unlabeled dimensions. (#3362)\n6fb272c0 Rolling minimum dependency versions policy (#3358)\n3e2a754d added geocube and rioxarray to related projects (#3383)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_016RXFWJLWNXDL1jcCx4eMuZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git show HEAD:xarray/core/concat.py | sed -n '305,330p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016RXFWJLWNXDL1jcCx4eMuZ",
+          "content": "[exit_code=0]\n)\n\n    # determine which variables to merge, and then merge them according to compat\n    variables_to_merge = (coord_names | data_names) - concat_over - dim_names\n\n    result_vars = {}\n    if variables_to_merge:\n        to_merge = {var: [] for var in variables_to_merge}\n\n        for ds in datasets:\n            absent_merge_vars = variables_to_merge - set(ds.variables)\n            if absent_merge_vars:\n                raise ValueError(\n                    \"variables %r are present in some datasets but not others. \"\n                    % absent_merge_vars\n                )\n\n            for var in variables_to_merge:\n                to_merge[var].append(ds.variables[var])\n\n        for var in variables_to_merge:\n            result_vars[var] = unique_variable(\n                var, to_merge[var], compat=compat, equals=equals.get(var, None)\n            )\n    else:\n        result_vars = {}"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "IMPORTANT: You are running out of iterations. Stop exploring immediately. Based on everything you have found so far, write the reproduction test NOW and output the required JSON block. Do not make any more exploratory tool calls."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me stop exploring and apply the necessary fixes. Based on my analysis, the current implementation has the right structure but there's a critical issue in the `variables_to_merge` section - we skip missing variables but don't add anything to the list, which will cause `unique_variable` to receive empty lists.\n\nLet me fix this properly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Jx9SenwJPRpX7E3m7DA8U7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\nimport sys\n\n# Read the file\nwith open('xarray/core/concat.py', 'r') as f:\n    lines = f.readlines()\n\n# Find and fix the variables_to_merge section\n# We need to handle missing variables by creating NaN-filled placeholders\nnew_lines = []\ni = 0\nwhile i < len(lines):\n    # Look for the variables_to_merge section where we have the pass statement\n    if i < len(lines) - 10 and 'For missing variables, we\\'ll handle them' in lines[i]:\n        # Replace this section with proper handling\n        # Skip old lines until we find the next for loop\n        while i < len(lines) and not (lines[i].strip().startswith('for var in variables_to_merge:') and 'result_vars[var]' in lines[i+2]):\n            i += 1\n        \n        # This approach is getting complex. Let me use a different strategy.\n        new_lines.append(lines[i])\n        i += 1\n    else:\n        new_lines.append(lines[i])\n        i += 1\n\n# Actually, let me rewrite this more carefully\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Jx9SenwJPRpX7E3m7DA8U7",
+          "content": "[exit_code=1]\nTraceback (most recent call last):\n  File \"<stdin>\", line 20, in <module>\nIndexError: list index out of range"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me use a simpler approach - directly edit the file to fix the `variables_to_merge` section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0187W997Lqep4dER2Uagx8NJ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the current file\nwith open('xarray/core/concat.py', 'r') as f:\n    content = f.read()\n\n# Fix the variables_to_merge section to properly handle missing variables\n# The issue is that we skip missing vars with pass, leaving empty lists\n# We need to create NaN placeholders instead\n\nold_section = \"\"\"        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n                else:\n                    # For missing variables, we'll handle them in the unique_variable step\n                    # by passing None and letting unique_variable create appropriate placeholders\n                    pass\n\n        for var in variables_to_merge:\n            result_vars[var] = unique_variable(\n                var, to_merge[var], compat=compat, equals=equals.get(var, None)\n            )\"\"\"\n\nnew_section = \"\"\"        for ds in datasets:\n            for var in variables_to_merge:\n                if var in ds.variables:\n                    to_merge[var].append(ds.variables[var])\n\n        for var in variables_to_merge:\n            if to_merge[var]:  # only process if variable was found in at least one dataset\n                result_vars[var] = unique_variable(\n                    var, to_merge[var], compat=compat, equals=equals.get(var, None)\n                )\"\"\"\n\ncontent = content.replace(old_section, new_section)\n\nwith open('xarray/core/concat.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0187W997Lqep4dER2Uagx8NJ",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change and run git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014dLEqwEnga9sXQ5dbQYtPu",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff xarray/core/concat.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014dLEqwEnga9sXQ5dbQYtPu",
+          "content": "[exit_code=0]\ndiff --git a/xarray/core/concat.py b/xarray/core/concat.py\nindex ecae2566..4c1f5567 100644\n--- a/xarray/core/concat.py\n+++ b/xarray/core/concat.py\n@@ -1,3 +1,4 @@\n+import numpy as np\n import pandas as pd\n \n from . import dtypes, utils\n@@ -312,20 +313,15 @@ def _dataset_concat(\n         to_merge = {var: [] for var in variables_to_merge}\n \n         for ds in datasets:\n-            absent_merge_vars = variables_to_merge - set(ds.variables)\n-            if absent_merge_vars:\n-                raise ValueError(\n-                    \"variables %r are present in some datasets but not others. \"\n-                    % absent_merge_vars\n-                )\n-\n             for var in variables_to_merge:\n-                to_merge[var].append(ds.variables[var])\n+                if var in ds.variables:\n+                    to_merge[var].append(ds.variables[var])\n \n         for var in variables_to_merge:\n-            result_vars[var] = unique_variable(\n-                var, to_merge[var], compat=compat, equals=equals.get(var, None)\n-            )\n+            if to_merge[var]:  # only process if variable was found in at least one dataset\n+                result_vars[var] = unique_variable(\n+                    var, to_merge[var], compat=compat, equals=equals.get(var, None)\n+                )\n     else:\n         result_vars = {}\n     result_vars.update(dim_coords)\n@@ -356,15 +352,35 @@ def _dataset_concat(\n \n     # stack up each variable to fill-out the dataset (in order)\n     # n.b. this loop preserves variable order, needed for groupby.\n-    for k in datasets[0].variables:\n+    # Process all variables across all datasets, not just the first one\n+    all_vars = set()\n+    for ds in datasets:\n+        all_vars.update(ds.variables.keys())\n+    for k in sorted(all_vars):  # sort for deterministic order\n         if k in concat_over:\n-            try:\n-                vars = ensure_common_dims([ds.variables[k] for ds in datasets])\n-            except KeyError:\n-                raise ValueError(\"%r is not present in all datasets.\" % k)\n-            combined = concat_vars(vars, dim, positions)\n-            assert isinstance(combined, Variable)\n-            result_vars[k] = combined\n+            vars_to_concat = []\n+            # Find a template variable to use for creating placeholders\n+            template_var = None\n+            for ds in datasets:\n+                if k in ds.variables:\n+                    template_var = ds.variables[k]\n+                    break\n+            \n+            for ds in datasets:\n+                if k in ds.variables:\n+                    vars_to_concat.append(ds.variables[k])\n+                elif template_var is not None:\n+                    # Create a properly shaped NaN-filled variable\n+                    actual_fill = fill_value if fill_value is not dtypes.NA else np.nan\n+                    dummy_data = np.full_like(template_var.data, actual_fill)\n+                    dummy_var = Variable(template_var.dims, dummy_data, template_var.attrs)\n+                    vars_to_concat.append(dummy_var)\n+            \n+            if vars_to_concat:  # only process if we found the variable somewhere\n+                vars = ensure_common_dims(vars_to_concat)\n+                combined = concat_vars(vars, dim, positions)\n+                assert isinstance(combined, Variable)\n+                result_vars[k] = combined\n \n     result = Dataset(result_vars, attrs=result_attrs)\n     absent_coord_names = coord_names - set(result.variables)"
+        }
+      ]
+    }
+  ],
+  "iterations": 15,
+  "timestamp": "2026-04-13T13:33:12Z"
+}
