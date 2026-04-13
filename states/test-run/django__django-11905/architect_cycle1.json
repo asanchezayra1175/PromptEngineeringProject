@@ -1,0 +1,256 @@
+{
+  "instance_id": "django__django-11905",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/lookups.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/lookups.py",
+      "location": "import section, after line 11",
+      "change": "INSERT after line 11:\nfrom django.utils.deprecation import RemovedInDjango40Warning",
+      "rationale": "Import needed for the deprecation warning that will be raised for non-boolean values"
+    },
+    {
+      "file": "/testbed/django/db/models/lookups.py",
+      "location": "IsNull.as_sql, after line 465",
+      "change": "INSERT after line 465:\n        if not isinstance(self.rhs, bool):\n            raise RemovedInDjango40Warning(\n                'The QuerySet value for an isnull lookup must be True or '\n                'False.'\n            )",
+      "rationale": "Root cause: IsNull.as_sql accepts any value and uses truthiness to generate SQL, causing inconsistent behavior. This pattern (PA - validation guard at method top) protects all callers by validating self.rhs is boolean before SQL generation. The deprecation warning follows maintainer constraints to deprecate in 3.1 and remove in 4.0."
+    }
+  ],
+  "fix_strategy": "PA - None/empty guard placed at wrong level: Add isinstance(self.rhs, bool) validation guard at the top of IsNull.as_sql method before SQL generation. This prevents non-boolean values from causing inconsistent join promotion behavior while maintaining backward compatibility through deprecation warning.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim:\n```python\ndef as_sql(self, compiler, connection):\n    sql, params = compiler.compile(self.lhs)\n    if self.rhs:  # This line is buggy - it accepts any truthy/falsy value\n        return \"%s IS NULL\" % sql, params\n    else:\n        return \"%s IS NOT NULL\" % sql, params\n```\n\n2. Quote the 5 lines immediately after: The method ends at line 470, and then there's a blank line and a decorator `@Field.register_lookup` for the next class. My fix won't change what downstream code receives since I'm adding validation at the top of the method.\n\n3. Re-read pattern choice: This is **PA - None/empty guard placed at wrong level**. I need to add a validation guard at the TOP of the method (before line 466) to check for non-boolean values and raise a deprecation warning. This matches the pattern exactly.\n\n4. Count the lines: I'm adding 4 lines total - an import and 3 lines for the isinstance check and warning. This is within the 5-line limit.\n</think>\n\nPerfect! Now I have all the information needed. The buggy line is `if self.rhs:` on line 467, which accepts any truthy/falsy value instead of requiring a boolean. According to the maintainer constraints, I need to add a deprecation warning for non-boolean values.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/lookups.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\",\n      \"location\": \"import section, after line 11\", \n      \"change\": \"INSERT after line 11:\\nfrom django.utils.deprecation import RemovedInDjango40Warning\",\n      \"rationale\": \"Import needed for the deprecation warning that will be raised for non-boolean values\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\", \n      \"location\": \"IsNull.as_sql, after line 465\",\n      \"change\": \"INSERT after line 465:\\n        if not isinstance(self.rhs, bool):\\n            raise RemovedInDjango40Warning(\\n                'The QuerySet value for an isnull lookup must be True or '\\n                'False.'\\n            )\",\n      \"rationale\": \"Root cause: IsNull.as_sql accepts any value and uses truthiness to generate SQL, causing inconsistent behavior. This pattern (PA - validation guard at method top) protects all callers by validating self.rhs is boolean before SQL generation. The deprecation warning follows maintainer constraints to deprecate in 3.1 and remove in 4.0.\"\n    }\n  ],\n  \"fix_strategy\": \"PA - None/empty guard placed at wrong level: Add isinstance(self.rhs, bool) validation guard at the top of IsNull.as_sql method before SQL generation. This prevents non-boolean values from causing inconsistent join promotion behavior while maintaining backward compatibility through deprecation warning.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-11905</instance_id>\n\n<problem_statement>\nPrevent using __isnull lookup with non-boolean value.\nDescription\n\t \n\t\t(last modified by Mariusz Felisiak)\n\t \n__isnull should not allow for non-boolean values. Using truthy/falsey doesn't promote INNER JOIN to an OUTER JOIN but works fine for a simple queries. Using non-boolean values is \u200bundocumented and untested. IMO we should raise an error for non-boolean values to avoid confusion and for consistency.\n\n</problem_statement>\n\n<hints>\nPR here: \u200bhttps://github.com/django/django/pull/11873\nAfter the reconsideration I don't think that we should change this \u200bdocumented behavior (that is in Django from the very beginning). __isnull lookup expects boolean values in many places and IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples field__isnull='false' or field__isnull='true' (both would return the same result). You can always call bool() on a right hand side. Sorry for my previous acceptation (I shouldn't triage tickets in the weekend).\nReplying to felixxm: After the reconsideration I don't think that we should change this \u200bdocumented behavior (that is in Django from the very beginning). __isnull lookup expects boolean values in many places and IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples field__isnull='false' or field__isnull='true' (both would return the same result). You can always call bool() on a right hand side. Sorry for my previous acceptation (I shouldn't triage tickets in the weekend). I understand your point. But is there anything we can do to avoid people falling for the same pitfall I did? The problem, in my opinion, is that it works fine for simple queries but as soon as you add a join that needs promotion it will break, silently. Maybe we should make it raise an exception when a non-boolean is passed? One valid example is to have a class that implements __bool__. You can see here \u200bhttps://github.com/django/django/blob/d9881a025c15d87b2a7883ee50771117450ea90d/django/db/models/lookups.py#L465-L470 that non-bool value is converted to IS NULL and IS NOT NULL already using the truthy/falsy values. IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples fieldisnull='false' or fieldisnull='true' (both would return the same result). This is already the case. It just is inconsistent, in lookups.py field__isnull='false' will be a positive condition but on the query.py it will be the negative condition.\nMaybe adding a note on the documentation? something like: \"Although it might seem like it will work with non-bool fields, this is not supported and can lead to inconsistent behaviours\"\nAgreed, we should raise an error for non-boolean values, e.g. diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py index 9344979c56..fc4a38c4fe 100644 --- a/django/db/models/lookups.py +++ b/django/db/models/lookups.py @@ -463,6 +463,11 @@ class IsNull(BuiltinLookup): prepare_rhs = False def as_sql(self, compiler, connection): + if not isinstance(self.rhs, bool): + raise ValueError( + 'The QuerySet value for an isnull lookup must be True or ' + 'False.' + ) sql, params = compiler.compile(self.lhs) if self.rhs: return \"%s IS NULL\" % sql, params I changed the ticket description.\nThanks, I'll work on it! Wouldn't that possibly break backward compatibility? I'm not familiar with how Django moves in that regard.\nWe can add a release note in \"Backwards incompatible changes\" or deprecate this and remove in Django 4.0. I have to thing about it, please give me a day, maybe I will change my mind :)\nNo problem. Thanks for taking the time to look into this!\nAnother interesting example related to this: As an anecdote, I've also got bitten by this possibility. An attempt to write WHERE (field IS NULL) = boolean_field as .filter(field__isnull=F('boolean_field')) didn't go as I expected. Alexandr Aktsipetrov -- \u200bhttps://groups.google.com/forum/#!msg/django-developers/AhY2b3rxkfA/0sz3hNanCgAJ This example will generate the WHERE .... IS NULL. I guess we also would want an exception thrown here.\nAndr\u00e9, IMO we should deprecate using non-boolean values in Django 3.1 (RemovedInDjango40Warning) and remove in Django 4.0 (even if it is untested and undocumented). I can imagine that a lot of people use e.g. 1 and 0 instead of booleans. Attached diff fixes also issue with passing a F() expression. def as_sql(self, compiler, connection): if not isinstance(self.rhs, bool): raise RemovedInDjango40Warning(...) ....\nReplying to felixxm: Andr\u00e9, IMO we should deprecate using non-boolean values in Django 3.1 (RemovedInDjango40Warning) and remove in Django 4.0 (even if it is untested and undocumented). I can imagine that a lot of people use e.g. 1 and 0 instead of booleans. Attached diff fixes also issue with passing a F() expression. def as_sql(self, compiler, connection): if not isinstance(self.rhs, bool): raise RemovedInDjango40Warning(...) .... Sound like a good plan. Not super familiar with the branch structure of Django. So, I guess the path to follow is to make a PR to master adding the deprecation warning and eventually when master is 4.x we create the PR raising the ValueError. Is that right? Thanks!\nAndr\u00e9, yes mostly. You can find more details about that \u200bfrom the documentation.\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/lookups.py\"\n]\nRelevant symbols: [\n  \"IsNull.as_sql\"\n]\nBug analysis: The IsNull lookup's as_sql method accepts any value for self.rhs and uses its truthiness to determine SQL generation. When self.rhs evaluates to truthy, it generates 'IS NULL', and when falsy, it generates 'IS NOT NULL'. This allows non-boolean values like strings, integers, or other objects to be passed, which creates inconsistent behavior and can cause join promotion issues.\nExploration notes: The IsNull class is located in /testbed/django/db/models/lookups.py at lines 461-470. The as_sql method uses 'if self.rhs:' on line 467 without type checking. According to the PR #11873 discussion, the fix involves adding isinstance(self.rhs, bool) validation before the SQL generation. The method should raise either ValueError or RemovedInDjango40Warning for non-boolean values.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nMaintainer constraints:\n- \"We should raise an error for non-boolean values\" (from problem statement)\n- \"IMO we should deprecate using non-boolean values in Django 3.1 (RemovedInDjango40Warning) and remove in Django 4.0\" (from hints)\n- The hints show a specific diff that adds isinstance(self.rhs, bool) check and raises ValueError, but later mentions using RemovedInDjango40Warning for deprecation\n\nThe constraints specify:\n1. Must validate that self.rhs is a boolean\n2. Should use deprecation warning (RemovedInDjango40Warning) rather than immediate ValueError\n3. Fix should be in the IsNull.as_sql method\n\nLet me understand the bug:\n1. What is the function SUPPOSED to do? The IsNull lookup should only accept True or False values to generate \"IS NULL\" or \"IS NOT NULL\" SQL respectively.\n2. What input triggers the failure? Non-boolean values like strings ('false', 'true'), integers (0, 1), or F() expressions are accepted and converted using truthiness.\n3. Which fix pattern matches? This looks like **PC - Generic exception type used instead of domain-specific**, but actually it's more about **PA - None/empty guard placed at wrong level** - we need a validation guard at the top of the method.\n4. Where should the fix live? Inside the as_sql method that crashes, to protect all callers.\n5. How many lines need to change? Should be 1-2 lines for the isinstance check and warning.\n</think>\n\nLet me start by examining the buggy method to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DRFTC4CBtAp9gNa9B8uvPh",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/lookups.py",
+            "method_name": "as_sql"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DRFTC4CBtAp9gNa9B8uvPh",
+          "content": "[exit_code=0]\n--- as_sql (lines 114-115) ---\n    def as_sql(self, compiler, connection):\n        raise NotImplementedError\n\n--- as_sql (lines 175-180) ---\n    def as_sql(self, compiler, connection):\n        lhs_sql, params = self.process_lhs(compiler, connection)\n        rhs_sql, rhs_params = self.process_rhs(compiler, connection)\n        params.extend(rhs_params)\n        rhs_sql = self.get_rhs_op(connection, rhs_sql)\n        return '%s %s' % (lhs_sql, rhs_sql), params\n\n--- as_sql (lines 364-368) ---\n    def as_sql(self, compiler, connection):\n        max_in_list_size = connection.ops.max_in_list_size()\n        if self.rhs_is_direct_value() and max_in_list_size and len(self.rhs) > max_in_list_size:\n            return self.split_parameter_list_as_sql(compiler, connection)\n        return super().as_sql(compiler, connection)\n\n--- as_sql (lines 465-470) ---\n    def as_sql(self, compiler, connection):\n        sql, params = compiler.compile(self.lhs)\n        if self.rhs:\n            return \"%s IS NULL\" % sql, params\n        else:\n            return \"%s IS NOT NULL\" % sql, params\n\n--- as_sql (lines 478-485) ---\n    def as_sql(self, compiler, connection):\n        if self.lookup_name in connection.operators:\n            return super().as_sql(compiler, connection)\n        else:\n            lhs, lhs_params = self.process_lhs(compiler, connection)\n            rhs, rhs_params = self.process_rhs(compiler, connection)\n            sql_template = connection.ops.regex_lookup(self.lookup_name)\n            return sql_template % (lhs, rhs), lhs_params + rhs_params\n\n--- as_sql (lines 502-514) ---\n    def as_sql(self, compiler, connection):\n        # Avoid the extract operation if the rhs is a direct value to allow\n        # indexes to be used.\n        if self.rhs_is_direct_value():\n            # Skip the extract part by directly using the originating field,\n            # that is self.lhs.lhs.\n            lhs_sql, params = self.process_lhs(compiler, connection, self.lhs.lhs)\n            rhs_sql, _ = self.process_rhs(compiler, connection)\n            rhs_sql = self.get_direct_rhs_sql(connection, rhs_sql)\n            start, finish = self.year_lookup_bounds(connection, self.rhs)\n            params.extend(self.get_bound_params(start, finish))\n            return '%s %s' % (lhs_sql, rhs_sql), params\n        return super().as_sql(compiler, connection)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the IsNull class specifically to confirm which as_sql method is the right one:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01V1cSaWGAQcQ3ztjquUpeE9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/lookups.py"
+          },
+          "name": "get_classes_and_methods",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01V1cSaWGAQcQ3ztjquUpeE9",
+          "content": "[exit_code=0]\nclass Lookup (line 15)\nclass Transform (line 143)\nclass BuiltinLookup (line 165)\nclass FieldGetDbPrepValueMixin (line 186)\nclass FieldGetDbPrepValueIterableMixin (line 206)\nclass Exact (line 258)\nclass IExact (line 277)\nclass GreaterThan (line 289)\nclass GreaterThanOrEqual (line 294)\nclass LessThan (line 299)\nclass LessThanOrEqual (line 304)\nclass IntegerFieldFloatRounding (line 308)\nclass IntegerGreaterThanOrEqual (line 320)\nclass IntegerLessThan (line 325)\nclass In (line 330)\nclass PatternLookup (line 393)\nclass Contains (line 421)\nclass IContains (line 426)\nclass StartsWith (line 431)\nclass IStartsWith (line 437)\nclass EndsWith (line 442)\nclass IEndsWith (line 448)\nclass Range (line 453)\nclass IsNull (line 461)\nclass Regex (line 474)\nclass IRegex (line 489)\nclass YearLookup (line 493)\nclass YearExact (line 525)\nclass YearGt (line 533)\nclass YearGte (line 538)\nclass YearLt (line 543)\nclass YearLte (line 548)\nclass UUIDTextMixin (line 553)\nclass UUIDIExact (line 569)\nclass UUIDContains (line 574)\nclass UUIDIContains (line 579)\nclass UUIDStartsWith (line 584)\nclass UUIDIStartsWith (line 589)\nclass UUIDEndsWith (line 594)\nclass UUIDIEndsWith (line 599)\n  def __init__ (line 20)\n  def apply_bilateral_transforms (line 35)\n  def batch_process_rhs (line 40)\n  def get_source_expressions (line 57)\n  def set_source_expressions (line 62)\n  def get_prep_lookup (line 68)\n  def get_db_prep_lookup (line 75)\n  def process_lhs (line 78)\n  def process_rhs (line 84)\n  def rhs_is_direct_value (line 98)\n  def relabeled_clone (line 101)\n  def get_group_by_cols (line 108)\n  def as_sql (line 114)\n  def as_oracle (line 117)\n  def contains_aggregate (line 131)\n  def contains_over_clause (line 135)\n  def is_summary (line 139)\n  def lhs (line 152)\n  def get_bilateral_transforms (line 155)\n  def process_lhs (line 166)\n  def as_sql (line 175)\n  def get_rhs_op (line 182)\n  def get_db_prep_lookup (line 193)\n  def get_prep_lookup (line 213)\n  def process_rhs (line 227)\n  def resolve_expression_parameter (line 235)\n  def batch_process_rhs (line 243)\n  def process_rhs (line 261)\n  def process_rhs (line 281)\n  def get_prep_lookup (line 313)\n  def process_rhs (line 333)\n  def get_rhs_op (line 361)\n  def as_sql (line 364)\n  def split_parameter_list_as_sql (line 370)\n  def get_rhs_op (line 397)\n  def process_rhs (line 413)\n  def get_rhs_op (line 456)\n  def as_sql (line 465)\n  def as_sql (line 478)\n  def year_lookup_bounds (line 494)\n  def as_sql (line 502)\n  def get_direct_rhs_sql (line 516)\n  def get_bound_params (line 519)\n  def get_direct_rhs_sql (line 526)\n  def get_bound_params (line 529)\n  def get_bound_params (line 534)\n  def get_bound_params (line 539)\n  def get_bound_params (line 544)\n  def get_bound_params (line 549)\n  def process_rhs (line 558)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The IsNull class is at line 461, and it has an as_sql method at line 465. Let me extract the full IsNull class to see its context:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XQoMqGHLsmM867ecGtZ5Ls",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '461,472p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XQoMqGHLsmM867ecGtZ5Ls",
+          "content": "[exit_code=0]\nclass IsNull(BuiltinLookup):\n    lookup_name = 'isnull'\n    prepare_rhs = False\n\n    def as_sql(self, compiler, connection):\n        sql, params = compiler.compile(self.lhs)\n        if self.rhs:\n            return \"%s IS NULL\" % sql, params\n        else:\n            return \"%s IS NOT NULL\" % sql, params"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check if there are any import statements for warnings or Django-specific warning classes in this file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016U3v32GiPFbd62yq1dAkX5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -20 django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016U3v32GiPFbd62yq1dAkX5",
+          "content": "[exit_code=0]\nimport itertools\nimport math\nfrom copy import copy\n\nfrom django.core.exceptions import EmptyResultSet\nfrom django.db.models.expressions import Case, Exists, Func, Value, When\nfrom django.db.models.fields import (\n    BooleanField, CharField, DateTimeField, Field, IntegerField, UUIDField,\n)\nfrom django.db.models.query_utils import RegisterLookupMixin\nfrom django.utils.datastructures import OrderedSet\nfrom django.utils.functional import cached_property\n\n\nclass Lookup:\n    lookup_name = None\n    prepare_rhs = True\n    can_use_none_as_rhs = False\n\n    def __init__(self, lhs, rhs):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I need to find where RemovedInDjango40Warning is defined to use it correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HWc6zmspCEVUqyBsmzVwgW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"*.py\" -exec grep -l \"RemovedInDjango40Warning\" {} \\; | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HWc6zmspCEVUqyBsmzVwgW",
+          "content": "[exit_code=0]\n./django/conf/__init__.py\n./django/contrib/sessions/backends/base.py\n./django/db/models/sql/query.py\n./django/utils/deprecation.py\n./django/utils/encoding.py\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_017b1Vo33TK1iSMqpH3BEup2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"class RemovedInDjango40Warning\" django/utils/deprecation.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017b1Vo33TK1iSMqpH3BEup2",
+          "content": "[exit_code=0]\n9:class RemovedInDjango40Warning(PendingDeprecationWarning):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check the lines after the buggy line to see if my fix would affect downstream processing:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014AqPDh1TDMfw7dJfQpL214",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '465,475p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014AqPDh1TDMfw7dJfQpL214",
+          "content": "[exit_code=0]\ndef as_sql(self, compiler, connection):\n        sql, params = compiler.compile(self.lhs)\n        if self.rhs:\n            return \"%s IS NULL\" % sql, params\n        else:\n            return \"%s IS NOT NULL\" % sql, params\n\n\n@Field.register_lookup\nclass Regex(BuiltinLookup):\n    lookup_name = 'regex'"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim:\n```python\ndef as_sql(self, compiler, connection):\n    sql, params = compiler.compile(self.lhs)\n    if self.rhs:  # This line is buggy - it accepts any truthy/falsy value\n        return \"%s IS NULL\" % sql, params\n    else:\n        return \"%s IS NOT NULL\" % sql, params\n```\n\n2. Quote the 5 lines immediately after: The method ends at line 470, and then there's a blank line and a decorator `@Field.register_lookup` for the next class. My fix won't change what downstream code receives since I'm adding validation at the top of the method.\n\n3. Re-read pattern choice: This is **PA - None/empty guard placed at wrong level**. I need to add a validation guard at the TOP of the method (before line 466) to check for non-boolean values and raise a deprecation warning. This matches the pattern exactly.\n\n4. Count the lines: I'm adding 4 lines total - an import and 3 lines for the isinstance check and warning. This is within the 5-line limit.\n</think>\n\nPerfect! Now I have all the information needed. The buggy line is `if self.rhs:` on line 467, which accepts any truthy/falsy value instead of requiring a boolean. According to the maintainer constraints, I need to add a deprecation warning for non-boolean values.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/lookups.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\",\n      \"location\": \"import section, after line 11\", \n      \"change\": \"INSERT after line 11:\\nfrom django.utils.deprecation import RemovedInDjango40Warning\",\n      \"rationale\": \"Import needed for the deprecation warning that will be raised for non-boolean values\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\", \n      \"location\": \"IsNull.as_sql, after line 465\",\n      \"change\": \"INSERT after line 465:\\n        if not isinstance(self.rhs, bool):\\n            raise RemovedInDjango40Warning(\\n                'The QuerySet value for an isnull lookup must be True or '\\n                'False.'\\n            )\",\n      \"rationale\": \"Root cause: IsNull.as_sql accepts any value and uses truthiness to generate SQL, causing inconsistent behavior. This pattern (PA - validation guard at method top) protects all callers by validating self.rhs is boolean before SQL generation. The deprecation warning follows maintainer constraints to deprecate in 3.1 and remove in 4.0.\"\n    }\n  ],\n  \"fix_strategy\": \"PA - None/empty guard placed at wrong level: Add isinstance(self.rhs, bool) validation guard at the top of IsNull.as_sql method before SQL generation. This prevents non-boolean values from causing inconsistent join promotion behavior while maintaining backward compatibility through deprecation warning.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 8,
+  "timestamp": "2026-04-13T07:07:35Z"
+}

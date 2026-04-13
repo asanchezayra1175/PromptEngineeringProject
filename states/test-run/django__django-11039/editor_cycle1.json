@@ -1,0 +1,212 @@
+{
+  "instance_id": "django__django-11039",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/core/management/commands/sqlmigrate.py b/django/core/management/commands/sqlmigrate.py\nindex f0b663222a..b51d1739a4 100644\n--- a/django/core/management/commands/sqlmigrate.py\n+++ b/django/core/management/commands/sqlmigrate.py\n@@ -56,7 +56,7 @@ class Command(BaseCommand):\n         targets = [(app_label, migration.name)]\n \n         # Show begin/end around output only for atomic migrations\n-        self.output_transaction = migration.atomic\n+        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\n \n         # Make a plan that represents just the requested migrations and show SQL\n         # for it",
+  "implementation_notes": "Modified the sqlmigrate command to check both migration.atomic and connection.features.can_rollback_ddl when setting output_transaction. This prevents wrapping SQL output in BEGIN/COMMIT statements when the database does not support transactional DDL, aligning with the migration executor's behavior.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-11039</instance_id>\n\n<problem_statement>\nsqlmigrate wraps it's outpout in BEGIN/COMMIT even if the database doesn't support transactional DDL\nDescription\n\t \n\t\t(last modified by Simon Charette)\n\t \nThe migration executor only adds the outer BEGIN/COMMIT \u200bif the migration is atomic and \u200bthe schema editor can rollback DDL but the current sqlmigrate logic only takes migration.atomic into consideration.\nThe issue can be addressed by\nChanging sqlmigrate \u200bassignment of self.output_transaction to consider connection.features.can_rollback_ddl as well.\nAdding a test in tests/migrations/test_commands.py based on \u200ban existing test for non-atomic migrations that mocks connection.features.can_rollback_ddl to False instead of overdidding MIGRATION_MODULES to point to a non-atomic migration.\nI marked the ticket as easy picking because I included the above guidelines but feel free to uncheck it if you deem it inappropriate.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The sqlmigrate command sets self.output_transaction to migration.atomic only, which causes BEGIN/COMMIT statements to be wrapped around SQL output even when the database does not support transactional DDL. When migration.atomic is True but connection.features.can_rollback_ddl is False, the command incorrectly includes transaction statements that have no effect.\nExploration notes: The bug is on line 50 where 'self.output_transaction = migration.atomic' should also consider connection.features.can_rollback_ddl. The base class BaseCommand in /testbed/django/core/management/base.py uses output_transaction to determine whether to wrap output with start_transaction_sql() and end_transaction_sql(). The schema editor in /testbed/django/db/backends/base/schema.py shows the correct pattern: 'self.atomic_migration = self.connection.features.can_rollback_ddl and atomic'. The connection object is already available in the handle method.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: The condition was too broad, checking only migration.atomic instead of both migration.atomic AND connection.features.can_rollback_ddl. This single-line change aligns with the schema editor's logic and prevents incorrect transaction wrapping.\n\nFiles to modify: [\n  \"/testbed/django/core/management/commands/sqlmigrate.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/core/management/commands/sqlmigrate.py\n  Location: Command.handle, line 59\n  Change  : REPLACE line 59:\n        self.output_transaction = migration.atomic\nWITH:\n        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\n  Rationale: The original code only checks migration.atomic but should also verify that the database supports transactional DDL (can_rollback_ddl). This matches the pattern used in the schema editor and prevents unnecessary BEGIN/COMMIT wrapping when the database doesn't support DDL rollback.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified to understand the context and then implement the proposed change.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01W73dpwjpH8Yunokh7hgWt4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -type f -name \"sqlmigrate.py\" | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01W73dpwjpH8Yunokh7hgWt4",
+          "content": "[exit_code=0]\n./django/core/management/commands/sqlmigrate.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read the sqlmigrate.py file to understand its current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FZNh7Parejxei18UQS6Eao",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/core/management/commands/sqlmigrate.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FZNh7Parejxei18UQS6Eao",
+          "content": "[exit_code=0]\nfrom django.apps import apps\nfrom django.core.management.base import BaseCommand, CommandError\nfrom django.db import DEFAULT_DB_ALIAS, connections\nfrom django.db.migrations.executor import MigrationExecutor\nfrom django.db.migrations.loader import AmbiguityError\n\n\nclass Command(BaseCommand):\n    help = \"Prints the SQL statements for the named migration.\"\n\n    output_transaction = True\n\n    def add_arguments(self, parser):\n        parser.add_argument('app_label', help='App label of the application containing the migration.')\n        parser.add_argument('migration_name', help='Migration name to print the SQL for.')\n        parser.add_argument(\n            '--database', default=DEFAULT_DB_ALIAS,\n            help='Nominates a database to create SQL for. Defaults to the \"default\" database.',\n        )\n        parser.add_argument(\n            '--backwards', action='store_true',\n            help='Creates SQL to unapply the migration, rather than to apply it',\n        )\n\n    def execute(self, *args, **options):\n        # sqlmigrate doesn't support coloring its output but we need to force\n        # no_color=True so that the BEGIN/COMMIT statements added by\n        # output_transaction don't get colored either.\n        options['no_color'] = True\n        return super().execute(*args, **options)\n\n    def handle(self, *args, **options):\n        # Get the database we're operating from\n        connection = connections[options['database']]\n\n        # Load up an executor to get all the migration data\n        executor = MigrationExecutor(connection)\n\n        # Resolve command-line arguments into a migration\n        app_label, migration_name = options['app_label'], options['migration_name']\n        # Validate app_label\n        try:\n            apps.get_app_config(app_label)\n        except LookupError as err:\n            raise CommandError(str(err))\n        if app_label not in executor.loader.migrated_apps:\n            raise CommandError(\"App '%s' does not have migrations\" % app_label)\n        try:\n            migration = executor.loader.get_migration_by_prefix(app_label, migration_name)\n        except AmbiguityError:\n            raise CommandError(\"More than one migration matches '%s' in app '%s'. Please be more specific.\" % (\n                migration_name, app_label))\n        except KeyError:\n            raise CommandError(\"Cannot find a migration matching '%s' from app '%s'. Is it in INSTALLED_APPS?\" % (\n                migration_name, app_label))\n        targets = [(app_label, migration.name)]\n\n        # Show begin/end around output only for atomic migrations\n        self.output_transaction = migration.atomic\n\n        # Make a plan that represents just the requested migrations and show SQL\n        # for it\n        plan = [(executor.loader.graph.nodes[targets[0]], options['backwards'])]\n        sql_statements = executor.collect_sql(plan)\n        return '\\n'.join(sql_statements)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the issue. On line 59, the code sets `self.output_transaction = migration.atomic` but should also check `connection.features.can_rollback_ddl`. Let me verify the line numbers and then make the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SdRxyrDgV92iL4XBbZphxc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '55,65p' django/core/management/commands/sqlmigrate.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SdRxyrDgV92iL4XBbZphxc",
+          "content": "[exit_code=0]\nmigration_name, app_label))\n        targets = [(app_label, migration.name)]\n\n        # Show begin/end around output only for atomic migrations\n        self.output_transaction = migration.atomic\n\n        # Make a plan that represents just the requested migrations and show SQL\n        # for it\n        plan = [(executor.loader.graph.nodes[targets[0]], options['backwards'])]\n        sql_statements = executor.collect_sql(plan)\n        return '\\n'.join(sql_statements)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good, I found the line that needs to be changed. Now I'll apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FVdiDJLMHYZXmE5xPZr7Kp",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/core/management/commands/sqlmigrate.py', 'r') as f:\n    content = f.read()\n\n# Replace the line\nold_line = \"        self.output_transaction = migration.atomic\"\nnew_line = \"        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\"\n\ncontent = content.replace(old_line, new_line)\n\n# Write back\nwith open('django/core/management/commands/sqlmigrate.py', 'w') as f:\n    f.write(content)\n\nprint(\"Change applied successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FVdiDJLMHYZXmE5xPZr7Kp",
+          "content": "[exit_code=0]\nChange applied successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HWUtEERsFgqwyMiw7QMqVT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '55,65p' django/core/management/commands/sqlmigrate.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HWUtEERsFgqwyMiw7QMqVT",
+          "content": "[exit_code=0]\nmigration_name, app_label))\n        targets = [(app_label, migration.name)]\n\n        # Show begin/end around output only for atomic migrations\n        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\n\n        # Make a plan that represents just the requested migrations and show SQL\n        # for it\n        plan = [(executor.loader.graph.nodes[targets[0]], options['backwards'])]\n        sql_statements = executor.collect_sql(plan)\n        return '\\n'.join(sql_statements)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run git diff to verify the complete change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YaW7RtCjZhce69mZZUqKB2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YaW7RtCjZhce69mZZUqKB2",
+          "content": "[exit_code=0]\ndiff --git a/django/core/management/commands/sqlmigrate.py b/django/core/management/commands/sqlmigrate.py\nindex f0b663222a..b51d1739a4 100644\n--- a/django/core/management/commands/sqlmigrate.py\n+++ b/django/core/management/commands/sqlmigrate.py\n@@ -56,7 +56,7 @@ class Command(BaseCommand):\n         targets = [(app_label, migration.name)]\n \n         # Show begin/end around output only for atomic migrations\n-        self.output_transaction = migration.atomic\n+        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\n \n         # Make a plan that represents just the requested migrations and show SQL\n         # for it"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows the exact change we needed to make. The modification adds the check for `connection.features.can_rollback_ddl` to ensure that transaction wrapping only occurs when both the migration is atomic AND the database supports transactional DDL.\n\n```json\n{\n  \"patch\": \"diff --git a/django/core/management/commands/sqlmigrate.py b/django/core/management/commands/sqlmigrate.py\\nindex f0b663222a..b51d1739a4 100644\\n--- a/django/core/management/commands/sqlmigrate.py\\n+++ b/django/core/management/commands/sqlmigrate.py\\n@@ -56,7 +56,7 @@ class Command(BaseCommand):\\n         targets = [(app_label, migration.name)]\\n \\n         # Show begin/end around output only for atomic migrations\\n-        self.output_transaction = migration.atomic\\n+        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl\\n \\n         # Make a plan that represents just the requested migrations and show SQL\\n         # for it\",\n  \"implementation_notes\": \"Modified the sqlmigrate command to check both migration.atomic and connection.features.can_rollback_ddl when setting output_transaction. This prevents wrapping SQL output in BEGIN/COMMIT statements when the database does not support transactional DDL, aligning with the migration executor's behavior.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T06:04:00Z"
+}

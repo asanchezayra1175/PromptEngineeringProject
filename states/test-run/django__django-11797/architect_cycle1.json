@@ -1,0 +1,163 @@
+{
+  "instance_id": "django__django-11797",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/lookups.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/lookups.py",
+      "location": "Exact.process_rhs, line 264",
+      "change": "REPLACE lines 264-266:\n                # The subquery must select only the pk.\n                self.rhs.clear_select_clause()\n                self.rhs.add_fields(['pk'])\nWITH:\n                # Only clear select clause if no fields are already selected\n                if not getattr(self.rhs, 'has_select_fields', True):\n                    self.rhs.clear_select_clause()\n                    self.rhs.add_fields(['pk'])",
+      "rationale": "The bug is caused by unconditionally clearing the select clause and adding pk field, which removes intentionally specified .values() fields and their associated GROUP BY clauses. The In.process_rhs method already has the correct pattern using has_select_fields guard to preserve existing selected fields. This fix follows the same pattern to maintain consistency across lookup types."
+    }
+  ],
+  "fix_strategy": "PA: Add a guard condition to preserve existing selected fields in subqueries, preventing the loss of intentional GROUP BY clauses when using exact lookups with annotated values queries.",
+  "full_response": "Perfect! I can see the difference clearly. The In.process_rhs method has the guard condition `if not getattr(self.rhs, 'has_select_fields', True):` before clearing the select clause and adding the pk field, while the Exact.process_rhs method doesn't have this guard.\n\n<think>\n1. Quote the exact buggy line(s) verbatim.\nLines 264-266 in Exact.process_rhs:\n```python\n# The subquery must select only the pk.\nself.rhs.clear_select_clause()\nself.rhs.add_fields(['pk'])\n```\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nLines 267-271:\n```python\nelse:\n    raise ValueError(\n        'The QuerySet value for an exact lookup must be limited to '\n        'one result using slicing.'\n    )\n```\nNo, my fix doesn't change what these lines receive.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nYes, this is pattern PA - adding a guard at the TOP of the problematic section to check if the subquery has selected fields before clearing them.\n\n4. Count the lines your fix changes. If more than 5, simplify.\nThis will be a 2-line change (adding the guard condition).\n</think>\n\nNow I'll produce the solution proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/lookups.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\",\n      \"location\": \"Exact.process_rhs, line 264\",\n      \"change\": \"REPLACE lines 264-266:\\n                # The subquery must select only the pk.\\n                self.rhs.clear_select_clause()\\n                self.rhs.add_fields(['pk'])\\nWITH:\\n                # Only clear select clause if no fields are already selected\\n                if not getattr(self.rhs, 'has_select_fields', True):\\n                    self.rhs.clear_select_clause()\\n                    self.rhs.add_fields(['pk'])\",\n      \"rationale\": \"The bug is caused by unconditionally clearing the select clause and adding pk field, which removes intentionally specified .values() fields and their associated GROUP BY clauses. The In.process_rhs method already has the correct pattern using has_select_fields guard to preserve existing selected fields. This fix follows the same pattern to maintain consistency across lookup types.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: Add a guard condition to preserve existing selected fields in subqueries, preventing the loss of intentional GROUP BY clauses when using exact lookups with annotated values queries.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-11797</instance_id>\n\n<problem_statement>\nFiltering on query result overrides GROUP BY of internal query\nDescription\n\t\nfrom django.contrib.auth import models\na = models.User.objects.filter(email__isnull=True).values('email').annotate(m=Max('id')).values('m')\nprint(a.query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\"\nprint(a[:1].query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\" LIMIT 1\nb = models.User.objects.filter(id=a[:1])\nprint(b.query) # GROUP BY U0.\"id\" should be GROUP BY U0.\"email\"\n# SELECT ... FROM \"auth_user\" WHERE \"auth_user\".\"id\" = (SELECT U0.\"id\" FROM \"auth_user\" U0 WHERE U0.\"email\" IS NULL GROUP BY U0.\"id\" LIMIT 1)\n\n</problem_statement>\n\n<hints>\nWorkaround: from django.contrib.auth import models a = models.User.objects.filter(email__isnull=True).values('email').aggregate(Max('id'))['id_max'] b = models.User.objects.filter(id=a)\nThanks for tackling that one James! If I can provide you some guidance I'd suggest you have a look at lookups.Exact.process_rhs \u200bhttps://github.com/django/django/blob/ea25bdc2b94466bb1563000bf81628dea4d80612/django/db/models/lookups.py#L265-L267 We probably don't want to perform the clear_select_clause and add_fields(['pk']) when the query is already selecting fields. That's exactly what In.process_rhs \u200bdoes already by only performing these operations if not getattr(self.rhs, 'has_select_fields', True).\nThanks so much for the help Simon! This is a great jumping-off point. There's something that I'm unclear about, which perhaps you can shed some light on. While I was able to replicate the bug with 2.2, when I try to create a test on Master to validate the bug, the group-by behavior seems to have changed. Here's the test that I created: def test_exact_selected_field_rhs_subquery(self): author_1 = Author.objects.create(name='one') author_2 = Author.objects.create(name='two') max_ids = Author.objects.filter(alias__isnull=True).values('alias').annotate(m=Max('id')).values('m') authors = Author.objects.filter(id=max_ids[:1]) self.assertFalse(str(max_ids.query)) # This was just to force the test-runner to output the query. self.assertEqual(authors[0], author_2) And here's the resulting query: SELECT MAX(\"lookup_author\".\"id\") AS \"m\" FROM \"lookup_author\" WHERE \"lookup_author\".\"alias\" IS NULL GROUP BY \"lookup_author\".\"alias\", \"lookup_author\".\"name\" It no longer appears to be grouping by the 'alias' field listed in the initial .values() preceeding the .annotate(). I looked at the docs and release notes to see if there was a behavior change, but didn't see anything listed. Do you know if I'm just misunderstanding what's happening here? Or does this seem like a possible regression?\nIt's possible that a regression was introduced in between. Could you try bisecting the commit that changed the behavior \u200bhttps://docs.djangoproject.com/en/dev/internals/contributing/triaging-tickets/#bisecting-a-regression\nMmm actually disregard that. The second value in the GROUP BY is due to the ordering value in the Author class's Meta class. class Author(models.Model): name = models.CharField(max_length=100) alias = models.CharField(max_length=50, null=True, blank=True) class Meta: ordering = ('name',) Regarding the bug in question in this ticket, what should the desired behavior be if the inner query is returning multiple fields? With the fix, which allows the inner query to define a field to return/group by, if there are multiple fields used then it will throw a sqlite3.OperationalError: row value misused. Is this the desired behavior or should it avoid this problem by defaulting back to pk if more than one field is selected?\nI think that we should only default to pk if no fields are selected. The ORM has preliminary support for multi-column lookups and other interface dealing with subqueries doesn't prevent passing queries with multiple fields so I'd stick to the current __in lookup behavior.\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/lookups.py\"\n]\nRelevant symbols: [\n  \"Exact.process_rhs\"\n]\nBug analysis: The Exact.process_rhs method unconditionally calls clear_select_clause() and add_fields(['pk']) when the subquery has limit one, which removes any existing GROUP BY clauses that depend on selected fields. When filtering with a subquery that has .values('email').annotate(m=Max('id')), the GROUP BY email clause gets replaced with GROUP BY pk.\nExploration notes: The bug is at lines 265-267 in Exact.process_rhs. The In.process_rhs method at line 356 shows the correct pattern: 'if not getattr(self.rhs, 'has_select_fields', True):' before clearing select clause. The Exact class should use the same has_select_fields check to preserve existing selected fields and their associated GROUP BY clauses.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me understand the problem and investigate the relevant code.\n\n<think>\n1. What is the function SUPPOSED to do in plain English?\n   The Exact.process_rhs method should handle subqueries used in exact lookups (like `id=subquery`) while preserving the subquery's existing field selection and GROUP BY clauses when they are intentionally specified.\n\n2. What input triggers the failure and what error results?\n   When using a subquery with `.values('field').annotate()` in an exact lookup (like `User.objects.filter(id=subquery)`), the GROUP BY clause gets incorrectly changed from the intended field to 'pk'.\n\n3. Which fix pattern from the library below matches this bug? Name it now.\n   This looks like pattern **PA - None/empty guard placed at wrong level**. The current code unconditionally clears select clause and adds pk field, but it should guard this behavior based on whether the subquery already has selected fields.\n\n4. Where should the fix live \u2014 inside the function that crashes, or at the call site?\n   Inside the Exact.process_rhs function that's causing the issue. This protects all callers automatically.\n\n5. How many lines need to change? If the answer is more than 3, reconsider\n   This should be a 1-2 line change - adding a guard condition like the In.process_rhs method already has.\n</think>\n\nLet me read the source code to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01NjPJjL364DwofN5SqzgQ1x",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/lookups.py",
+            "method_name": "process_rhs"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NjPJjL364DwofN5SqzgQ1x",
+          "content": "[exit_code=0]\n--- process_rhs (lines 84-96) ---\n    def process_rhs(self, compiler, connection):\n        value = self.rhs\n        if self.bilateral_transforms:\n            if self.rhs_is_direct_value():\n                # Do not call get_db_prep_lookup here as the value will be\n                # transformed before being used for lookup\n                value = Value(value, output_field=self.lhs.output_field)\n            value = self.apply_bilateral_transforms(value)\n            value = value.resolve_expression(compiler.query)\n        if hasattr(value, 'as_sql'):\n            return compiler.compile(value)\n        else:\n            return self.get_db_prep_lookup(value, connection)\n\n--- process_rhs (lines 227-233) ---\n    def process_rhs(self, compiler, connection):\n        if self.rhs_is_direct_value():\n            # rhs should be an iterable of values. Use batch_process_rhs()\n            # to prepare/transform those values.\n            return self.batch_process_rhs(compiler, connection)\n        else:\n            return super().process_rhs(compiler, connection)\n\n--- process_rhs (lines 261-273) ---\n    def process_rhs(self, compiler, connection):\n        from django.db.models.sql.query import Query\n        if isinstance(self.rhs, Query):\n            if self.rhs.has_limit_one():\n                # The subquery must select only the pk.\n                self.rhs.clear_select_clause()\n                self.rhs.add_fields(['pk'])\n            else:\n                raise ValueError(\n                    'The QuerySet value for an exact lookup must be limited to '\n                    'one result using slicing.'\n                )\n        return super().process_rhs(compiler, connection)\n\n--- process_rhs (lines 281-285) ---\n    def process_rhs(self, qn, connection):\n        rhs, params = super().process_rhs(qn, connection)\n        if params:\n            params[0] = connection.ops.prep_for_iexact_query(params[0])\n        return rhs, params\n\n--- process_rhs (lines 333-359) ---\n    def process_rhs(self, compiler, connection):\n        db_rhs = getattr(self.rhs, '_db', None)\n        if db_rhs is not None and db_rhs != connection.alias:\n            raise ValueError(\n                \"Subqueries aren't allowed across different databases. Force \"\n                \"the inner query to be evaluated using `list(inner_query)`.\"\n            )\n\n        if self.rhs_is_direct_value():\n            try:\n                rhs = OrderedSet(self.rhs)\n            except TypeError:  # Unhashable items in self.rhs\n                rhs = self.rhs\n\n            if not rhs:\n                raise EmptyResultSet\n\n            # rhs should be an iterable; use batch_process_rhs() to\n            # prepare/transform those values.\n            sqls, sqls_params = self.batch_process_rhs(compiler, connection, rhs)\n            placeholder = '(' + ', '.join(sqls) + ')'\n            return (placeholder, sqls_params)\n        else:\n            if not getattr(self.rhs, 'has_select_fields', True):\n                self.rhs.clear_select_clause()\n                self.rhs.add_fields(['pk'])\n            return super().process_rhs(compiler, connection)\n\n--- process_rhs (lines 413-417) ---\n    def process_rhs(self, qn, connection):\n        rhs, params = super().process_rhs(qn, connection)\n        if self.rhs_is_direct_value() and params and not self.bilateral_transforms:\n            params[0] = self.param_pattern % connection.ops.prep_for_like_query(params[0])\n        return rhs, params"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the issue! The Exact.process_rhs method at lines 261-273 unconditionally clears the select clause and adds 'pk' field when the subquery has a limit. But the In.process_rhs method at lines 333-359 has the correct guard: `if not getattr(self.rhs, 'has_select_fields', True):` before clearing the select clause.\n\nLet me also check the In lookup to confirm the correct pattern:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0141RXhzJKhCJKefLkFRxidS",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/lookups.py"
+          },
+          "name": "get_classes_and_methods",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0141RXhzJKhCJKefLkFRxidS",
+          "content": "[exit_code=0]\nclass Lookup (line 15)\nclass Transform (line 143)\nclass BuiltinLookup (line 165)\nclass FieldGetDbPrepValueMixin (line 186)\nclass FieldGetDbPrepValueIterableMixin (line 206)\nclass Exact (line 258)\nclass IExact (line 277)\nclass GreaterThan (line 289)\nclass GreaterThanOrEqual (line 294)\nclass LessThan (line 299)\nclass LessThanOrEqual (line 304)\nclass IntegerFieldFloatRounding (line 308)\nclass IntegerGreaterThanOrEqual (line 320)\nclass IntegerLessThan (line 325)\nclass In (line 330)\nclass PatternLookup (line 393)\nclass Contains (line 421)\nclass IContains (line 426)\nclass StartsWith (line 431)\nclass IStartsWith (line 437)\nclass EndsWith (line 442)\nclass IEndsWith (line 448)\nclass Range (line 453)\nclass IsNull (line 461)\nclass Regex (line 474)\nclass IRegex (line 489)\nclass YearLookup (line 493)\nclass YearExact (line 525)\nclass YearGt (line 533)\nclass YearGte (line 538)\nclass YearLt (line 543)\nclass YearLte (line 548)\n  def __init__ (line 20)\n  def apply_bilateral_transforms (line 35)\n  def batch_process_rhs (line 40)\n  def get_source_expressions (line 57)\n  def set_source_expressions (line 62)\n  def get_prep_lookup (line 68)\n  def get_db_prep_lookup (line 75)\n  def process_lhs (line 78)\n  def process_rhs (line 84)\n  def rhs_is_direct_value (line 98)\n  def relabeled_clone (line 101)\n  def get_group_by_cols (line 108)\n  def as_sql (line 114)\n  def as_oracle (line 117)\n  def contains_aggregate (line 131)\n  def contains_over_clause (line 135)\n  def is_summary (line 139)\n  def lhs (line 152)\n  def get_bilateral_transforms (line 155)\n  def process_lhs (line 166)\n  def as_sql (line 175)\n  def get_rhs_op (line 182)\n  def get_db_prep_lookup (line 193)\n  def get_prep_lookup (line 213)\n  def process_rhs (line 227)\n  def resolve_expression_parameter (line 235)\n  def batch_process_rhs (line 243)\n  def process_rhs (line 261)\n  def process_rhs (line 281)\n  def get_prep_lookup (line 313)\n  def process_rhs (line 333)\n  def get_rhs_op (line 361)\n  def as_sql (line 364)\n  def split_parameter_list_as_sql (line 370)\n  def get_rhs_op (line 397)\n  def process_rhs (line 413)\n  def get_rhs_op (line 456)\n  def as_sql (line 465)\n  def as_sql (line 478)\n  def year_lookup_bounds (line 494)\n  def as_sql (line 502)\n  def get_direct_rhs_sql (line 516)\n  def get_bound_params (line 519)\n  def get_direct_rhs_sql (line 526)\n  def get_bound_params (line 529)\n  def get_bound_params (line 534)\n  def get_bound_params (line 539)\n  def get_bound_params (line 544)\n  def get_bound_params (line 549)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look specifically at the In class process_rhs method to confirm the pattern:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EzmQnPMu3dJUpJAdZiGBdc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/lookups.py",
+            "method_name": "In"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EzmQnPMu3dJUpJAdZiGBdc",
+          "content": "[exit_code=0]\nMethod not found: In"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get the In class by viewing a specific range:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011EKEukpLyLWUyusjnH46nT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '330,370p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011EKEukpLyLWUyusjnH46nT",
+          "content": "[exit_code=0]\nclass In(FieldGetDbPrepValueIterableMixin, BuiltinLookup):\n    lookup_name = 'in'\n\n    def process_rhs(self, compiler, connection):\n        db_rhs = getattr(self.rhs, '_db', None)\n        if db_rhs is not None and db_rhs != connection.alias:\n            raise ValueError(\n                \"Subqueries aren't allowed across different databases. Force \"\n                \"the inner query to be evaluated using `list(inner_query)`.\"\n            )\n\n        if self.rhs_is_direct_value():\n            try:\n                rhs = OrderedSet(self.rhs)\n            except TypeError:  # Unhashable items in self.rhs\n                rhs = self.rhs\n\n            if not rhs:\n                raise EmptyResultSet\n\n            # rhs should be an iterable; use batch_process_rhs() to\n            # prepare/transform those values.\n            sqls, sqls_params = self.batch_process_rhs(compiler, connection, rhs)\n            placeholder = '(' + ', '.join(sqls) + ')'\n            return (placeholder, sqls_params)\n        else:\n            if not getattr(self.rhs, 'has_select_fields', True):\n                self.rhs.clear_select_clause()\n                self.rhs.add_fields(['pk'])\n            return super().process_rhs(compiler, connection)\n\n    def get_rhs_op(self, connection, rhs):\n        return 'IN %s' % rhs\n\n    def as_sql(self, compiler, connection):\n        max_in_list_size = connection.ops.max_in_list_size()\n        if self.rhs_is_direct_value() and max_in_list_size and len(self.rhs) > max_in_list_size:\n            return self.split_parameter_list_as_sql(compiler, connection)\n        return super().as_sql(compiler, connection)\n\n    def split_parameter_list_as_sql(self, compiler, connection):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the difference clearly. The In.process_rhs method has the guard condition `if not getattr(self.rhs, 'has_select_fields', True):` before clearing the select clause and adding the pk field, while the Exact.process_rhs method doesn't have this guard.\n\n<think>\n1. Quote the exact buggy line(s) verbatim.\nLines 264-266 in Exact.process_rhs:\n```python\n# The subquery must select only the pk.\nself.rhs.clear_select_clause()\nself.rhs.add_fields(['pk'])\n```\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nLines 267-271:\n```python\nelse:\n    raise ValueError(\n        'The QuerySet value for an exact lookup must be limited to '\n        'one result using slicing.'\n    )\n```\nNo, my fix doesn't change what these lines receive.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nYes, this is pattern PA - adding a guard at the TOP of the problematic section to check if the subquery has selected fields before clearing them.\n\n4. Count the lines your fix changes. If more than 5, simplify.\nThis will be a 2-line change (adding the guard condition).\n</think>\n\nNow I'll produce the solution proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/lookups.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/lookups.py\",\n      \"location\": \"Exact.process_rhs, line 264\",\n      \"change\": \"REPLACE lines 264-266:\\n                # The subquery must select only the pk.\\n                self.rhs.clear_select_clause()\\n                self.rhs.add_fields(['pk'])\\nWITH:\\n                # Only clear select clause if no fields are already selected\\n                if not getattr(self.rhs, 'has_select_fields', True):\\n                    self.rhs.clear_select_clause()\\n                    self.rhs.add_fields(['pk'])\",\n      \"rationale\": \"The bug is caused by unconditionally clearing the select clause and adding pk field, which removes intentionally specified .values() fields and their associated GROUP BY clauses. The In.process_rhs method already has the correct pattern using has_select_fields guard to preserve existing selected fields. This fix follows the same pattern to maintain consistency across lookup types.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: Add a guard condition to preserve existing selected fields in subqueries, preventing the loss of intentional GROUP BY clauses when using exact lookups with annotated values queries.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T06:52:51Z"
+}

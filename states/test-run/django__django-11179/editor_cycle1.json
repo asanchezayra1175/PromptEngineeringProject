@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-11179",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py\nindex 92fe4affb9..aa9fc27896 100644\n--- a/django/db/models/deletion.py\n+++ b/django/db/models/deletion.py\n@@ -277,6 +277,7 @@ class Collector:\n             if self.can_fast_delete(instance):\n                 with transaction.mark_for_rollback_on_error():\n                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n+                    setattr(instance, model._meta.pk.attname, None)\n                 return count, {model._meta.label: count}",
+  "implementation_notes": "Added the missing PK clearing step in the fast delete optimization path. When a model instance with no dependencies is deleted, the instance's primary key is now properly set to None, matching the behavior of the regular deletion path.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-11179</instance_id>\n\n<problem_statement>\ndelete() on instances of models without any dependencies doesn't clear PKs.\nDescription\n\t\nDeleting any model with no dependencies not updates the PK on the model. It should be set to None after .delete() call.\nSee Django.db.models.deletion:276-281. Should update the model line 280.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The Collector.delete method has a fast delete optimization path for single instances with no dependencies. When this path is taken (lines 275-280), the instance is deleted from the database but the method returns early without clearing the instance's primary key attribute to None.\nExploration notes: The bug is in the fast delete optimization starting at line 275. The regular deletion path at lines 324-326 properly clears PKs using 'setattr(instance, model._meta.pk.attname, None)' but the fast delete path returns at line 280 without this cleanup. The can_fast_delete method determines whether the optimization is used. The fix should mimic the PK clearing logic from lines 324-326.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: add missing PK clearing step in fast delete early return path. The regular deletion path at line 326 properly clears instance PKs after deletion, but the fast delete optimization returns early without this cleanup. Adding one line to clear the PK maintains consistency between both deletion paths.\n\nFiles to modify: [\n  \"/testbed/django/db/models/deletion.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/deletion.py\n  Location: Collector.delete, line 279\n  Change  : INSERT after line 279:\n                setattr(instance, model._meta.pk.attname, None)\n  Rationale: The fast delete optimization path deletes the instance from the database but fails to clear the primary key on the model instance. This mimics the cleanup logic from line 326 that properly clears PKs in the regular deletion path.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation and then apply the proposed change.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01X64vGDwYZifFUWcCkcTW2C",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n django/db/models/deletion.py | sed -n '270,330p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01X64vGDwYZifFUWcCkcTW2C",
+          "content": "[exit_code=0]\n270\t        self.sort()\n   271\t        # number of objects deleted for each model label\n   272\t        deleted_counter = Counter()\n   273\t\n   274\t        # Optimize for the case with a single obj and no dependencies\n   275\t        if len(self.data) == 1 and len(instances) == 1:\n   276\t            instance = list(instances)[0]\n   277\t            if self.can_fast_delete(instance):\n   278\t                with transaction.mark_for_rollback_on_error():\n   279\t                    count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n   280\t                return count, {model._meta.label: count}\n   281\t\n   282\t        with transaction.atomic(using=self.using, savepoint=False):\n   283\t            # send pre_delete signals\n   284\t            for model, obj in self.instances_with_model():\n   285\t                if not model._meta.auto_created:\n   286\t                    signals.pre_delete.send(\n   287\t                        sender=model, instance=obj, using=self.using\n   288\t                    )\n   289\t\n   290\t            # fast deletes\n   291\t            for qs in self.fast_deletes:\n   292\t                count = qs._raw_delete(using=self.using)\n   293\t                deleted_counter[qs.model._meta.label] += count\n   294\t\n   295\t            # update fields\n   296\t            for model, instances_for_fieldvalues in self.field_updates.items():\n   297\t                for (field, value), instances in instances_for_fieldvalues.items():\n   298\t                    query = sql.UpdateQuery(model)\n   299\t                    query.update_batch([obj.pk for obj in instances],\n   300\t                                       {field.name: value}, self.using)\n   301\t\n   302\t            # reverse instance collections\n   303\t            for instances in self.data.values():\n   304\t                instances.reverse()\n   305\t\n   306\t            # delete instances\n   307\t            for model, instances in self.data.items():\n   308\t                query = sql.DeleteQuery(model)\n   309\t                pk_list = [obj.pk for obj in instances]\n   310\t                count = query.delete_batch(pk_list, self.using)\n   311\t                deleted_counter[model._meta.label] += count\n   312\t\n   313\t                if not model._meta.auto_created:\n   314\t                    for obj in instances:\n   315\t                        signals.post_delete.send(\n   316\t                            sender=model, instance=obj, using=self.using\n   317\t                        )\n   318\t\n   319\t        # update collected instances\n   320\t        for instances_for_fieldvalues in self.field_updates.values():\n   321\t            for (field, value), instances in instances_for_fieldvalues.items():\n   322\t                for obj in instances:\n   323\t                    setattr(obj, field.attname, value)\n   324\t        for model, instances in self.data.items():\n   325\t            for instance in instances:\n   326\t                setattr(instance, model._meta.pk.attname, None)\n   327\t        return sum(deleted_counter.values()), dict(deleted_counter)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the issue clearly. The fast delete optimization path (lines 275-280) returns early without clearing the primary key on the instance. The regular deletion path at line 326 properly clears the PK with `setattr(instance, model._meta.pk.attname, None)`. I need to add this same clearing step before the early return on line 280.\n\nLet me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01E4nLuwjC9RpMf6sJ8soXRZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/db/models/deletion.py', 'r') as f:\n    content = f.read()\n\n# Find the location to insert the line\n# We need to insert after line 279 (the count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using) line)\n# and before the return statement on line 280\n\n# Split by lines to be precise\nlines = content.split('\\n')\n\n# We need to find the exact line with \"count = sql.DeleteQuery(model).delete_batch\"\n# and insert the setattr line after it\n\nfor i, line in enumerate(lines):\n    if 'count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)' in line:\n        print(f\"Found the line at index {i}: {line}\")\n        # The next line should be the return statement\n        # We'll insert before the return\n        print(f\"Next line (index {i+1}): {lines[i+1]}\")\n        break\n\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01E4nLuwjC9RpMf6sJ8soXRZ",
+          "content": "[exit_code=0]\nFound the line at index 278:                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\nNext line (index 279):                 return count, {model._meta.label: count}"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I'll insert the line to clear the PK:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014YRwVBfP3vH6UwmtM5rNP7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/db/models/deletion.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line with \"count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\"\n# and insert the setattr line after it\n\nfor i, line in enumerate(lines):\n    if 'count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)' in line:\n        # Insert the new line after this one\n        # Need to determine the correct indentation\n        indent = len(line) - len(line.lstrip())\n        new_line = ' ' * indent + 'setattr(instance, model._meta.pk.attname, None)\\n'\n        lines.insert(i + 1, new_line)\n        break\n\n# Write the file back\nwith open('django/db/models/deletion.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"File modified successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014YRwVBfP3vH6UwmtM5rNP7",
+          "content": "[exit_code=0]\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018uQ3ePK2StEe21SxwvfzNf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n django/db/models/deletion.py | sed -n '270,330p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018uQ3ePK2StEe21SxwvfzNf",
+          "content": "[exit_code=0]\n270\t        self.sort()\n   271\t        # number of objects deleted for each model label\n   272\t        deleted_counter = Counter()\n   273\t\n   274\t        # Optimize for the case with a single obj and no dependencies\n   275\t        if len(self.data) == 1 and len(instances) == 1:\n   276\t            instance = list(instances)[0]\n   277\t            if self.can_fast_delete(instance):\n   278\t                with transaction.mark_for_rollback_on_error():\n   279\t                    count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n   280\t                    setattr(instance, model._meta.pk.attname, None)\n   281\t                return count, {model._meta.label: count}\n   282\t\n   283\t        with transaction.atomic(using=self.using, savepoint=False):\n   284\t            # send pre_delete signals\n   285\t            for model, obj in self.instances_with_model():\n   286\t                if not model._meta.auto_created:\n   287\t                    signals.pre_delete.send(\n   288\t                        sender=model, instance=obj, using=self.using\n   289\t                    )\n   290\t\n   291\t            # fast deletes\n   292\t            for qs in self.fast_deletes:\n   293\t                count = qs._raw_delete(using=self.using)\n   294\t                deleted_counter[qs.model._meta.label] += count\n   295\t\n   296\t            # update fields\n   297\t            for model, instances_for_fieldvalues in self.field_updates.items():\n   298\t                for (field, value), instances in instances_for_fieldvalues.items():\n   299\t                    query = sql.UpdateQuery(model)\n   300\t                    query.update_batch([obj.pk for obj in instances],\n   301\t                                       {field.name: value}, self.using)\n   302\t\n   303\t            # reverse instance collections\n   304\t            for instances in self.data.values():\n   305\t                instances.reverse()\n   306\t\n   307\t            # delete instances\n   308\t            for model, instances in self.data.items():\n   309\t                query = sql.DeleteQuery(model)\n   310\t                pk_list = [obj.pk for obj in instances]\n   311\t                count = query.delete_batch(pk_list, self.using)\n   312\t                deleted_counter[model._meta.label] += count\n   313\t\n   314\t                if not model._meta.auto_created:\n   315\t                    for obj in instances:\n   316\t                        signals.post_delete.send(\n   317\t                            sender=model, instance=obj, using=self.using\n   318\t                        )\n   319\t\n   320\t        # update collected instances\n   321\t        for instances_for_fieldvalues in self.field_updates.values():\n   322\t            for (field, value), instances in instances_for_fieldvalues.items():\n   323\t                for obj in instances:\n   324\t                    setattr(obj, field.attname, value)\n   325\t        for model, instances in self.data.items():\n   326\t            for instance in instances:\n   327\t                setattr(instance, model._meta.pk.attname, None)\n   328\t        return sum(deleted_counter.values()), dict(deleted_counter)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run git diff to verify the exact change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BDJGqU7D1MD4JknvH3zvky",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BDJGqU7D1MD4JknvH3zvky",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/deletion.py b/django/db/models/deletion.py\nindex 92fe4affb9..aa9fc27896 100644\n--- a/django/db/models/deletion.py\n+++ b/django/db/models/deletion.py\n@@ -277,6 +277,7 @@ class Collector:\n             if self.can_fast_delete(instance):\n                 with transaction.mark_for_rollback_on_error():\n                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n+                    setattr(instance, model._meta.pk.attname, None)\n                 return count, {model._meta.label: count}\n \n         with transaction.atomic(using=self.using, savepoint=False):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. The line `setattr(instance, model._meta.pk.attname, None)` has been inserted after the delete operation in the fast delete optimization path, ensuring that the primary key is cleared on the model instance just like in the regular deletion path.\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py\\nindex 92fe4affb9..aa9fc27896 100644\\n--- a/django/db/models/deletion.py\\n+++ b/django/db/models/deletion.py\\n@@ -277,6 +277,7 @@ class Collector:\\n             if self.can_fast_delete(instance):\\n                 with transaction.mark_for_rollback_on_error():\\n                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\\n+                    setattr(instance, model._meta.pk.attname, None)\\n                 return count, {model._meta.label: count}\",\n  \"implementation_notes\": \"Added the missing PK clearing step in the fast delete optimization path. When a model instance with no dependencies is deleted, the instance's primary key is now properly set to None, matching the behavior of the regular deletion path.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T06:20:23Z"
+}

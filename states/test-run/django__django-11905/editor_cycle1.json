@@ -1,0 +1,274 @@
+{
+  "instance_id": "django__django-11905",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py\nindex 9344979c56..572ec14c5e 100644\n--- a/django/db/models/lookups.py\n+++ b/django/db/models/lookups.py\n@@ -9,6 +9,7 @@ from django.db.models.fields import (\n )\n from django.db.models.query_utils import RegisterLookupMixin\n from django.utils.datastructures import OrderedSet\n+from django.utils.deprecation import RemovedInDjango40Warning\n from django.utils.functional import cached_property\n \n \n@@ -464,6 +465,11 @@ class IsNull(BuiltinLookup):\n \n     def as_sql(self, compiler, connection):\n         sql, params = compiler.compile(self.lhs)\n+        if not isinstance(self.rhs, bool):\n+            raise RemovedInDjango40Warning(\n+                'The QuerySet value for an isnull lookup must be True or '\n+                'False.'\n+            )\n         if self.rhs:\n             return \"%s IS NULL\" % sql, params\n         else:",
+  "implementation_notes": "Added import for RemovedInDjango40Warning and added validation in IsNull.as_sql method to raise a deprecation warning when self.rhs is not a boolean value. This prevents non-boolean values from being used with __isnull lookup and ensures consistent behavior.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-11905</instance_id>\n\n<problem_statement>\nPrevent using __isnull lookup with non-boolean value.\nDescription\n\t \n\t\t(last modified by Mariusz Felisiak)\n\t \n__isnull should not allow for non-boolean values. Using truthy/falsey doesn't promote INNER JOIN to an OUTER JOIN but works fine for a simple queries. Using non-boolean values is \u200bundocumented and untested. IMO we should raise an error for non-boolean values to avoid confusion and for consistency.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The IsNull lookup's as_sql method accepts any value for self.rhs and uses its truthiness to determine SQL generation. When self.rhs evaluates to truthy, it generates 'IS NULL', and when falsy, it generates 'IS NOT NULL'. This allows non-boolean values like strings, integers, or other objects to be passed, which creates inconsistent behavior and can cause join promotion issues.\nExploration notes: The IsNull class is located in /testbed/django/db/models/lookups.py at lines 461-470. The as_sql method uses 'if self.rhs:' on line 467 without type checking. According to the PR #11873 discussion, the fix involves adding isinstance(self.rhs, bool) validation before the SQL generation. The method should raise either ValueError or RemovedInDjango40Warning for non-boolean values.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard placed at wrong level: Add isinstance(self.rhs, bool) validation guard at the top of IsNull.as_sql method before SQL generation. This prevents non-boolean values from causing inconsistent join promotion behavior while maintaining backward compatibility through deprecation warning.\n\nFiles to modify: [\n  \"/testbed/django/db/models/lookups.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/lookups.py\n  Location: import section, after line 11\n  Change  : INSERT after line 11:\nfrom django.utils.deprecation import RemovedInDjango40Warning\n  Rationale: Import needed for the deprecation warning that will be raised for non-boolean values\n\nChange 2:\n  File    : /testbed/django/db/models/lookups.py\n  Location: IsNull.as_sql, after line 465\n  Change  : INSERT after line 465:\n        if not isinstance(self.rhs, bool):\n            raise RemovedInDjango40Warning(\n                'The QuerySet value for an isnull lookup must be True or '\n                'False.'\n            )\n  Rationale: Root cause: IsNull.as_sql accepts any value and uses truthiness to generate SQL, causing inconsistent behavior. This pattern (PA - validation guard at method top) protects all callers by validating self.rhs is boolean before SQL generation. The deprecation warning follows maintainer constraints to deprecate in 3.1 and remove in 4.0.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution by first reading the file to understand its structure, then applying the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QPgvdujaf4uyDEpgSUy7ja",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -50 django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QPgvdujaf4uyDEpgSUy7ja",
+          "content": "[exit_code=0]\nimport itertools\nimport math\nfrom copy import copy\n\nfrom django.core.exceptions import EmptyResultSet\nfrom django.db.models.expressions import Case, Exists, Func, Value, When\nfrom django.db.models.fields import (\n    BooleanField, CharField, DateTimeField, Field, IntegerField, UUIDField,\n)\nfrom django.db.models.query_utils import RegisterLookupMixin\nfrom django.utils.datastructures import OrderedSet\nfrom django.utils.functional import cached_property\n\n\nclass Lookup:\n    lookup_name = None\n    prepare_rhs = True\n    can_use_none_as_rhs = False\n\n    def __init__(self, lhs, rhs):\n        self.lhs, self.rhs = lhs, rhs\n        self.rhs = self.get_prep_lookup()\n        if hasattr(self.lhs, 'get_bilateral_transforms'):\n            bilateral_transforms = self.lhs.get_bilateral_transforms()\n        else:\n            bilateral_transforms = []\n        if bilateral_transforms:\n            # Warn the user as soon as possible if they are trying to apply\n            # a bilateral transformation on a nested QuerySet: that won't work.\n            from django.db.models.sql.query import Query  # avoid circular import\n            if isinstance(rhs, Query):\n                raise NotImplementedError(\"Bilateral transformations on nested querysets are not implemented.\")\n        self.bilateral_transforms = bilateral_transforms\n\n    def apply_bilateral_transforms(self, value):\n        for transform in self.bilateral_transforms:\n            value = transform(value)\n        return value\n\n    def batch_process_rhs(self, compiler, connection, rhs=None):\n        if rhs is None:\n            rhs = self.rhs\n        if self.bilateral_transforms:\n            sqls, sqls_params = [], []\n            for p in rhs:\n                value = Value(p, output_field=self.lhs.output_field)\n                value = self.apply_bilateral_transforms(value)\n                value = value.resolve_expression(compiler.query)\n                sql, sql_params = compiler.compile(value)\n                sqls.append(sql)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me find the IsNull class around line 461-470:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MMYKoJNbYjARVpgezHQTaA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '450,480p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MMYKoJNbYjARVpgezHQTaA",
+          "content": "[exit_code=0]\n@Field.register_lookup\nclass Range(FieldGetDbPrepValueIterableMixin, BuiltinLookup):\n    lookup_name = 'range'\n\n    def get_rhs_op(self, connection, rhs):\n        return \"BETWEEN %s AND %s\" % (rhs[0], rhs[1])\n\n\n@Field.register_lookup\nclass IsNull(BuiltinLookup):\n    lookup_name = 'isnull'\n    prepare_rhs = False\n\n    def as_sql(self, compiler, connection):\n        sql, params = compiler.compile(self.lhs)\n        if self.rhs:\n            return \"%s IS NULL\" % sql, params\n        else:\n            return \"%s IS NOT NULL\" % sql, params\n\n\n@Field.register_lookup\nclass Regex(BuiltinLookup):\n    lookup_name = 'regex'\n    prepare_rhs = False\n\n    def as_sql(self, compiler, connection):\n        if self.lookup_name in connection.operators:\n            return super().as_sql(compiler, connection)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me check if the deprecation warning is already imported:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CbhVhPrvspJb17jKZGSZeH",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"RemovedInDjango40Warning\" django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CbhVhPrvspJb17jKZGSZeH",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "It's not imported yet. Let me check the exact import structure:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01NNbtRrSD8XPjdryFDtt5P5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1,15p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NNbtRrSD8XPjdryFDtt5P5",
+          "content": "[exit_code=0]\nimport itertools\nimport math\nfrom copy import copy\n\nfrom django.core.exceptions import EmptyResultSet\nfrom django.db.models.expressions import Case, Exists, Func, Value, When\nfrom django.db.models.fields import (\n    BooleanField, CharField, DateTimeField, Field, IntegerField, UUIDField,\n)\nfrom django.db.models.query_utils import RegisterLookupMixin\nfrom django.utils.datastructures import OrderedSet\nfrom django.utils.functional import cached_property\n\n\nclass Lookup:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I'll add the import after line 11 (after the django.utils.datastructures import) and then modify the IsNull.as_sql method. Let me use Python to do this properly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017hyimpZ4QqRrgVWx1QJCzn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/db/models/lookups.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line to insert the import after (line 11, which is index 11)\n# Line 12 is 'from django.utils.datastructures import OrderedSet'\n# We need to add the import after line 12\n\nimport_added = False\nfor i, line in enumerate(lines):\n    if 'from django.utils.datastructures import OrderedSet' in line:\n        # Insert after this line\n        lines.insert(i + 1, 'from django.utils.deprecation import RemovedInDjango40Warning\\n')\n        import_added = True\n        break\n\nif not import_added:\n    print(\"ERROR: Could not find import line\")\n    exit(1)\n\n# Now find the IsNull.as_sql method and add validation\nisnull_found = False\nas_sql_found = False\nfor i, line in enumerate(lines):\n    if 'class IsNull(BuiltinLookup):' in line:\n        isnull_found = True\n    if isnull_found and 'def as_sql(self, compiler, connection):' in line:\n        as_sql_found = True\n        # Find the next line (sql, params = compiler.compile(self.lhs))\n        # and insert after it\n        if i + 1 < len(lines):\n            # Insert the validation after line: sql, params = compiler.compile(self.lhs)\n            lines.insert(i + 2, '        if not isinstance(self.rhs, bool):\\n')\n            lines.insert(i + 3, \"            raise RemovedInDjango40Warning(\\n\")\n            lines.insert(i + 4, \"                'The QuerySet value for an isnull lookup must be True or '\\n\")\n            lines.insert(i + 5, \"                'False.'\\n\")\n            lines.insert(i + 6, \"            )\\n\")\n            break\n\nif not as_sql_found:\n    print(\"ERROR: Could not find IsNull.as_sql method\")\n    exit(1)\n\n# Write the file back\nwith open('django/db/models/lookups.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"File successfully modified\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017hyimpZ4QqRrgVWx1QJCzn",
+          "content": "[exit_code=0]\nFile successfully modified"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes by looking at the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012iKQaBjea6wnrNDwME7HrY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1,20p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012iKQaBjea6wnrNDwME7HrY",
+          "content": "[exit_code=0]\nimport itertools\nimport math\nfrom copy import copy\n\nfrom django.core.exceptions import EmptyResultSet\nfrom django.db.models.expressions import Case, Exists, Func, Value, When\nfrom django.db.models.fields import (\n    BooleanField, CharField, DateTimeField, Field, IntegerField, UUIDField,\n)\nfrom django.db.models.query_utils import RegisterLookupMixin\nfrom django.utils.datastructures import OrderedSet\nfrom django.utils.deprecation import RemovedInDjango40Warning\nfrom django.utils.functional import cached_property\n\n\nclass Lookup:\n    lookup_name = None\n    prepare_rhs = True\n    can_use_none_as_rhs = False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me check the IsNull class modification:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01E5G5DU8b6fRAdoE4tGuoCM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '450,480p' django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01E5G5DU8b6fRAdoE4tGuoCM",
+          "content": "[exit_code=0]\nlookup_name = 'iendswith'\n\n\n@Field.register_lookup\nclass Range(FieldGetDbPrepValueIterableMixin, BuiltinLookup):\n    lookup_name = 'range'\n\n    def get_rhs_op(self, connection, rhs):\n        return \"BETWEEN %s AND %s\" % (rhs[0], rhs[1])\n\n\n@Field.register_lookup\nclass IsNull(BuiltinLookup):\n    lookup_name = 'isnull'\n    prepare_rhs = False\n\n    def as_sql(self, compiler, connection):\n        sql, params = compiler.compile(self.lhs)\n        if not isinstance(self.rhs, bool):\n            raise RemovedInDjango40Warning(\n                'The QuerySet value for an isnull lookup must be True or '\n                'False.'\n            )\n        if self.rhs:\n            return \"%s IS NULL\" % sql, params\n        else:\n            return \"%s IS NOT NULL\" % sql, params\n\n\n@Field.register_lookup\nclass Regex(BuiltinLookup):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes look good. Now let me run git diff to verify the complete changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019LumQWXh9JRhot7AMF4oWx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019LumQWXh9JRhot7AMF4oWx",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/lookups.py b/django/db/models/lookups.py\nindex 9344979c56..572ec14c5e 100644\n--- a/django/db/models/lookups.py\n+++ b/django/db/models/lookups.py\n@@ -9,6 +9,7 @@ from django.db.models.fields import (\n )\n from django.db.models.query_utils import RegisterLookupMixin\n from django.utils.datastructures import OrderedSet\n+from django.utils.deprecation import RemovedInDjango40Warning\n from django.utils.functional import cached_property\n \n \n@@ -464,6 +465,11 @@ class IsNull(BuiltinLookup):\n \n     def as_sql(self, compiler, connection):\n         sql, params = compiler.compile(self.lhs)\n+        if not isinstance(self.rhs, bool):\n+            raise RemovedInDjango40Warning(\n+                'The QuerySet value for an isnull lookup must be True or '\n+                'False.'\n+            )\n         if self.rhs:\n             return \"%s IS NULL\" % sql, params\n         else:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly what was requested:\n\n1. Added the import `from django.utils.deprecation import RemovedInDjango40Warning` after line 11 (the OrderedSet import)\n2. Added the validation check in the `IsNull.as_sql` method right after the `sql, params = compiler.compile(self.lhs)` line to raise `RemovedInDjango40Warning` when `self.rhs` is not a boolean\n\nThe implementation follows the solution proposal exactly and prevents using `__isnull` lookup with non-boolean values by raising a deprecation warning (which will eventually become an error in Django 4.0).\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py\\nindex 9344979c56..572ec14c5e 100644\\n--- a/django/db/models/lookups.py\\n+++ b/django/db/models/lookups.py\\n@@ -9,6 +9,7 @@ from django.db.models.fields import (\\n )\\n from django.db.models.query_utils import RegisterLookupMixin\\n from django.utils.datastructures import OrderedSet\\n+from django.utils.deprecation import RemovedInDjango40Warning\\n from django.utils.functional import cached_property\\n \\n \\n@@ -464,6 +465,11 @@ class IsNull(BuiltinLookup):\\n \\n     def as_sql(self, compiler, connection):\\n         sql, params = compiler.compile(self.lhs)\\n+        if not isinstance(self.rhs, bool):\\n+            raise RemovedInDjango40Warning(\\n+                'The QuerySet value for an isnull lookup must be True or '\\n+                'False.'\\n+            )\\n         if self.rhs:\\n             return \\\"%s IS NULL\\\" % sql, params\\n         else:\",\n  \"implementation_notes\": \"Added import for RemovedInDjango40Warning and added validation in IsNull.as_sql method to raise a deprecation warning when self.rhs is not a boolean value. This prevents non-boolean values from being used with __isnull lookup and ensures consistent behavior.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T07:07:54Z"
+}

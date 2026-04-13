@@ -1,0 +1,163 @@
+{
+  "instance_id": "django__django-11797",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PA \u2014 None/empty guard",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-11797</instance_id>\n\n<problem_statement>\nFiltering on query result overrides GROUP BY of internal query\nDescription\n\t\nfrom django.contrib.auth import models\na = models.User.objects.filter(email__isnull=True).values('email').annotate(m=Max('id')).values('m')\nprint(a.query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\"\nprint(a[:1].query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\" LIMIT 1\nb = models.User.objects.filter(id=a[:1])\nprint(b.query) # GROUP BY U0.\"id\" should be GROUP BY U0.\"email\"\n# SELECT ... FROM \"auth_user\" WHERE \"auth_user\".\"id\" = (SELECT U0.\"id\" FROM \"auth_user\" U0 WHERE U0.\"email\" IS NULL GROUP BY U0.\"id\" LIMIT 1)\n\n</problem_statement>\n\n<hints>\nWorkaround: from django.contrib.auth import models a = models.User.objects.filter(email__isnull=True).values('email').aggregate(Max('id'))['id_max'] b = models.User.objects.filter(id=a)\nThanks for tackling that one James! If I can provide you some guidance I'd suggest you have a look at lookups.Exact.process_rhs \u200bhttps://github.com/django/django/blob/ea25bdc2b94466bb1563000bf81628dea4d80612/django/db/models/lookups.py#L265-L267 We probably don't want to perform the clear_select_clause and add_fields(['pk']) when the query is already selecting fields. That's exactly what In.process_rhs \u200bdoes already by only performing these operations if not getattr(self.rhs, 'has_select_fields', True).\nThanks so much for the help Simon! This is a great jumping-off point. There's something that I'm unclear about, which perhaps you can shed some light on. While I was able to replicate the bug with 2.2, when I try to create a test on Master to validate the bug, the group-by behavior seems to have changed. Here's the test that I created: def test_exact_selected_field_rhs_subquery(self): author_1 = Author.objects.create(name='one') author_2 = Author.objects.create(name='two') max_ids = Author.objects.filter(alias__isnull=True).values('alias').annotate(m=Max('id')).values('m') authors = Author.objects.filter(id=max_ids[:1]) self.assertFalse(str(max_ids.query)) # This was just to force the test-runner to output the query. self.assertEqual(authors[0], author_2) And here's the resulting query: SELECT MAX(\"lookup_author\".\"id\") AS \"m\" FROM \"lookup_author\" WHERE \"lookup_author\".\"alias\" IS NULL GROUP BY \"lookup_author\".\"alias\", \"lookup_author\".\"name\" It no longer appears to be grouping by the 'alias' field listed in the initial .values() preceeding the .annotate(). I looked at the docs and release notes to see if there was a behavior change, but didn't see anything listed. Do you know if I'm just misunderstanding what's happening here? Or does this seem like a possible regression?\nIt's possible that a regression was introduced in between. Could you try bisecting the commit that changed the behavior \u200bhttps://docs.djangoproject.com/en/dev/internals/contributing/triaging-tickets/#bisecting-a-regression\nMmm actually disregard that. The second value in the GROUP BY is due to the ordering value in the Author class's Meta class. class Author(models.Model): name = models.CharField(max_length=100) alias = models.CharField(max_length=50, null=True, blank=True) class Meta: ordering = ('name',) Regarding the bug in question in this ticket, what should the desired behavior be if the inner query is returning multiple fields? With the fix, which allows the inner query to define a field to return/group by, if there are multiple fields used then it will throw a sqlite3.OperationalError: row value misused. Is this the desired behavior or should it avoid this problem by defaulting back to pk if more than one field is selected?\nI think that we should only default to pk if no fields are selected. The ORM has preliminary support for multi-column lookups and other interface dealing with subqueries doesn't prevent passing queries with multiple fields so I'd stick to the current __in lookup behavior.\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/db/models/lookups.py\"]\nBug analysis: The Exact.process_rhs method unconditionally calls clear_select_clause() and add_fields(['pk']) when the subquery has limit one, which removes any existing GROUP BY clauses that depend on selected fields. When filtering with a subquery that has .values('email').annotate(m=Max('id')), the GROUP BY email clause gets replaced with GROUP BY pk.\nExploration notes: The bug is at lines 265-267 in Exact.process_rhs. The In.process_rhs method at line 356 shows the correct pattern: 'if not getattr(self.rhs, 'has_select_fields', True):' before clearing select clause. The Exact class should use the same has_select_fields check to preserve existing selected fields and their associated GROUP BY clauses.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA: Add a guard condition to preserve existing selected fields in subqueries, preventing the loss of intentional GROUP BY clauses when using exact lookups with annotated values queries.\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/db/models/lookups.py\",\n    \"location\": \"Exact.process_rhs, line 264\",\n    \"change\": \"REPLACE lines 264-266:\\n                # The subquery must select only the pk.\\n                self.rhs.clear_select_clause()\\n                self.rhs.add_fields(['pk'])\\nWITH:\\n                # Only clear select clause if no fields are already selected\\n                if not getattr(self.rhs, 'has_select_fields', True):\\n                    self.rhs.clear_select_clause()\\n                    self.rhs.add_fields(['pk'])\",\n    \"rationale\": \"The bug is caused by unconditionally clearing the select clause and adding pk field, which removes intentionally specified .values() fields and their associated GROUP BY clauses. The In.process_rhs method already has the correct pattern using has_select_fields guard to preserve existing selected fields. This fix follows the same pattern to maintain consistency across lookup types.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/db/models/lookups.py b/django/db/models/lookups.py\nindex 105dc93251..43b18150ab 100644\n--- a/django/db/models/lookups.py\n+++ b/django/db/models/lookups.py\n@@ -262,9 +262,10 @@ class Exact(FieldGetDbPrepValueMixin, BuiltinLookup):\n         from django.db.models.sql.query import Query\n         if isinstance(self.rhs, Query):\n             if self.rhs.has_limit_one():\n-                # The subquery must select only the pk.\n-                self.rhs.clear_select_clause()\n-                self.rhs.add_fields(['pk'])\n+                # Only clear select clause if no fields are already selected\n+                if not getattr(self.rhs, 'has_select_fields', True):\n+                    self.rhs.clear_select_clause()\n+                    self.rhs.add_fields(['pk'])\n             else:\n                 raise ValueError(\n                     'The QuerySet value for an exact lookup must be limited to '\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the patch by examining the relevant code changes and context.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016sDMPBqcR4M121KXb7C2Qe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/django/db/models/lookups.py | sed -n '250,290p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        },
+        {
+          "id": "toolu_018UxhLCQvdPc9MgYdhksW6T",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/django/db/models/lookups.py | sed -n '340,380p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016sDMPBqcR4M121KXb7C2Qe",
+          "content": "[exit_code=0]\n250\t            self.resolve_expression_parameter(compiler, connection, sql, param)\n   251\t            for sql, param in zip(*pre_processed)\n   252\t        ))\n   253\t        params = itertools.chain.from_iterable(params)\n   254\t        return sql, tuple(params)\n   255\t\n   256\t\n   257\t@Field.register_lookup\n   258\tclass Exact(FieldGetDbPrepValueMixin, BuiltinLookup):\n   259\t    lookup_name = 'exact'\n   260\t\n   261\t    def process_rhs(self, compiler, connection):\n   262\t        from django.db.models.sql.query import Query\n   263\t        if isinstance(self.rhs, Query):\n   264\t            if self.rhs.has_limit_one():\n   265\t                # Only clear select clause if no fields are already selected\n   266\t                if not getattr(self.rhs, 'has_select_fields', True):\n   267\t                    self.rhs.clear_select_clause()\n   268\t                    self.rhs.add_fields(['pk'])\n   269\t            else:\n   270\t                raise ValueError(\n   271\t                    'The QuerySet value for an exact lookup must be limited to '\n   272\t                    'one result using slicing.'\n   273\t                )\n   274\t        return super().process_rhs(compiler, connection)\n   275\t\n   276\t\n   277\t@Field.register_lookup\n   278\tclass IExact(BuiltinLookup):\n   279\t    lookup_name = 'iexact'\n   280\t    prepare_rhs = False\n   281\t\n   282\t    def process_rhs(self, qn, connection):\n   283\t        rhs, params = super().process_rhs(qn, connection)\n   284\t        if params:\n   285\t            params[0] = connection.ops.prep_for_iexact_query(params[0])\n   286\t        return rhs, params\n   287\t\n   288\t\n   289\t@Field.register_lookup\n   290\tclass GreaterThan(FieldGetDbPrepValueMixin, BuiltinLookup):"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018UxhLCQvdPc9MgYdhksW6T",
+          "content": "[exit_code=0]\n340\t            )\n   341\t\n   342\t        if self.rhs_is_direct_value():\n   343\t            try:\n   344\t                rhs = OrderedSet(self.rhs)\n   345\t            except TypeError:  # Unhashable items in self.rhs\n   346\t                rhs = self.rhs\n   347\t\n   348\t            if not rhs:\n   349\t                raise EmptyResultSet\n   350\t\n   351\t            # rhs should be an iterable; use batch_process_rhs() to\n   352\t            # prepare/transform those values.\n   353\t            sqls, sqls_params = self.batch_process_rhs(compiler, connection, rhs)\n   354\t            placeholder = '(' + ', '.join(sqls) + ')'\n   355\t            return (placeholder, sqls_params)\n   356\t        else:\n   357\t            if not getattr(self.rhs, 'has_select_fields', True):\n   358\t                self.rhs.clear_select_clause()\n   359\t                self.rhs.add_fields(['pk'])\n   360\t            return super().process_rhs(compiler, connection)\n   361\t\n   362\t    def get_rhs_op(self, connection, rhs):\n   363\t        return 'IN %s' % rhs\n   364\t\n   365\t    def as_sql(self, compiler, connection):\n   366\t        max_in_list_size = connection.ops.max_in_list_size()\n   367\t        if self.rhs_is_direct_value() and max_in_list_size and len(self.rhs) > max_in_list_size:\n   368\t            return self.split_parameter_list_as_sql(compiler, connection)\n   369\t        return super().as_sql(compiler, connection)\n   370\t\n   371\t    def split_parameter_list_as_sql(self, compiler, connection):\n   372\t        # This is a special case for databases which limit the number of\n   373\t        # elements which can appear in an 'IN' clause.\n   374\t        max_in_list_size = connection.ops.max_in_list_size()\n   375\t        lhs, lhs_params = self.process_lhs(compiler, connection)\n   376\t        rhs, rhs_params = self.batch_process_rhs(compiler, connection)\n   377\t        in_clause_elements = ['(']\n   378\t        params = []\n   379\t        for offset in range(0, len(rhs_params), max_in_list_size):\n   380\t            if offset > 0:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_015AZYzGMyLCPwYTJvewcCnD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"has_select_fields\" /testbed/django/db/models/sql/query.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015AZYzGMyLCPwYTJvewcCnD",
+          "content": "[exit_code=0]\n245:    def has_select_fields(self):\n1111:            if (isinstance(value, Query) and not value.has_select_fields and"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01R1YFZxMGcJmLJCsyKpcqCv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/django/db/models/sql/query.py | sed -n '240,260p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01R1YFZxMGcJmLJCsyKpcqCv",
+          "content": "[exit_code=0]\n240\t            return self.select[0].field\n   241\t        elif len(self.annotation_select) == 1:\n   242\t            return next(iter(self.annotation_select.values())).output_field\n   243\t\n   244\t    @property\n   245\t    def has_select_fields(self):\n   246\t        return bool(self.select or self.annotation_select_mask or self.extra_select_mask)\n   247\t\n   248\t    @cached_property\n   249\t    def base_table(self):\n   250\t        for alias in self.alias_map:\n   251\t            return alias\n   252\t\n   253\t    def __str__(self):\n   254\t        \"\"\"\n   255\t        Return the query as a string of SQL with the parameter values\n   256\t        substituted in (use sql_with_params() to see the unsubstituted string).\n   257\t\n   258\t        Parameter values won't necessarily be quoted correctly, since that is\n   259\t        done by the database interface at execution time.\n   260\t        \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow let me analyze the patch:\n\n1. **What the PR changed (from hints)**: The hints describe how `Exact.process_rhs` unconditionally calls `clear_select_clause()` and `add_fields(['pk'])` when the subquery has limit one, removing any existing GROUP BY clauses.\n\n2. **The fix pattern**: PA \u2014 None/empty guard \u2014 adding a guard condition to preserve existing selected fields.\n\n3. **Analysis**:\n   - The `In.process_rhs` already uses `if not getattr(self.rhs, 'has_select_fields', True):`\n   - `has_select_fields` is a property in `Query` class (line 245 of query.py) that returns `bool(self.select or self.annotation_select_mask or self.extra_select_mask)`\n   - For a query like `filter(email__isnull=True).values('email').annotate(m=Max('id')).values('m')`, which uses `.values('m')`, the `annotation_select_mask` would be set, so `has_select_fields` would be `True`\n   - When `has_select_fields` is `True`, the condition `not getattr(self.rhs, 'has_select_fields', True)` evaluates to `False`, so the clear/add_fields is skipped \u2014 exactly what we want\n\n4. **Correctness**: The fix correctly guards the clear_select_clause/add_fields with the same check used in `In.process_rhs`. When the inner query already has select fields (like after `.values('m')`), the GROUP BY is preserved.\n\n5. **Completeness**: The fix covers the case where `has_select_fields` is True (query already has selected fields). The default value for `getattr` is `True`, which means if the attribute doesn't exist, it defaults to not clearing the select clause \u2014 this is safe and consistent with `In.process_rhs`.\n\n6. **Alignment**: The patch exactly matches what the Architect proposed and what the hints suggest (using the same pattern as `In.process_rhs`).\n\n7. **Safety**: The change is minimal. For queries that don't have selected fields (plain QuerySet without `.values()`), `has_select_fields` would be `False`, and the original behavior (clear + add pk) is preserved. For queries with selected fields (after `.values()` or `.annotate()`), the GROUP BY is preserved.\n\nThe fix looks correct, complete, aligned with the proposal, and safe. Let me verify `has_select_fields` behavior for a regular Query without `.values()`.\n\nFor a plain `queryset.filter(...)[:1]`:\n- `self.select` would be empty (no explicit select)\n- `self.annotation_select_mask` would be `None` (not set)  \n- `self.extra_select_mask` would be `None` (not set)\n- So `has_select_fields` would return `bool([] or None or None)` = `False`\n- `not False` = `True`, so clear_select_clause and add_fields(['pk']) would still be called - maintaining backward compatibility\n\nFor a query with `.values('m')`:\n- `annotation_select_mask` would be set (non-None/non-empty)\n- `has_select_fields` would return `True`\n- `not True` = `False`, so clear/add_fields is skipped - fixing the bug\n\nThis is correct behavior. The fix is sound.\n</think>\n\nNow let me check the `has_select_fields` property more carefully to understand what happens for different query types:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CathEPYwi6ujmh9zFeovGP",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"annotation_select_mask\\|extra_select_mask\" /testbed/django/db/models/sql/query.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CathEPYwi6ujmh9zFeovGP",
+          "content": "[exit_code=0]\n209:        self.annotation_select_mask = None\n220:        self.extra_select_mask = None\n246:        return bool(self.select or self.annotation_select_mask or self.extra_select_mask)\n308:        if self.annotation_select_mask is None:\n309:            obj.annotation_select_mask = None\n311:            obj.annotation_select_mask = self.annotation_select_mask.copy()\n319:        if self.extra_select_mask is None:\n320:            obj.extra_select_mask = None\n322:            obj.extra_select_mask = self.extra_select_mask.copy()\n465:                annotation_select_mask = inner_query.annotation_select_mask\n470:                    annotation_select_mask.remove(alias)\n472:                inner_query.set_annotation_mask(inner_query.annotation_select_mask)\n473:            if inner_query.select == () and not inner_query.default_cols and not inner_query.annotation_select_mask:\n626:        extra_select_mask = set()\n627:        if self.extra_select_mask is not None:\n628:            extra_select_mask.update(self.extra_select_mask)\n629:        if rhs.extra_select_mask is not None:\n630:            extra_select_mask.update(rhs.extra_select_mask)\n631:        if extra_select_mask:\n632:            self.set_extra_mask(extra_select_mask)\n2060:            self.annotation_select_mask = None\n2062:            self.annotation_select_mask = set(names)\n2066:        if self.annotation_select_mask is not None:\n2067:            self.set_annotation_mask(self.annotation_select_mask.union(names))\n2075:            self.extra_select_mask = None\n2077:            self.extra_select_mask = set(names)\n2125:        elif self.annotation_select_mask is not None:\n2128:                if k in self.annotation_select_mask\n2140:        elif self.extra_select_mask is not None:\n2143:                if k in self.extra_select_mask"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The analysis is complete. Let me summarize my findings:\n\n**What the patch does**: In `Exact.process_rhs`, it adds a guard `if not getattr(self.rhs, 'has_select_fields', True):` before clearing the select clause and adding the pk field. This mirrors the exact same pattern already used in `In.process_rhs` (line 357).\n\n**Correctness**: \n- For a plain QuerySet (no `.values()`): `annotation_select_mask` is `None`, `select` is empty \u2192 `has_select_fields` returns `False` \u2192 original behavior preserved (clear + add pk)\n- For a QuerySet with `.values('email').annotate(m=Max('id')).values('m')`: `annotation_select_mask` is set \u2192 `has_select_fields` returns `True` \u2192 the clear/add_fields is skipped, preserving the GROUP BY clause\n\n**Alignment**: The fix exactly matches what the Architect proposed and what the hints recommend \u2014 using the same `has_select_fields` guard pattern from `In.process_rhs`.\n\n**Safety**: Minimal change. Backward compatible for queries without explicit field selections. The `getattr` default of `True` (safe default, don't clear) is consistent with `In.process_rhs`.\n\n**Completeness**: The fix fully addresses the root cause \u2014 the unconditional clearing of the select clause in `Exact.process_rhs` \u2014 using the same well-tested pattern from the `In` lookup.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PA \u2014 None/empty guard\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T06:53:36Z"
+}

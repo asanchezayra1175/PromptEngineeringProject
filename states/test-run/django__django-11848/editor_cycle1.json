@@ -1,0 +1,212 @@
+{
+  "instance_id": "django__django-11848",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/utils/http.py b/django/utils/http.py\nindex 572cfb4347..c2187c33b2 100644\n--- a/django/utils/http.py\n+++ b/django/utils/http.py\n@@ -176,10 +176,12 @@ def parse_http_date(date):\n     try:\n         year = int(m.group('year'))\n         if year < 100:\n-            if year < 70:\n-                year += 2000\n+            current_year = datetime.datetime.utcnow().year\n+            current_century = current_year - (current_year % 100)\n+            if year - (current_year % 100) > 50:\n+                year += current_century - 100\n             else:\n-                year += 1900\n+                year += current_century\n         month = MONTHS.index(m.group('mon').lower()) + 1\n         day = int(m.group('day'))\n         hour = int(m.group('hour'))",
+  "implementation_notes": "Replaced hardcoded 2-digit year logic with RFC 7231-compliant calculation that compares the last two digits of the year against the current year's last two digits. If the difference is more than 50 years in the future, the year is interpreted as the most recent year in the past with the same last two digits.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-11848</instance_id>\n\n<problem_statement>\ndjango.utils.http.parse_http_date two digit year check is incorrect\nDescription\n\t \n\t\t(last modified by Ad Timmering)\n\t \nRFC 850 does not mention this, but in RFC 7231 (and there's something similar in RFC 2822), there's the following quote:\nRecipients of a timestamp value in rfc850-date format, which uses a\ntwo-digit year, MUST interpret a timestamp that appears to be more\nthan 50 years in the future as representing the most recent year in\nthe past that had the same last two digits.\nCurrent logic is hard coded to consider 0-69 to be in 2000-2069, and 70-99 to be 1970-1999, instead of comparing versus the current year.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The parse_http_date function uses hardcoded logic to handle two-digit years in RFC 850 date format. Years 0-69 are converted to 2000-2069 and years 70-99 are converted to 1970-1999, regardless of the current date. RFC 7231 requires that timestamps appearing more than 50 years in the future should be interpreted as representing the past.\nExploration notes: The buggy code is in django/utils/http.py lines 179-184. The function imports datetime at the top. PR #11848 shows the fix replaces the hardcoded logic with: before: if year < 70: year += 2000 else: year += 1900 after: current_year = datetime.datetime.utcnow().year current_century = current_year - (current_year % 100) if year - (current_year % 100) > 50: year += current_century - 100 else: year += current_century. Test file at /testbed/tests/utils_tests/test_http.py contains test_parsing_rfc850 method that validates the expected behavior with mocked datetime.utcnow() calls.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Replace hardcoded 2-digit year logic with RFC 7231-compliant relative calculation that compares against current year and applies 50-year future rule\n\nFiles to modify: [\n  \"/testbed/django/utils/http.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/utils/http.py\n  Location: parse_http_date, lines 178-182\n  Change  : REPLACE lines 178-182:\n        if year < 100:\n            if year < 70:\n                year += 2000\n            else:\n                year += 1900\nWITH:\n        if year < 100:\n            current_year = datetime.datetime.utcnow().year\n            current_century = current_year - (current_year % 100)\n            if year - (current_year % 100) > 50:\n                year += current_century - 100\n            else:\n                year += current_century\n  Rationale: RFC 7231 requires that 2-digit years appearing more than 50 years in the future should be interpreted as representing the most recent year in the past with the same last two digits. The current hardcoded logic treats years 0-69 as 2000-2069 and 70-99 as 1970-1999 regardless of current year, which violates the RFC standard.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012WccyMm5q38ZnU6rw7T9gq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/utils/http.py | head -200"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012WccyMm5q38ZnU6rw7T9gq",
+          "content": "[exit_code=0]\nimport base64\nimport calendar\nimport datetime\nimport re\nimport unicodedata\nimport warnings\nfrom binascii import Error as BinasciiError\nfrom email.utils import formatdate\nfrom urllib.parse import (\n    ParseResult, SplitResult, _coerce_args, _splitnetloc, _splitparams, quote,\n    quote_plus, scheme_chars, unquote, unquote_plus,\n    urlencode as original_urlencode, uses_params,\n)\n\nfrom django.core.exceptions import TooManyFieldsSent\nfrom django.utils.datastructures import MultiValueDict\nfrom django.utils.deprecation import RemovedInDjango40Warning\nfrom django.utils.functional import keep_lazy_text\n\n# based on RFC 7232, Appendix C\nETAG_MATCH = re.compile(r'''\n    \\A(      # start of string and capture group\n    (?:W/)?  # optional weak indicator\n    \"        # opening quote\n    [^\"]*    # any sequence of non-quote characters\n    \"        # end quote\n    )\\Z      # end of string and capture group\n''', re.X)\n\nMONTHS = 'jan feb mar apr may jun jul aug sep oct nov dec'.split()\n__D = r'(?P<day>\\d{2})'\n__D2 = r'(?P<day>[ \\d]\\d)'\n__M = r'(?P<mon>\\w{3})'\n__Y = r'(?P<year>\\d{4})'\n__Y2 = r'(?P<year>\\d{2})'\n__T = r'(?P<hour>\\d{2}):(?P<min>\\d{2}):(?P<sec>\\d{2})'\nRFC1123_DATE = re.compile(r'^\\w{3}, %s %s %s %s GMT$' % (__D, __M, __Y, __T))\nRFC850_DATE = re.compile(r'^\\w{6,9}, %s-%s-%s %s GMT$' % (__D, __M, __Y2, __T))\nASCTIME_DATE = re.compile(r'^\\w{3} %s %s %s %s$' % (__M, __D2, __T, __Y))\n\nRFC3986_GENDELIMS = \":/?#[]@\"\nRFC3986_SUBDELIMS = \"!$&'()*+,;=\"\n\nFIELDS_MATCH = re.compile('[&;]')\n\n\n@keep_lazy_text\ndef urlquote(url, safe='/'):\n    \"\"\"\n    A legacy compatibility wrapper to Python's urllib.parse.quote() function.\n    (was used for unicode handling on Python 2)\n    \"\"\"\n    warnings.warn(\n        'django.utils.http.urlquote() is deprecated in favor of '\n        'urllib.parse.quote().',\n        RemovedInDjango40Warning, stacklevel=2,\n    )\n    return quote(url, safe)\n\n\n@keep_lazy_text\ndef urlquote_plus(url, safe=''):\n    \"\"\"\n    A legacy compatibility wrapper to Python's urllib.parse.quote_plus()\n    function. (was used for unicode handling on Python 2)\n    \"\"\"\n    warnings.warn(\n        'django.utils.http.urlquote_plus() is deprecated in favor of '\n        'urllib.parse.quote_plus(),',\n        RemovedInDjango40Warning, stacklevel=2,\n    )\n    return quote_plus(url, safe)\n\n\n@keep_lazy_text\ndef urlunquote(quoted_url):\n    \"\"\"\n    A legacy compatibility wrapper to Python's urllib.parse.unquote() function.\n    (was used for unicode handling on Python 2)\n    \"\"\"\n    warnings.warn(\n        'django.utils.http.urlunquote() is deprecated in favor of '\n        'urllib.parse.unquote().',\n        RemovedInDjango40Warning, stacklevel=2,\n    )\n    return unquote(quoted_url)\n\n\n@keep_lazy_text\ndef urlunquote_plus(quoted_url):\n    \"\"\"\n    A legacy compatibility wrapper to Python's urllib.parse.unquote_plus()\n    function. (was used for unicode handling on Python 2)\n    \"\"\"\n    warnings.warn(\n        'django.utils.http.urlunquote_plus() is deprecated in favor of '\n        'urllib.parse.unquote_plus().',\n        RemovedInDjango40Warning, stacklevel=2,\n    )\n    return unquote_plus(quoted_url)\n\n\ndef urlencode(query, doseq=False):\n    \"\"\"\n    A version of Python's urllib.parse.urlencode() function that can operate on\n    MultiValueDict and non-string values.\n    \"\"\"\n    if isinstance(query, MultiValueDict):\n        query = query.lists()\n    elif hasattr(query, 'items'):\n        query = query.items()\n    query_params = []\n    for key, value in query:\n        if value is None:\n            raise TypeError(\n                \"Cannot encode None for key '%s' in a query string. Did you \"\n                \"mean to pass an empty string or omit the value?\" % key\n            )\n        elif not doseq or isinstance(value, (str, bytes)):\n            query_val = value\n        else:\n            try:\n                itr = iter(value)\n            except TypeError:\n                query_val = value\n            else:\n                # Consume generators and iterators, when doseq=True, to\n                # work around https://bugs.python.org/issue31706.\n                query_val = []\n                for item in itr:\n                    if item is None:\n                        raise TypeError(\n                            \"Cannot encode None for key '%s' in a query \"\n                            \"string. Did you mean to pass an empty string or \"\n                            \"omit the value?\" % key\n                        )\n                    elif not isinstance(item, bytes):\n                        item = str(item)\n                    query_val.append(item)\n        query_params.append((key, query_val))\n    return original_urlencode(query_params, doseq)\n\n\ndef http_date(epoch_seconds=None):\n    \"\"\"\n    Format the time to match the RFC1123 date format as specified by HTTP\n    RFC7231 section 7.1.1.1.\n\n    `epoch_seconds` is a floating point number expressed in seconds since the\n    epoch, in UTC - such as that outputted by time.time(). If set to None, it\n    defaults to the current time.\n\n    Output a string in the format 'Wdy, DD Mon YYYY HH:MM:SS GMT'.\n    \"\"\"\n    return formatdate(epoch_seconds, usegmt=True)\n\n\ndef parse_http_date(date):\n    \"\"\"\n    Parse a date format as specified by HTTP RFC7231 section 7.1.1.1.\n\n    The three formats allowed by the RFC are accepted, even if only the first\n    one is still in widespread use.\n\n    Return an integer expressed in seconds since the epoch, in UTC.\n    \"\"\"\n    # email.utils.parsedate() does the job for RFC1123 dates; unfortunately\n    # RFC7231 makes it mandatory to support RFC850 dates too. So we roll\n    # our own RFC-compliant parsing.\n    for regex in RFC1123_DATE, RFC850_DATE, ASCTIME_DATE:\n        m = regex.match(date)\n        if m is not None:\n            break\n    else:\n        raise ValueError(\"%r is not in a valid HTTP date format\" % date)\n    try:\n        year = int(m.group('year'))\n        if year < 100:\n            if year < 70:\n                year += 2000\n            else:\n                year += 1900\n        month = MONTHS.index(m.group('mon').lower()) + 1\n        day = int(m.group('day'))\n        hour = int(m.group('hour'))\n        min = int(m.group('min'))\n        sec = int(m.group('sec'))\n        result = datetime.datetime(year, month, day, hour, min, sec)\n        return calendar.timegm(result.utctimetuple())\n    except Exception as exc:\n        raise ValueError(\"%r is not a valid date\" % date) from exc\n\n\ndef parse_http_date_safe(date):\n    \"\"\"\n    Same as parse_http_date, but return None if the input is invalid.\n    \"\"\"\n    try:\n        return parse_http_date(date)\n    except Exception:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see the file. Now let me look at the exact lines 178-182 mentioned in the proposal:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01AKFh92Wg1936QvUnSe96dT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '170,190p' django/utils/http.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01AKFh92Wg1936QvUnSe96dT",
+          "content": "[exit_code=0]\nfor regex in RFC1123_DATE, RFC850_DATE, ASCTIME_DATE:\n        m = regex.match(date)\n        if m is not None:\n            break\n    else:\n        raise ValueError(\"%r is not in a valid HTTP date format\" % date)\n    try:\n        year = int(m.group('year'))\n        if year < 100:\n            if year < 70:\n                year += 2000\n            else:\n                year += 1900\n        month = MONTHS.index(m.group('mon').lower()) + 1\n        day = int(m.group('day'))\n        hour = int(m.group('hour'))\n        min = int(m.group('min'))\n        sec = int(m.group('sec'))\n        result = datetime.datetime(year, month, day, hour, min, sec)\n        return calendar.timegm(result.utctimetuple())\n    except Exception as exc:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the code that needs to be changed. The lines 179-183 contain the hardcoded year logic. Let me now apply the fix using Python:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WPrq3b23N6kUmWsBjTm2bf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/utils/http.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the hardcoded year logic\nold_code = '''        if year < 100:\n            if year < 70:\n                year += 2000\n            else:\n                year += 1900'''\n\nnew_code = '''        if year < 100:\n            current_year = datetime.datetime.utcnow().year\n            current_century = current_year - (current_year % 100)\n            if year - (current_year % 100) > 50:\n                year += current_century - 100\n            else:\n                year += current_century'''\n\n# Check if the old code exists\nif old_code in content:\n    print(\"Found the code to replace\")\n    content = content.replace(old_code, new_code)\n    # Write back\n    with open('django/utils/http.py', 'w') as f:\n        f.write(content)\n    print(\"File updated successfully\")\nelse:\n    print(\"Code not found, searching for alternatives...\")\n    # Print surrounding context\n    lines = content.split('\\n')\n    for i, line in enumerate(lines):\n        if 'if year < 100:' in line:\n            print(f\"Found at line {i+1}:\")\n            for j in range(max(0, i-2), min(len(lines), i+8)):\n                print(f\"{j+1}: {lines[j]}\")\n\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WPrq3b23N6kUmWsBjTm2bf",
+          "content": "[exit_code=0]\nFound the code to replace\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! Now let me verify the change was made correctly by viewing the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01R3QS1req4mmcpvCrXvQMM1",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '170,195p' django/utils/http.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01R3QS1req4mmcpvCrXvQMM1",
+          "content": "[exit_code=0]\nfor regex in RFC1123_DATE, RFC850_DATE, ASCTIME_DATE:\n        m = regex.match(date)\n        if m is not None:\n            break\n    else:\n        raise ValueError(\"%r is not in a valid HTTP date format\" % date)\n    try:\n        year = int(m.group('year'))\n        if year < 100:\n            current_year = datetime.datetime.utcnow().year\n            current_century = current_year - (current_year % 100)\n            if year - (current_year % 100) > 50:\n                year += current_century - 100\n            else:\n                year += current_century\n        month = MONTHS.index(m.group('mon').lower()) + 1\n        day = int(m.group('day'))\n        hour = int(m.group('hour'))\n        min = int(m.group('min'))\n        sec = int(m.group('sec'))\n        result = datetime.datetime(year, month, day, hour, min, sec)\n        return calendar.timegm(result.utctimetuple())\n    except Exception as exc:\n        raise ValueError(\"%r is not a valid date\" % date) from exc"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let's run git diff to verify:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016tMzDnzbpQmu1ZDnisNnDe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016tMzDnzbpQmu1ZDnisNnDe",
+          "content": "[exit_code=0]\ndiff --git a/django/utils/http.py b/django/utils/http.py\nindex 572cfb4347..c2187c33b2 100644\n--- a/django/utils/http.py\n+++ b/django/utils/http.py\n@@ -176,10 +176,12 @@ def parse_http_date(date):\n     try:\n         year = int(m.group('year'))\n         if year < 100:\n-            if year < 70:\n-                year += 2000\n+            current_year = datetime.datetime.utcnow().year\n+            current_century = current_year - (current_year % 100)\n+            if year - (current_year % 100) > 50:\n+                year += current_century - 100\n             else:\n-                year += 1900\n+                year += current_century\n         month = MONTHS.index(m.group('mon').lower()) + 1\n         day = int(m.group('day'))\n         hour = int(m.group('hour'))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the change we made. The diff is clean and correct. Let me verify the content one more time to ensure all the imports are in place:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Fbrt2RuYsxTKfPJXWSJV5E",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -10 django/utils/http.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Fbrt2RuYsxTKfPJXWSJV5E",
+          "content": "[exit_code=0]\nimport base64\nimport calendar\nimport datetime\nimport re\nimport unicodedata\nimport warnings\nfrom binascii import Error as BinasciiError\nfrom email.utils import formatdate\nfrom urllib.parse import (\n    ParseResult, SplitResult, _coerce_args, _splitnetloc, _splitparams, quote,"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! The `datetime` module is already imported at the top of the file, so our code change which uses `datetime.datetime.utcnow()` will work correctly.\n\nLet me provide a summary of the change:\n\n```json\n{\n  \"patch\": \"diff --git a/django/utils/http.py b/django/utils/http.py\\nindex 572cfb4347..c2187c33b2 100644\\n--- a/django/utils/http.py\\n+++ b/django/utils/http.py\\n@@ -176,10 +176,12 @@ def parse_http_date(date):\\n     try:\\n         year = int(m.group('year'))\\n         if year < 100:\\n-            if year < 70:\\n-                year += 2000\\n+            current_year = datetime.datetime.utcnow().year\\n+            current_century = current_year - (current_year % 100)\\n+            if year - (current_year % 100) > 50:\\n+                year += current_century - 100\\n             else:\\n-                year += 1900\\n+                year += current_century\\n         month = MONTHS.index(m.group('mon').lower()) + 1\\n         day = int(m.group('day'))\\n         hour = int(m.group('hour'))\",\n  \"implementation_notes\": \"Replaced hardcoded 2-digit year logic with RFC 7231-compliant calculation that compares the last two digits of the year against the current year's last two digits. If the difference is more than 50 years in the future, the year is interpreted as the most recent year in the past with the same last two digits.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T07:03:40Z"
+}

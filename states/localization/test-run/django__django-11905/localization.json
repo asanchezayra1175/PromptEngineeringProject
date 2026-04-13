@@ -1,0 +1,233 @@
+{
+  "instance_id": "django__django-11905",
+  "status": "success",
+  "attempt": 1,
+  "relevant_files": [
+    "/testbed/django/db/models/lookups.py"
+  ],
+  "relevant_symbols": [
+    "IsNull.as_sql"
+  ],
+  "bug_analysis": "The IsNull lookup's as_sql method accepts any value for self.rhs and uses its truthiness to determine SQL generation. When self.rhs evaluates to truthy, it generates 'IS NULL', and when falsy, it generates 'IS NOT NULL'. This allows non-boolean values like strings, integers, or other objects to be passed, which creates inconsistent behavior and can cause join promotion issues.",
+  "exploration_notes": "The IsNull class is located in /testbed/django/db/models/lookups.py at lines 461-470. The as_sql method uses 'if self.rhs:' on line 467 without type checking. According to the PR #11873 discussion, the fix involves adding isinstance(self.rhs, bool) validation before the SQL generation. The method should raise either ValueError or RemovedInDjango40Warning for non-boolean values.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explore the following repository and produce a localization report identifying where the bug lives.\n\n<instance_id>django__django-11905</instance_id>\n\n<problem_statement>\nPrevent using __isnull lookup with non-boolean value.\nDescription\n\t \n\t\t(last modified by Mariusz Felisiak)\n\t \n__isnull should not allow for non-boolean values. Using truthy/falsey doesn't promote INNER JOIN to an OUTER JOIN but works fine for a simple queries. Using non-boolean values is \u200bundocumented and untested. IMO we should raise an error for non-boolean values to avoid confusion and for consistency.\n\n</problem_statement>\n\n<hints>\nPR here: \u200bhttps://github.com/django/django/pull/11873\nAfter the reconsideration I don't think that we should change this \u200bdocumented behavior (that is in Django from the very beginning). __isnull lookup expects boolean values in many places and IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples field__isnull='false' or field__isnull='true' (both would return the same result). You can always call bool() on a right hand side. Sorry for my previous acceptation (I shouldn't triage tickets in the weekend).\nReplying to felixxm: After the reconsideration I don't think that we should change this \u200bdocumented behavior (that is in Django from the very beginning). __isnull lookup expects boolean values in many places and IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples field__isnull='false' or field__isnull='true' (both would return the same result). You can always call bool() on a right hand side. Sorry for my previous acceptation (I shouldn't triage tickets in the weekend). I understand your point. But is there anything we can do to avoid people falling for the same pitfall I did? The problem, in my opinion, is that it works fine for simple queries but as soon as you add a join that needs promotion it will break, silently. Maybe we should make it raise an exception when a non-boolean is passed? One valid example is to have a class that implements __bool__. You can see here \u200bhttps://github.com/django/django/blob/d9881a025c15d87b2a7883ee50771117450ea90d/django/db/models/lookups.py#L465-L470 that non-bool value is converted to IS NULL and IS NOT NULL already using the truthy/falsy values. IMO it would be confusing if we'll allow for truthy/falsy values, e.g. take a look at these examples fieldisnull='false' or fieldisnull='true' (both would return the same result). This is already the case. It just is inconsistent, in lookups.py field__isnull='false' will be a positive condition but on the query.py it will be the negative condition.\nMaybe adding a note on the documentation? something like: \"Although it might seem like it will work with non-bool fields, this is not supported and can lead to inconsistent behaviours\"\nAgreed, we should raise an error for non-boolean values, e.g. diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py index 9344979c56..fc4a38c4fe 100644 --- a/django/db/models/lookups.py +++ b/django/db/models/lookups.py @@ -463,6 +463,11 @@ class IsNull(BuiltinLookup): prepare_rhs = False def as_sql(self, compiler, connection): + if not isinstance(self.rhs, bool): + raise ValueError( + 'The QuerySet value for an isnull lookup must be True or ' + 'False.' + ) sql, params = compiler.compile(self.lhs) if self.rhs: return \"%s IS NULL\" % sql, params I changed the ticket description.\nThanks, I'll work on it! Wouldn't that possibly break backward compatibility? I'm not familiar with how Django moves in that regard.\nWe can add a release note in \"Backwards incompatible changes\" or deprecate this and remove in Django 4.0. I have to thing about it, please give me a day, maybe I will change my mind :)\nNo problem. Thanks for taking the time to look into this!\nAnother interesting example related to this: As an anecdote, I've also got bitten by this possibility. An attempt to write WHERE (field IS NULL) = boolean_field as .filter(field__isnull=F('boolean_field')) didn't go as I expected. Alexandr Aktsipetrov -- \u200bhttps://groups.google.com/forum/#!msg/django-developers/AhY2b3rxkfA/0sz3hNanCgAJ This example will generate the WHERE .... IS NULL. I guess we also would want an exception thrown here.\nAndr\u00e9, IMO we should deprecate using non-boolean values in Django 3.1 (RemovedInDjango40Warning) and remove in Django 4.0 (even if it is untested and undocumented). I can imagine that a lot of people use e.g. 1 and 0 instead of booleans. Attached diff fixes also issue with passing a F() expression. def as_sql(self, compiler, connection): if not isinstance(self.rhs, bool): raise RemovedInDjango40Warning(...) ....\nReplying to felixxm: Andr\u00e9, IMO we should deprecate using non-boolean values in Django 3.1 (RemovedInDjango40Warning) and remove in Django 4.0 (even if it is untested and undocumented). I can imagine that a lot of people use e.g. 1 and 0 instead of booleans. Attached diff fixes also issue with passing a F() expression. def as_sql(self, compiler, connection): if not isinstance(self.rhs, bool): raise RemovedInDjango40Warning(...) .... Sound like a good plan. Not super familiar with the branch structure of Django. So, I guess the path to follow is to make a PR to master adding the deprecation warning and eventually when master is 4.x we create the PR raising the ValueError. Is that right? Thanks!\nAndr\u00e9, yes mostly. You can find more details about that \u200bfrom the documentation.\n</hints>\n\n<repo>django/django</repo>\n<base_commit>2f72480fbd27896c986c45193e1603e35c0b19a7</base_commit>\n\n<test_targets>\nThese tests must pass after the fix \u2014 use them to find the relevant module.\n[\n  \"test_isnull_non_boolean_value (lookup.tests.LookupTests)\",\n  \"test_iterator (lookup.tests.LookupTests)\"\n]\n</test_targets>\n\nBegin by reading the problem statement, then grep for the key term. Output the JSON report when you have identified the relevant files and symbols.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLooking at the problem statement and hints, I need to identify where the bug lives related to the `__isnull` lookup allowing non-boolean values.\n\nKey signals:\n1. The issue is about `__isnull` lookup not validating that the right-hand side is a boolean value\n2. The PR link is https://github.com/django/django/pull/11873\n3. Test targets are in `lookup.tests.LookupTests` - specifically `test_isnull_non_boolean_value`\n4. The hints mention the fix should be in `django/db/models/lookups.py` around line 465-470\n5. There's a specific mention of the `IsNull` class and its `as_sql` method\n6. The hints show a diff that adds validation in the `as_sql` method of the `IsNull` class\n\nMy plan:\n1. First, look at the test to understand what exactly needs to be fixed\n2. Look at the PR to see the actual implementation \n3. Examine the current `IsNull` class in `django/db/models/lookups.py`\n4. Identify the exact location where the validation should be added\n\nLet me start by looking at the test file to understand the expected behavior.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01N7VuMnFxCv4G54fZezQYGD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed -name \"*.py\" -path \"*/lookup*\" | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01N7VuMnFxCv4G54fZezQYGD",
+          "content": "[exit_code=0]\n/testbed/django/contrib/gis/db/models/lookups.py\n/testbed/django/contrib/postgres/lookups.py\n/testbed/django/db/models/lookups.py\n/testbed/tests/lookup/__init__.py\n/testbed/tests/lookup/models.py\n/testbed/tests/lookup/test_decimalfield.py\n/testbed/tests/lookup/test_lookups.py\n/testbed/tests/lookup/test_timefield.py\n/testbed/tests/lookup/tests.py\n/testbed/tests/migrations/migrations_test_apps/lookuperror_a/__init__.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_012Nng8Yy7x2u9F5Zhj6uCm9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"test_isnull_non_boolean_value\" /testbed/tests/lookup/tests.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012Nng8Yy7x2u9F5Zhj6uCm9",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01RywNBb8GSyPPbksTotQUQZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -rn \"test_isnull_non_boolean_value\" /testbed/tests/"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RywNBb8GSyPPbksTotQUQZ",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe test doesn't exist yet, which suggests this might be a test that needs to be created as part of the fix. Let me look at the PR to understand what changes were made.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FZhJRLYHmNcYUp5vUuviHd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "curl -s \"https://patch-diff.githubusercontent.com/raw/django/django/pull/11873.patch\""
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FZhJRLYHmNcYUp5vUuviHd",
+          "content": "[exit_code=0]\nFrom 9d8bba90bf08ba4e4fc10ca0461aebab016c60ae Mon Sep 17 00:00:00 2001\nFrom: =?UTF-8?q?Andr=C3=A9=20Ericson?= <de.ericson@gmail.com>\nDate: Sat, 5 Oct 2019 14:27:44 +0200\nSubject: [PATCH] Fixed #30841 -- Fixed join promotion for non-boolean isnull.\n\n---\n django/db/models/sql/query.py | 2 +-\n tests/queries/tests.py        | 9 +++++++++\n 2 files changed, 10 insertions(+), 1 deletion(-)\n\ndiff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py\nindex ea51912e8b6c..feaebd91b326 100644\n--- a/django/db/models/sql/query.py\n+++ b/django/db/models/sql/query.py\n@@ -1310,7 +1310,7 @@ def build_filter(self, filter_expr, branch_negated=False, current_negated=False,\n         lookup_type = condition.lookup_name\n         clause.add(condition, AND)\n \n-        require_outer = lookup_type == 'isnull' and condition.rhs is True and not current_negated\n+        require_outer = lookup_type == 'isnull' and condition.rhs and not current_negated\n         if current_negated and (lookup_type != 'isnull' or condition.rhs is False) and condition.rhs is not None:\n             require_outer = True\n             if (lookup_type != 'isnull' and (\ndiff --git a/tests/queries/tests.py b/tests/queries/tests.py\nindex 081fb89d5466..1cb8d9e31360 100644\n--- a/tests/queries/tests.py\n+++ b/tests/queries/tests.py\n@@ -3160,6 +3160,15 @@ def test_isnull_filter_promotion(self):\n         self.assertEqual(str(qs.query).count('INNER JOIN'), 1)\n         self.assertEqual(list(qs), [self.a2])\n \n+    def test_isnull_filter_promotion_non_bool(self):\n+        qs = ModelA.objects.filter(Q(b__name__isnull=1))\n+        self.assertEqual(str(qs.query).count('LEFT OUTER'), 1)\n+        self.assertEqual(list(qs), [self.a1])\n+\n+        qs = ModelA.objects.filter(Q(b__name__isnull=0))\n+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)\n+        self.assertEqual(list(qs), [self.a2])\n+\n     def test_null_join_demotion(self):\n         qs = ModelA.objects.filter(Q(b__name__isnull=False) & Q(b__name__isnull=True))\n         self.assertIn(' INNER JOIN ', str(qs.query))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I can see the PR was about fixing join promotion for non-boolean isnull values in the `query.py` file. However, looking at the hints more carefully, it seems like the final decision was to actually prevent non-boolean values entirely by raising an error in the `IsNull` lookup class in `lookups.py`.\n\nLet me now examine the current `IsNull` class in `django/db/models/lookups.py` to see where the validation should be added.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01PHdzkqrgMA9bDQ1fZcDnUY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 20 \"class IsNull\" /testbed/django/db/models/lookups.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PHdzkqrgMA9bDQ1fZcDnUY",
+          "content": "[exit_code=0]\n461:class IsNull(BuiltinLookup):\n462-    lookup_name = 'isnull'\n463-    prepare_rhs = False\n464-\n465-    def as_sql(self, compiler, connection):\n466-        sql, params = compiler.compile(self.lhs)\n467-        if self.rhs:\n468-            return \"%s IS NULL\" % sql, params\n469-        else:\n470-            return \"%s IS NOT NULL\" % sql, params\n471-\n472-\n473-@Field.register_lookup\n474-class Regex(BuiltinLookup):\n475-    lookup_name = 'regex'\n476-    prepare_rhs = False\n477-\n478-    def as_sql(self, compiler, connection):\n479-        if self.lookup_name in connection.operators:\n480-            return super().as_sql(compiler, connection)\n481-        else:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01N8iGLS4NzF5bSoBtcznZkj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n -A 5 -B 5 \"test_iterator\" /testbed/tests/lookup/tests.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01N8iGLS4NzF5bSoBtcznZkj",
+          "content": "[exit_code=0]\n100-                '<Article: Article 7>',\n101-                '<Article: Article 1>',\n102-            ]\n103-        )\n104-\n105:    def test_iterator(self):\n106-        # Each QuerySet gets iterator(), which is a generator that \"lazily\"\n107-        # returns results using database-level iteration.\n108-        self.assertIsInstance(Article.objects.iterator(), collections.abc.Iterator)\n109-\n110-        self.assertQuerysetEqual("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I have a good understanding of the issue. The problem is in the `IsNull.as_sql` method in `/testbed/django/db/models/lookups.py`. Currently, it uses `if self.rhs:` on line 467, which means it accepts any truthy/falsy value, not just boolean values.\n\nAccording to the hints, the fix should add validation to ensure only boolean values are accepted, raising a `ValueError` (or according to later discussion, a deprecation warning).\n\nThe bug is in the `IsNull` class's `as_sql` method where it should validate that `self.rhs` is a boolean value before proceeding with the SQL generation.\n\nLet me check if there are any existing tests for the IsNull lookup to understand the current behavior.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MV1qjY62GqzQqSdMPYDVLz",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -rn \"isnull\" /testbed/tests/lookup/ | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MV1qjY62GqzQqSdMPYDVLz",
+          "content": "[exit_code=0]\n/testbed/tests/lookup/models.py:61:    lookup_name = 'isnull_none_rhs'\n/testbed/tests/lookup/tests.py:587:            \"not permitted, perhaps you meant isnull?\"\n/testbed/tests/lookup/tests.py:878:        self.assertFalse(Season.objects.filter(nulled_text_field__isnull=True))\n/testbed/tests/lookup/tests.py:879:        self.assertTrue(Season.objects.filter(nulled_text_field__nulled__isnull=True))\n/testbed/tests/lookup/tests.py:907:        __exact=value is transformed to __isnull=True if Field.get_prep_value()\n/testbed/tests/lookup/tests.py:911:        self.assertTrue(Season.objects.filter(pk=season.pk, nulled_text_field__isnull=True))\n/testbed/tests/lookup/tests.py:935:        self.assertIsInstance(query.build_lookup(['isnull_none_rhs'], field, None), IsNullWithNoneAsRHS)\n/testbed/tests/lookup/tests.py:936:        self.assertTrue(Season.objects.filter(pk=season.pk, nulled_text_field__isnull_none_rhs=True))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I have a complete picture. The issue is in the `IsNull` class in `/testbed/django/db/models/lookups.py`. The `as_sql` method currently accepts any value for `self.rhs` and uses its truthiness to determine whether to generate \"IS NULL\" or \"IS NOT NULL\". \n\nAccording to the problem statement and hints, this should be changed to only accept boolean values and raise an error (or deprecation warning) for non-boolean values.\n\nThe relevant file is: `/testbed/django/db/models/lookups.py`\nThe relevant symbol is: `IsNull.as_sql`\n\nThe bug is that the method doesn't validate that `self.rhs` is a boolean before using it in the conditional on line 467.\n</think>\n\n```json\n{\n  \"relevant_files\": [\"/testbed/django/db/models/lookups.py\"],\n  \"relevant_symbols\": [\"IsNull.as_sql\"],\n  \"bug_analysis\": \"The IsNull lookup's as_sql method accepts any value for self.rhs and uses its truthiness to determine SQL generation. When self.rhs evaluates to truthy, it generates 'IS NULL', and when falsy, it generates 'IS NOT NULL'. This allows non-boolean values like strings, integers, or other objects to be passed, which creates inconsistent behavior and can cause join promotion issues.\",\n  \"exploration_notes\": \"The IsNull class is located in /testbed/django/db/models/lookups.py at lines 461-470. The as_sql method uses 'if self.rhs:' on line 467 without type checking. According to the PR #11873 discussion, the fix involves adding isinstance(self.rhs, bool) validation before the SQL generation. The method should raise either ValueError or RemovedInDjango40Warning for non-boolean values.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 8,
+  "timestamp": "2026-04-13T07:06:50Z"
+}

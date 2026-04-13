@@ -1,0 +1,152 @@
+{
+  "instance_id": "astropy__astropy-12907",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PD \u2014 Wrong value assigned: constant 1 replaced with actual matrix values",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>astropy__astropy-12907</instance_id>\n\n<problem_statement>\nModeling's `separability_matrix` does not compute separability correctly for nested CompoundModels\nConsider the following model:\r\n\r\n```python\r\nfrom astropy.modeling import models as m\r\nfrom astropy.modeling.separable import separability_matrix\r\n\r\ncm = m.Linear1D(10) & m.Linear1D(5)\r\n```\r\n\r\nIt's separability matrix as you might expect is a diagonal:\r\n\r\n```python\r\n>>> separability_matrix(cm)\r\narray([[ True, False],\r\n       [False,  True]])\r\n```\r\n\r\nIf I make the model more complex:\r\n```python\r\n>>> separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))\r\narray([[ True,  True, False, False],\r\n       [ True,  True, False, False],\r\n       [False, False,  True, False],\r\n       [False, False, False,  True]])\r\n```\r\n\r\nThe output matrix is again, as expected, the outputs and inputs to the linear models are separable and independent of each other.\r\n\r\nIf however, I nest these compound models:\r\n```python\r\n>>> separability_matrix(m.Pix2Sky_TAN() & cm)\r\narray([[ True,  True, False, False],\r\n       [ True,  True, False, False],\r\n       [False, False,  True,  True],\r\n       [False, False,  True,  True]])\r\n```\r\nSuddenly the inputs and outputs are no longer separable?\r\n\r\nThis feels like a bug to me, but I might be missing something?\n\n</problem_statement>\n\n<localization_report>\nRelevant files: [\"/testbed/astropy/modeling/separable.py\"]\nBug analysis: The _cstack function incorrectly handles nested CompoundModels by setting the right operand's separability matrix values to 1 instead of copying the actual matrix values. When a nested CompoundModel's separability matrix is computed as an ndarray, the line 'cright[-right.shape[0]:, -right.shape[1]:] = 1' overwrites the separability information with all 1s, causing incorrect separability matrices for nested compound models.\nExploration notes: The bug is on line 245 in the _cstack function. The function correctly handles the left operand by copying values with 'cleft[: left.shape[0], : left.shape[1]] = left' on line 240, but incorrectly sets the right operand to 1 instead of copying the right matrix. The _cstack function is called through the _operators mapping when the '&' operator is used. The _separable function recursively processes CompoundModels by calling _separable on left and right operands, then applying the appropriate operator function.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PF \u2014 Wrong function or method called (similar name): Change assignment from constant 1 to the actual right matrix values, matching the pattern used for the left operand on line 240.\nProposed changes: [\n  {\n    \"file\": \"/testbed/astropy/modeling/separable.py\",\n    \"location\": \"_cstack, line 245\",\n    \"change\": \"REPLACE line 245:\\n        cright[-right.shape[0]:, -right.shape[1]:] = 1\\nWITH:\\n        cright[-right.shape[0]:, -right.shape[1]:] = right\",\n    \"rationale\": \"The function incorrectly assigns 1 instead of copying the actual separability matrix values from the right operand. This causes nested CompoundModels to lose their separability information and show incorrect all-True values in the separability matrix.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nindex a308e2729..45bea3608 100644\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the patch by examining the relevant code in the modified file.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01V7q3r1LruB9MAKBBaSVPUs",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat -n /testbed/astropy/modeling/separable.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01V7q3r1LruB9MAKBBaSVPUs",
+          "content": "[exit_code=0]\n1\t# Licensed under a 3-clause BSD style license - see LICENSE.rst\n     2\t\n     3\t\"\"\"\n     4\tFunctions to determine if a model is separable, i.e.\n     5\tif the model outputs are independent.\n     6\t\n     7\tIt analyzes ``n_inputs``, ``n_outputs`` and the operators\n     8\tin a compound model by stepping through the transforms\n     9\tand creating a ``coord_matrix`` of shape (``n_outputs``, ``n_inputs``).\n    10\t\n    11\t\n    12\tEach modeling operator is represented by a function which\n    13\ttakes two simple models (or two ``coord_matrix`` arrays) and\n    14\treturns an array of shape (``n_outputs``, ``n_inputs``).\n    15\t\n    16\t\"\"\"\n    17\t\n    18\timport numpy as np\n    19\t\n    20\tfrom .core import Model, ModelDefinitionError, CompoundModel\n    21\tfrom .mappings import Mapping\n    22\t\n    23\t\n    24\t__all__ = [\"is_separable\", \"separability_matrix\"]\n    25\t\n    26\t\n    27\tdef is_separable(transform):\n    28\t    \"\"\"\n    29\t    A separability test for the outputs of a transform.\n    30\t\n    31\t    Parameters\n    32\t    ----------\n    33\t    transform : `~astropy.modeling.core.Model`\n    34\t        A (compound) model.\n    35\t\n    36\t    Returns\n    37\t    -------\n    38\t    is_separable : ndarray\n    39\t        A boolean array with size ``transform.n_outputs`` where\n    40\t        each element indicates whether the output is independent\n    41\t        and the result of a separable transform.\n    42\t\n    43\t    Examples\n    44\t    --------\n    45\t    >>> from astropy.modeling.models import Shift, Scale, Rotation2D, Polynomial2D\n    46\t    >>> is_separable(Shift(1) & Shift(2) | Scale(1) & Scale(2))\n    47\t        array([ True,  True]...)\n    48\t    >>> is_separable(Shift(1) & Shift(2) | Rotation2D(2))\n    49\t        array([False, False]...)\n    50\t    >>> is_separable(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]) | \\\n    51\t        Polynomial2D(1) & Polynomial2D(2))\n    52\t        array([False, False]...)\n    53\t    >>> is_separable(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]))\n    54\t        array([ True,  True,  True,  True]...)\n    55\t\n    56\t    \"\"\"\n    57\t    if transform.n_inputs == 1 and transform.n_outputs > 1:\n    58\t        is_separable = np.array([False] * transform.n_outputs).T\n    59\t        return is_separable\n    60\t    separable_matrix = _separable(transform)\n    61\t    is_separable = separable_matrix.sum(1)\n    62\t    is_separable = np.where(is_separable != 1, False, True)\n    63\t    return is_separable\n    64\t\n    65\t\n    66\tdef separability_matrix(transform):\n    67\t    \"\"\"\n    68\t    Compute the correlation between outputs and inputs.\n    69\t\n    70\t    Parameters\n    71\t    ----------\n    72\t    transform : `~astropy.modeling.core.Model`\n    73\t        A (compound) model.\n    74\t\n    75\t    Returns\n    76\t    -------\n    77\t    separable_matrix : ndarray\n    78\t        A boolean correlation matrix of shape (n_outputs, n_inputs).\n    79\t        Indicates the dependence of outputs on inputs. For completely\n    80\t        independent outputs, the diagonal elements are True and\n    81\t        off-diagonal elements are False.\n    82\t\n    83\t    Examples\n    84\t    --------\n    85\t    >>> from astropy.modeling.models import Shift, Scale, Rotation2D, Polynomial2D\n    86\t    >>> separability_matrix(Shift(1) & Shift(2) | Scale(1) & Scale(2))\n    87\t        array([[ True, False], [False,  True]]...)\n    88\t    >>> separability_matrix(Shift(1) & Shift(2) | Rotation2D(2))\n    89\t        array([[ True,  True], [ True,  True]]...)\n    90\t    >>> separability_matrix(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]) | \\\n    91\t        Polynomial2D(1) & Polynomial2D(2))\n    92\t        array([[ True,  True], [ True,  True]]...)\n    93\t    >>> separability_matrix(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]))\n    94\t        array([[ True, False], [False,  True], [ True, False], [False,  True]]...)\n    95\t\n    96\t    \"\"\"\n    97\t    if transform.n_inputs == 1 and transform.n_outputs > 1:\n    98\t        return np.ones((transform.n_outputs, transform.n_inputs),\n    99\t                       dtype=np.bool_)\n   100\t    separable_matrix = _separable(transform)\n   101\t    separable_matrix = np.where(separable_matrix != 0, True, False)\n   102\t    return separable_matrix\n   103\t\n   104\t\n   105\tdef _compute_n_outputs(left, right):\n   106\t    \"\"\"\n   107\t    Compute the number of outputs of two models.\n   108\t\n   109\t    The two models are the left and right model to an operation in\n   110\t    the expression tree of a compound model.\n   111\t\n   112\t    Parameters\n   113\t    ----------\n   114\t    left, right : `astropy.modeling.Model` or ndarray\n   115\t        If input is of an array, it is the output of `coord_matrix`.\n   116\t\n   117\t    \"\"\"\n   118\t    if isinstance(left, Model):\n   119\t        lnout = left.n_outputs\n   120\t    else:\n   121\t        lnout = left.shape[0]\n   122\t    if isinstance(right, Model):\n   123\t        rnout = right.n_outputs\n   124\t    else:\n   125\t        rnout = right.shape[0]\n   126\t    noutp = lnout + rnout\n   12\n...[truncated]...\n    \"\"\"\n   271\t        if isinstance(input, Model):\n   272\t            coords = _coord_matrix(input, position, input.n_outputs)\n   273\t        else:\n   274\t            coords = input\n   275\t        return coords\n   276\t\n   277\t    cleft = _n_inputs_outputs(left, 'left')\n   278\t    cright = _n_inputs_outputs(right, 'right')\n   279\t\n   280\t    try:\n   281\t        result = np.dot(cleft, cright)\n   282\t    except ValueError:\n   283\t        raise ModelDefinitionError(\n   284\t            'Models cannot be combined with the \"|\" operator; '\n   285\t            'left coord_matrix is {}, right coord_matrix is {}'.format(\n   286\t                cright, cleft))\n   287\t    return result\n   288\t\n   289\t\n   290\tdef _separable(transform):\n   291\t    \"\"\"\n   292\t    Calculate the separability of outputs.\n   293\t\n   294\t    Parameters\n   295\t    ----------\n   296\t    transform : `astropy.modeling.Model`\n   297\t        A transform (usually a compound model).\n   298\t\n   299\t    Returns :\n   300\t    is_separable : ndarray of dtype np.bool\n   301\t        An array of shape (transform.n_outputs,) of boolean type\n   302\t        Each element represents the separablity of the corresponding output.\n   303\t    \"\"\"\n   304\t    if (transform_matrix := transform._calculate_separability_matrix()) is not NotImplemented:\n   305\t        return transform_matrix\n   306\t    elif isinstance(transform, CompoundModel):\n   307\t        sepleft = _separable(transform.left)\n   308\t        sepright = _separable(transform.right)\n   309\t        return _operators[transform.op](sepleft, sepright)\n   310\t    elif isinstance(transform, Model):\n   311\t        return _coord_matrix(transform, 'left', transform.n_outputs)\n   312\t\n   313\t\n   314\t# Maps modeling operators to a function computing and represents the\n   315\t# relationship of axes as an array of 0-es and 1-s\n   316\t_operators = {'&': _cstack, '|': _cdot, '+': _arith_oper, '-': _arith_oper,\n   317\t              '*': _arith_oper, '/': _arith_oper, '**': _arith_oper}"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01MJWChPaFgX6g898XGrCc23",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '200,260p' /testbed/astropy/modeling/separable.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MJWChPaFgX6g898XGrCc23",
+          "content": "[exit_code=0]\nmat[-model.n_outputs:, -model.n_inputs:] = m\n        return mat\n    if not model.separable:\n        # this does not work for more than 2 coordinates\n        mat = np.zeros((noutp, model.n_inputs))\n        if pos == 'left':\n            mat[:model.n_outputs, : model.n_inputs] = 1\n        else:\n            mat[-model.n_outputs:, -model.n_inputs:] = 1\n    else:\n        mat = np.zeros((noutp, model.n_inputs))\n\n        for i in range(model.n_inputs):\n            mat[i, i] = 1\n        if pos == 'right':\n            mat = np.roll(mat, (noutp - model.n_outputs))\n    return mat\n\n\ndef _cstack(left, right):\n    \"\"\"\n    Function corresponding to '&' operation.\n\n    Parameters\n    ----------\n    left, right : `astropy.modeling.Model` or ndarray\n        If input is of an array, it is the output of `coord_matrix`.\n\n    Returns\n    -------\n    result : ndarray\n        Result from this operation.\n\n    \"\"\"\n    noutp = _compute_n_outputs(left, right)\n\n    if isinstance(left, Model):\n        cleft = _coord_matrix(left, 'left', noutp)\n    else:\n        cleft = np.zeros((noutp, left.shape[1]))\n        cleft[: left.shape[0], : left.shape[1]] = left\n    if isinstance(right, Model):\n        cright = _coord_matrix(right, 'right', noutp)\n    else:\n        cright = np.zeros((noutp, right.shape[1]))\n        cright[-right.shape[0]:, -right.shape[1]:] = right\n\n    return np.hstack([cleft, cright])\n\n\ndef _cdot(left, right):\n    \"\"\"\n    Function corresponding to \"|\" operation.\n\n    Parameters\n    ----------\n    left, right : `astropy.modeling.Model` or ndarray\n        If input is of an array, it is the output of `coord_matrix`.\n\n    Returns\n    -------"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLet me analyze the patch:\n\n**The bug**: In `_cstack`, when the right operand is an ndarray (already-computed separability matrix), line 245 was setting the values to `1` instead of copying the actual matrix values. This caused nested CompoundModels to have incorrect separability (all-True in the right block).\n\n**The fix**: Change `cright[-right.shape[0]:, -right.shape[1]:] = 1` to `cright[-right.shape[0]:, -right.shape[1]:] = right`.\n\n**Analysis**:\n\n1. **Correctness**: The fix correctly addresses the root cause. When `right` is an ndarray (the result of a recursive `_separable` call on a nested CompoundModel), the code should copy the actual values from `right` into `cright`, just like the left operand does with `cleft[: left.shape[0], : left.shape[1]] = left`. Setting it to `1` was discarding the separability information.\n\n2. **Completeness**: Let me check if there's a similar issue with the left operand. Looking at line 240: `cleft[: left.shape[0], : left.shape[1]] = left` - this correctly copies the left matrix. Only the right was broken.\n\n3. **Alignment**: The fix matches exactly what the Architect proposed - changing `= 1` to `= right`.\n\n4. **Safety**: The change is minimal and targeted. It only affects the case where `right` is an ndarray (not a Model), which is the nested CompoundModel case.\n\nThe fix is clean, correct, and complete. The pattern is essentially PD (condition/value boundary) or just a wrong value assignment fix. The fix correctly assigns `right` instead of `1`, mirroring the correct behavior for the left operand.\n\nThe fix:\n- Handles the case where `right` is an ndarray with the actual separability matrix values\n- Uses those actual values instead of always setting to 1\n- This correctly preserves the separability information for nested compound models\n\nThis is a clear, correct, minimal fix.\n</think>\n\nLooking at the patch and surrounding code:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01YLqbFe5mrH8ZgPoQFQ1GTZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"_cstack\\|_cdot\\|_arith\" /testbed/astropy/modeling/separable.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01YLqbFe5mrH8ZgPoQFQ1GTZ",
+          "content": "[exit_code=0]\n130:def _arith_oper(left, right):\n219:def _cstack(left, right):\n250:def _cdot(left, right):\n316:_operators = {'&': _cstack, '|': _cdot, '+': _arith_oper, '-': _arith_oper,\n317:              '*': _arith_oper, '/': _arith_oper, '**': _arith_oper}"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch is straightforward. Let me verify the full context of the `_cstack` function to ensure the fix is correct and complete:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01LGbFWEX3jN3z9Db44AkTC9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '219,248p' /testbed/astropy/modeling/separable.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LGbFWEX3jN3z9Db44AkTC9",
+          "content": "[exit_code=0]\ndef _cstack(left, right):\n    \"\"\"\n    Function corresponding to '&' operation.\n\n    Parameters\n    ----------\n    left, right : `astropy.modeling.Model` or ndarray\n        If input is of an array, it is the output of `coord_matrix`.\n\n    Returns\n    -------\n    result : ndarray\n        Result from this operation.\n\n    \"\"\"\n    noutp = _compute_n_outputs(left, right)\n\n    if isinstance(left, Model):\n        cleft = _coord_matrix(left, 'left', noutp)\n    else:\n        cleft = np.zeros((noutp, left.shape[1]))\n        cleft[: left.shape[0], : left.shape[1]] = left\n    if isinstance(right, Model):\n        cright = _coord_matrix(right, 'right', noutp)\n    else:\n        cright = np.zeros((noutp, right.shape[1]))\n        cright[-right.shape[0]:, -right.shape[1]:] = right\n\n    return np.hstack([cleft, cright])"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The fix is clear and correct:\n\n**Root cause**: In `_cstack`, when `right` is an ndarray (meaning a nested CompoundModel's separability matrix was pre-computed recursively), line 245 was assigning the constant `1` instead of the actual matrix values. This caused all entries in the right operand's block to be `True`, losing the separability information.\n\n**The fix**: Changes `= 1` to `= right`, matching the pattern correctly used for the left operand (`cleft[: left.shape[0], : left.shape[1]] = left`).\n\n**Evaluation**:\n- **Correctness**: Directly fixes the root cause. When a nested CompoundModel is the right operand, `_separable` returns its computed ndarray, which was being overwritten with `1`. Now it correctly copies the actual separability matrix values.\n- **Completeness**: Only the right operand had this bug; the left operand's assignment was already correct. No other code paths need updating.\n- **Alignment**: Exactly matches the Architect's proposed change - minimal, targeted fix.\n- **Safety**: Only modifies the behavior when `right` is an ndarray (nested CompoundModel case). When `right` is a Model instance, `_coord_matrix` is still called correctly.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PD \u2014 Wrong value assigned: constant 1 replaced with actual matrix values\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T04:59:52Z"
+}
