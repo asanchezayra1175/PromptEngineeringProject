@@ -1,17 +1,46 @@
 """
 orchestrator.py
-
-Boots the Docker environment for each SWE-bench instance and runs the full
+ 
+Boots a Docker container for each SWE-bench instance and runs the full
 agent pipeline:
-
-  [Pre-step] Localization — runs once per repo, cached to disk
-  Agent 1 — Issue Reproduction
-  Agent 2 — Issue Fixing        ←──────────────────┐
-  Agent 3 — Testing & Verification                  │
-      │                                             │
-      └── regressions found? → feed report back ───┘
-          (up to PIPELINE_MAX_FIX_CYCLES times)
-
+ 
+  Stage 1: Localization Agent
+    Identifies the relevant files, classes, and functions containing the bug.
+    Result is cached to disk — skipped on re-runs if already successful.
+ 
+  Stage 2: Fix/Verify Loop (up to PIPELINE_MAX_FIX_CYCLES times)
+ 
+    Architect Agent
+      Reads the localization report and proposes a concrete fix — what to
+      change, where, and why. Uses fix pattern library (PA-PH) to select
+      the minimal correct approach. Does NOT modify any files.
+          │
+          ▼
+    Editor Agent
+      Implements the Architect's proposal by editing source files and
+      producing a clean unified diff (git diff output).
+          │
+          ▼
+    [pre-checks]
+      - Patch application (git apply with fallback strategies)
+      - Syntax check (py_compile on all modified .py files)
+      If either fails → synthetic Critic fail → retry Architect
+          │
+          ▼
+    Critic Agent
+      Code review: evaluates the patch for correctness, completeness,
+      alignment with the proposal, and safety. Checks hints for regression
+      PR references. Does NOT run tests.
+          │
+          ├── verdict=pass → pipeline complete, patch saved
+          │
+          └── verdict=fail → regression_report fed back to Architect
+                             → next cycle begins (up to MAX_FIX_CYCLES)
+ 
+  Final scoring is done separately via the official SWE-bench harness:
+    python format_predictions.py
+    python -m swebench.harness.run_evaluation ...
+ 
 Environment variables are loaded from a .env file in the project root.
 See .env.example for all available variables.
 """
@@ -328,15 +357,19 @@ def clear_agent_state(instance_id: str, agent: str, logger: SwebenchCompatLogger
 
 def run_pipeline(instance: dict, client: docker.DockerClient, logger: SwebenchCompatLogger) -> dict:
     """
-    Globant-inspired two-stage pipeline:
-
-      Stage 1: Localization — finds relevant files and functions
-      Stage 2: Fixing loop
-        Architect  — proposes the fix
-        Editor     — implements the proposal
-        Critic     — verifies correctness, triggers retry if needed
-          └── on fail: Architect receives previous proposal + patch + test output
+    Two-stage pipeline for a single SWE-bench instance:
+ 
+      Stage 1: Localization Agent
+        Identifies the relevant files and symbols containing the bug.
+ 
+      Stage 2: Fix/Verify loop (up to PIPELINE_MAX_FIX_CYCLES)
+        Architect  — proposes the fix using the pattern library (PA-PH)
+        Editor     — implements the proposal as a git diff
+        [pre-check] — patch application + py_compile syntax check
+        Critic     — code review: correctness, completeness, alignment, safety
+          └── on fail: Architect receives issues + regression_report → retry
     """
+
     instance_id = instance["instance_id"]
     container   = None
 
