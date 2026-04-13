@@ -1,0 +1,416 @@
+{
+  "instance_id": "django__django-13757",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/fields/json.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/fields/json.py",
+      "location": "KeyTransformIsNull.as_oracle, line 370",
+      "change": "REPLACE lines 368-371:\n    def as_oracle(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\n        return super().as_sql(compiler, connection)\nWITH:\n    def as_oracle(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\n        # For isnull=True, check that key does NOT exist\n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\n        sql = \"NOT JSON_EXISTS(%s, '$%s')\" % (lhs, json_path)\n        return sql, lhs_params",
+      "rationale": "When isnull=True, we need to check that the key does NOT exist, not just that it's SQL NULL. The negated JSON_EXISTS check ensures only objects without the key match, not objects with the key having JSON null value."
+    },
+    {
+      "file": "/testbed/django/db/models/fields/json.py",
+      "location": "KeyTransformIsNull.as_sqlite, line 375",
+      "change": "REPLACE lines 373-376:\n    def as_sqlite(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\n        return super().as_sql(compiler, connection)\nWITH:\n    def as_sqlite(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\n        # For isnull=True, check that key does NOT exist  \n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\n        sql = \"JSON_TYPE(%s, '$%s') IS NULL\" % (lhs, json_path)\n        return sql, lhs_params",
+      "rationale": "When isnull=True, we need to check that the key does NOT exist using JSON_TYPE IS NULL, which returns true only when the key is missing, not when the key exists with JSON null value."
+    }
+  ],
+  "fix_strategy": "PA: None/empty guard placed at wrong level - Adding the missing logic for isnull=True case at the method level to handle key non-existence checks properly for SQLite and Oracle, preventing incorrect matches on JSON null values.",
+  "full_response": "<think>\nLet me analyze what I've discovered:\n\n1. The bug is in the `KeyTransformIsNull` class which handles `__isnull=True/False` queries on JSON keys.\n\n2. Currently, for `isnull=False`, it correctly delegates to `HasKey` for SQLite and Oracle, which uses:\n   - Oracle: `JSON_EXISTS(%s, '%%s')`  \n   - SQLite: `JSON_TYPE(%s, %%s) IS NOT NULL`\n\n3. For `isnull=True`, it falls back to the parent `lookups.IsNull.as_sql()` which generates a simple `IS NULL` check. This incorrectly matches both:\n   - Objects without the key (correct)\n   - Objects that have the key with JSON null value (incorrect)\n\n4. The problem statement shows that the test should be changed from `value__a__isnull=True` to `value__j__isnull=True` to catch this bug, suggesting that object has key 'j' with null value.\n\n5. For `isnull=True`, we need to check that the key does NOT exist, which is the opposite of `HasKey`.\n\nThe fix should be in the `as_oracle` and `as_sqlite` methods of `KeyTransformIsNull` to handle the `isnull=True` case (when `self.rhs` is True).\n\nFor Oracle, we need `JSON_EXISTS(%s, '%%s')` to return false (key doesn't exist).\nFor SQLite, we need `JSON_TYPE(%s, %%s) IS NOT NULL` to return false.\n\nSo the fix is:\n- Oracle: `NOT JSON_EXISTS(%s, '%%s')`  \n- SQLite: `JSON_TYPE(%s, %%s) IS NULL`\n\nThis matches pattern PA - we need to add the missing logic for the `isnull=True` case at the top level of these methods.\n</think>\n\nLooking at the code, I can see the issue clearly. The `KeyTransformIsNull` class only handles `isnull=False` (when `self.rhs` is `False`) by delegating to `HasKey`. For `isnull=True` (when `self.rhs` is `True`), it falls back to the parent class which generates a simple `IS NULL` check that incorrectly matches both missing keys and keys with JSON null values.\n\nThe fix needs to handle the `isnull=True` case by negating the key existence check.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/fields/json.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/fields/json.py\",\n      \"location\": \"KeyTransformIsNull.as_oracle, line 370\",\n      \"change\": \"REPLACE lines 368-371:\\n    def as_oracle(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\\n        return super().as_sql(compiler, connection)\\nWITH:\\n    def as_oracle(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\\n        # For isnull=True, check that key does NOT exist\\n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\\n        sql = \\\"NOT JSON_EXISTS(%s, '$%s')\\\" % (lhs, json_path)\\n        return sql, lhs_params\",\n      \"rationale\": \"When isnull=True, we need to check that the key does NOT exist, not just that it's SQL NULL. The negated JSON_EXISTS check ensures only objects without the key match, not objects with the key having JSON null value.\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/fields/json.py\", \n      \"location\": \"KeyTransformIsNull.as_sqlite, line 375\",\n      \"change\": \"REPLACE lines 373-376:\\n    def as_sqlite(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\\n        return super().as_sql(compiler, connection)\\nWITH:\\n    def as_sqlite(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\\n        # For isnull=True, check that key does NOT exist  \\n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\\n        sql = \\\"JSON_TYPE(%s, '$%s') IS NULL\\\" % (lhs, json_path)\\n        return sql, lhs_params\",\n      \"rationale\": \"When isnull=True, we need to check that the key does NOT exist using JSON_TYPE IS NULL, which returns true only when the key is missing, not when the key exists with JSON null value.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: None/empty guard placed at wrong level - Adding the missing logic for isnull=True case at the method level to handle key non-existence checks properly for SQLite and Oracle, preventing incorrect matches on JSON null values.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-13757</instance_id>\n\n<problem_statement>\nUsing __isnull=True on a KeyTransform should not match JSON null on SQLite and Oracle\nDescription\n\t\nThe KeyTransformIsNull lookup borrows the logic from HasKey for isnull=False, which is correct. If isnull=True, the query should only match objects that do not have the key. The query is correct for MariaDB, MySQL, and PostgreSQL. However, on SQLite and Oracle, the query also matches objects that have the key with the value null, which is incorrect.\nTo confirm, edit tests.model_fields.test_jsonfield.TestQuerying.test_isnull_key. For the first assertion, change\n\t\tself.assertSequenceEqual(\n\t\t\tNullableJSONModel.objects.filter(value__a__isnull=True),\n\t\t\tself.objs[:3] + self.objs[5:],\n\t\t)\nto\n\t\tself.assertSequenceEqual(\n\t\t\tNullableJSONModel.objects.filter(value__j__isnull=True),\n\t\t\tself.objs[:4] + self.objs[5:],\n\t\t)\nThe test previously only checks with value__a which could not catch this behavior because the value is not JSON null.\n\n</problem_statement>\n\n<hints>\n\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/fields/json.py\"\n]\nRelevant symbols: [\n  \"KeyTransformIsNull.as_oracle\",\n  \"KeyTransformIsNull.as_sqlite\"\n]\nBug analysis: The KeyTransformIsNull class handles isnull=False correctly by delegating to HasKey for SQLite and Oracle. However, for isnull=True, it falls back to the parent class lookups.IsNull.as_sql() which generates a simple IS NULL check. This incorrectly matches both objects without the key and objects that have the key with a JSON null value.\nExploration notes: KeyTransformIsNull is defined in /testbed/django/db/models/fields/json.py. The class has as_oracle() and as_sqlite() methods that only handle the case when self.rhs is False (isnull=False). The HasKey class in the same file provides the correct key existence logic for both databases via as_oracle() and as_sqlite() methods using JSON_EXISTS and JSON_TYPE respectively. The test_isnull_key method in /testbed/tests/model_fields/test_jsonfield.py shows the expected behavior where objects with key 'j' having null value should not match isnull=True queries.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Looking at the problem, I need to understand how `KeyTransformIsNull` should behave for `isnull=True` on SQLite and Oracle databases. Let me start by reading the relevant files.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017cSpFwx8DnEWJ36uDVtpq8",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/fields/json.py"
+          },
+          "name": "get_classes_and_methods",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017cSpFwx8DnEWJ36uDVtpq8",
+          "content": "[exit_code=0]\nclass JSONField (line 16)\nclass DataContains (line 137)\nclass ContainedBy (line 152)\nclass HasKeyLookup (line 167)\nclass HasKey (line 219)\nclass HasKeys (line 225)\nclass HasAnyKeys (line 234)\nclass JSONExact (line 240)\nclass KeyTransform (line 271)\nclass KeyTextTransform (line 321)\nclass KeyTransformTextLookupMixin (line 326)\nclass CaseInsensitiveMixin (line 346)\nclass KeyTransformIsNull (line 366)\nclass KeyTransformIn (line 379)\nclass KeyTransformExact (line 402)\nclass KeyTransformIExact (line 446)\nclass KeyTransformIContains (line 450)\nclass KeyTransformStartsWith (line 454)\nclass KeyTransformIStartsWith (line 458)\nclass KeyTransformEndsWith (line 462)\nclass KeyTransformIEndsWith (line 466)\nclass KeyTransformRegex (line 470)\nclass KeyTransformIRegex (line 474)\nclass KeyTransformNumericLookupMixin (line 478)\nclass KeyTransformLt (line 486)\nclass KeyTransformLte (line 490)\nclass KeyTransformGt (line 494)\nclass KeyTransformGte (line 498)\nclass KeyTransformFactory (line 520)\n  def __init__ (line 24)\n  def check (line 36)\n  def _check_supported (line 42)\n  def deconstruct (line 67)\n  def from_db_value (line 75)\n  def get_internal_type (line 87)\n  def get_prep_value (line 90)\n  def get_transform (line 95)\n  def validate (line 101)\n  def value_to_string (line 112)\n  def formfield (line 115)\n  def compile_json_path (line 124)\n  def as_sql (line 141)\n  def as_sql (line 156)\n  def as_sql (line 170)\n  def as_mysql (line 198)\n  def as_oracle (line 201)\n  def as_postgresql (line 207)\n  def as_sqlite (line 215)\n  def get_prep_lookup (line 230)\n  def process_lhs (line 243)\n  def process_rhs (line 252)\n  def __init__ (line 275)\n  def preprocess_lhs (line 279)\n  def as_mysql (line 291)\n  def as_oracle (line 296)\n  def as_postgresql (line 304)\n  def as_sqlite (line 315)\n  def __init__ (line 333)\n  def process_lhs (line 353)\n  def process_rhs (line 359)\n  def as_oracle (line 368)\n  def as_sqlite (line 373)\n  def resolve_expression_parameter (line 380)\n  def process_lhs (line 403)\n  def process_rhs (line 412)\n  def as_oracle (line 431)\n  def process_rhs (line 479)\n  def __init__ (line 522)\n  def __call__ (line 525)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me examine the `KeyTransformIsNull` class specifically:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Kp43BbAFnYD8JuM5VzJxz3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/fields/json.py",
+            "method_name": "KeyTransformIsNull"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Kp43BbAFnYD8JuM5VzJxz3",
+          "content": "[exit_code=0]\nMethod not found: KeyTransformIsNull"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me extract the class definition around line 366:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_015FaDTG8obModomWqHHfKr6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '360,380p' django/db/models/fields/json.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015FaDTG8obModomWqHHfKr6",
+          "content": "[exit_code=0]\nrhs, rhs_params = super().process_rhs(compiler, connection)\n        if connection.vendor == 'mysql':\n            return 'LOWER(%s)' % rhs, rhs_params\n        return rhs, rhs_params\n\n\nclass KeyTransformIsNull(lookups.IsNull):\n    # key__isnull=False is the same as has_key='key'\n    def as_oracle(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\n        return super().as_sql(compiler, connection)\n\n    def as_sqlite(self, compiler, connection):\n        if not self.rhs:\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\n        return super().as_sql(compiler, connection)\n\n\nclass KeyTransformIn(lookups.In):\n    def resolve_expression_parameter(self, compiler, connection, sql, param):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the `HasKey` class to understand the correct logic:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Hf31EQwWZ4a7rqS8ec72B8",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/fields/json.py",
+            "method_name": "HasKey"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Hf31EQwWZ4a7rqS8ec72B8",
+          "content": "[exit_code=0]\nMethod not found: HasKey"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me find the HasKey class:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018dLQfv8Bk9prR7u1pk8ZcX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '215,235p' django/db/models/fields/json.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018dLQfv8Bk9prR7u1pk8ZcX",
+          "content": "[exit_code=0]\ndef as_sqlite(self, compiler, connection):\n        return self.as_sql(compiler, connection, template='JSON_TYPE(%s, %%s) IS NOT NULL')\n\n\nclass HasKey(HasKeyLookup):\n    lookup_name = 'has_key'\n    postgres_operator = '?'\n    prepare_rhs = False\n\n\nclass HasKeys(HasKeyLookup):\n    lookup_name = 'has_keys'\n    postgres_operator = '?&'\n    logical_operator = ' AND '\n\n    def get_prep_lookup(self):\n        return [str(item) for item in self.rhs]\n\n\nclass HasAnyKeys(HasKeys):\n    lookup_name = 'has_any_keys'"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I need to see more of the HasKeyLookup class to understand the Oracle and SQLite implementations:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BVpEicV47idRLEzhisgHN3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '167,218p' django/db/models/fields/json.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BVpEicV47idRLEzhisgHN3",
+          "content": "[exit_code=0]\nclass HasKeyLookup(PostgresOperatorLookup):\n    logical_operator = None\n\n    def as_sql(self, compiler, connection, template=None):\n        # Process JSON path from the left-hand side.\n        if isinstance(self.lhs, KeyTransform):\n            lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\n            lhs_json_path = compile_json_path(lhs_key_transforms)\n        else:\n            lhs, lhs_params = self.process_lhs(compiler, connection)\n            lhs_json_path = '$'\n        sql = template % lhs\n        # Process JSON path from the right-hand side.\n        rhs = self.rhs\n        rhs_params = []\n        if not isinstance(rhs, (list, tuple)):\n            rhs = [rhs]\n        for key in rhs:\n            if isinstance(key, KeyTransform):\n                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)\n            else:\n                rhs_key_transforms = [key]\n            rhs_params.append('%s%s' % (\n                lhs_json_path,\n                compile_json_path(rhs_key_transforms, include_root=False),\n            ))\n        # Add condition for each key.\n        if self.logical_operator:\n            sql = '(%s)' % self.logical_operator.join([sql] * len(rhs_params))\n        return sql, tuple(lhs_params) + tuple(rhs_params)\n\n    def as_mysql(self, compiler, connection):\n        return self.as_sql(compiler, connection, template=\"JSON_CONTAINS_PATH(%s, 'one', %%s)\")\n\n    def as_oracle(self, compiler, connection):\n        sql, params = self.as_sql(compiler, connection, template=\"JSON_EXISTS(%s, '%%s')\")\n        # Add paths directly into SQL because path expressions cannot be passed\n        # as bind variables on Oracle.\n        return sql % tuple(params), []\n\n    def as_postgresql(self, compiler, connection):\n        if isinstance(self.rhs, KeyTransform):\n            *_, rhs_key_transforms = self.rhs.preprocess_lhs(compiler, connection)\n            for key in rhs_key_transforms[:-1]:\n                self.lhs = KeyTransform(key, self.lhs)\n            self.rhs = rhs_key_transforms[-1]\n        return super().as_postgresql(compiler, connection)\n\n    def as_sqlite(self, compiler, connection):\n        return self.as_sql(compiler, connection, template='JSON_TYPE(%s, %%s) IS NOT NULL')"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let's look at the test file to understand what behavior is expected:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KeSesg3nMpn4jwzcEu2E7f",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"test_jsonfield.py\" -path \"*/test*\" | head -1"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KeSesg3nMpn4jwzcEu2E7f",
+          "content": "[exit_code=0]\n./tests/forms_tests/field_tests/test_jsonfield.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_014YFwUjwxFZ3eNScSegMvr6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"*.py\" -path \"*model_fields*\" | grep -i json"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014YFwUjwxFZ3eNScSegMvr6",
+          "content": "[exit_code=0]\n./tests/model_fields/test_jsonfield.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check this test file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EN3SWKrWoeiqkqzDjiJTFq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -A 20 \"test_isnull_key\" tests/model_fields/test_jsonfield.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EN3SWKrWoeiqkqzDjiJTFq",
+          "content": "[exit_code=0]\ndef test_isnull_key(self):\n        # key__isnull=False works the same as has_key='key'.\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__a__isnull=True),\n            self.objs[:3] + self.objs[5:],\n        )\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__a__isnull=False),\n            [self.objs[3], self.objs[4]],\n        )\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__j__isnull=False),\n            [self.objs[4]],\n        )\n\n    def test_isnull_key_or_none(self):\n        obj = NullableJSONModel.objects.create(value={'a': None})\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(Q(value__a__isnull=True) | Q(value__a=None)),\n            self.objs[:3] + self.objs[5:] + [obj],\n        )\n\n    def test_none_key(self):\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__j=None),\n            [self.objs[4]],\n        )\n\n    def test_none_key_exclude(self):\n        obj = NullableJSONModel.objects.create(value={'j': 1})\n        if connection.vendor == 'oracle':\n            # Oracle supports filtering JSON objects with NULL keys, but the\n            # current implementation doesn't support it.\n            self.assertSequenceEqual(\n                NullableJSONModel.objects.exclude(value__j=None),\n                self.objs[1:4] + self.objs[5:] + [obj],"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me see what the test objects look like:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BhvkbqfFcu7d9zC594zd57",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -B 20 -A 10 \"self.objs\" tests/model_fields/test_jsonfield.py | head -50"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BhvkbqfFcu7d9zC594zd57",
+          "content": "[exit_code=0]\n'foo': 'bar',\n                'baz': {'a': 'b', 'c': 'd'},\n                'bar': ['foo', 'bar'],\n                'bax': {'foo': 'bar'},\n            },\n        ]\n        cls.objs = [\n            NullableJSONModel.objects.create(value=value)\n            for value in values\n        ]\n        if connection.features.supports_primitives_in_json_field:\n            cls.objs.extend([\n                NullableJSONModel.objects.create(value=value)\n                for value in cls.primitives\n            ])\n        cls.raw_sql = '%s::jsonb' if connection.vendor == 'postgresql' else '%s'\n\n    def test_exact(self):\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__exact={}),\n            [self.objs[2]],\n        )\n\n    def test_exact_complex(self):\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__exact={'a': 'b', 'c': 14}),\n            [self.objs[3]],\n        )\n\n    def test_isnull(self):\n        self.assertSequenceEqual(\n            NullableJSONModel.objects.filter(value__isnull=True),\n            [self.objs[0]],\n        )\n\n    def test_ordering_by_transform(self):\n        mariadb = connection.vendor == 'mysql' and connection.mysql_is_mariadb\n        values = [\n            {'ord': 93, 'name': 'bar'},\n            {'ord': 22.1, 'name': 'foo'},\n            {'ord': -1, 'name': 'baz'},\n            {'ord': 21.931902, 'name': 'spam'},\n            {'ord': -100291029, 'name': 'eggs'},\n--\n            with self.subTest(field=field_name):\n                objs = [\n                    NullableJSONModel.objects.create(**{field_name: value})\n                    for value in values\n                ]\n                query = NullableJSONModel.objects.filter("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me look more specifically at the values used in the test setup:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EsHuaCjY4mu5q2Cof4nUp7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '900,950p' tests/model_fields/test_jsonfield.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EsHuaCjY4mu5q2Cof4nUp7",
+          "content": "[exit_code=0]\ndef test_join_key_transform_annotation_expression(self):\n        related_obj = RelatedJSONModel.objects.create(\n            value={'d': ['f', 'e']},\n            json_model=self.objs[4],\n        )\n        RelatedJSONModel.objects.create(\n            value={'d': ['e', 'f']},\n            json_model=self.objs[4],\n        )\n        self.assertSequenceEqual(\n            RelatedJSONModel.objects.annotate(\n                key=F('value__d'),\n                related_key=F('json_model__value__d'),\n                chain=F('key__1'),\n                expr=Cast('key', models.JSONField()),\n            ).filter(chain=F('related_key__0')),\n            [related_obj],\n        )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me find the test setup code that defines the values:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Mn3R9AqsnFy1hZPccEEFZD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"setUpTestData\\|def setUp\" tests/model_fields/test_jsonfield.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Mn3R9AqsnFy1hZPccEEFZD",
+          "content": "[exit_code=0]\n265:    def setUpTestData(cls):"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "IMPORTANT: You are running out of iterations. Stop exploring immediately. Based on everything you have found so far, write the reproduction test NOW and output the required JSON block. Do not make any more exploratory tool calls."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLet me analyze what I've discovered:\n\n1. The bug is in the `KeyTransformIsNull` class which handles `__isnull=True/False` queries on JSON keys.\n\n2. Currently, for `isnull=False`, it correctly delegates to `HasKey` for SQLite and Oracle, which uses:\n   - Oracle: `JSON_EXISTS(%s, '%%s')`  \n   - SQLite: `JSON_TYPE(%s, %%s) IS NOT NULL`\n\n3. For `isnull=True`, it falls back to the parent `lookups.IsNull.as_sql()` which generates a simple `IS NULL` check. This incorrectly matches both:\n   - Objects without the key (correct)\n   - Objects that have the key with JSON null value (incorrect)\n\n4. The problem statement shows that the test should be changed from `value__a__isnull=True` to `value__j__isnull=True` to catch this bug, suggesting that object has key 'j' with null value.\n\n5. For `isnull=True`, we need to check that the key does NOT exist, which is the opposite of `HasKey`.\n\nThe fix should be in the `as_oracle` and `as_sqlite` methods of `KeyTransformIsNull` to handle the `isnull=True` case (when `self.rhs` is True).\n\nFor Oracle, we need `JSON_EXISTS(%s, '%%s')` to return false (key doesn't exist).\nFor SQLite, we need `JSON_TYPE(%s, %%s) IS NOT NULL` to return false.\n\nSo the fix is:\n- Oracle: `NOT JSON_EXISTS(%s, '%%s')`  \n- SQLite: `JSON_TYPE(%s, %%s) IS NULL`\n\nThis matches pattern PA - we need to add the missing logic for the `isnull=True` case at the top level of these methods.\n</think>\n\nLooking at the code, I can see the issue clearly. The `KeyTransformIsNull` class only handles `isnull=False` (when `self.rhs` is `False`) by delegating to `HasKey`. For `isnull=True` (when `self.rhs` is `True`), it falls back to the parent class which generates a simple `IS NULL` check that incorrectly matches both missing keys and keys with JSON null values.\n\nThe fix needs to handle the `isnull=True` case by negating the key existence check.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/fields/json.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/fields/json.py\",\n      \"location\": \"KeyTransformIsNull.as_oracle, line 370\",\n      \"change\": \"REPLACE lines 368-371:\\n    def as_oracle(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\\n        return super().as_sql(compiler, connection)\\nWITH:\\n    def as_oracle(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_oracle(compiler, connection)\\n        # For isnull=True, check that key does NOT exist\\n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\\n        sql = \\\"NOT JSON_EXISTS(%s, '$%s')\\\" % (lhs, json_path)\\n        return sql, lhs_params\",\n      \"rationale\": \"When isnull=True, we need to check that the key does NOT exist, not just that it's SQL NULL. The negated JSON_EXISTS check ensures only objects without the key match, not objects with the key having JSON null value.\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/fields/json.py\", \n      \"location\": \"KeyTransformIsNull.as_sqlite, line 375\",\n      \"change\": \"REPLACE lines 373-376:\\n    def as_sqlite(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\\n        return super().as_sql(compiler, connection)\\nWITH:\\n    def as_sqlite(self, compiler, connection):\\n        if not self.rhs:\\n            return HasKey(self.lhs.lhs, self.lhs.key_name).as_sqlite(compiler, connection)\\n        # For isnull=True, check that key does NOT exist  \\n        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(compiler, connection)\\n        json_path = compile_json_path(lhs_key_transforms, include_root=False)\\n        sql = \\\"JSON_TYPE(%s, '$%s') IS NULL\\\" % (lhs, json_path)\\n        return sql, lhs_params\",\n      \"rationale\": \"When isnull=True, we need to check that the key does NOT exist using JSON_TYPE IS NULL, which returns true only when the key is missing, not when the key exists with JSON null value.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: None/empty guard placed at wrong level - Adding the missing logic for isnull=True case at the method level to handle key non-existence checks properly for SQLite and Oracle, preventing incorrect matches on JSON null values.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 13,
+  "timestamp": "2026-04-13T08:42:29Z"
+}

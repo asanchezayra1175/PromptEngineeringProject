@@ -1,0 +1,336 @@
+{
+  "instance_id": "django__django-12470",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex 92213a4e67..b6ad12cc67 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -338,7 +338,7 @@ class SQLCompiler:\n                 # 'col' is of the form 'field' or 'field1__field2' or\n                 # '-field1__field2__field', etc.\n                 order_by.extend(self.find_ordering_name(\n-                    field, self.query.get_meta(), default_order=asc))\n+                    field, self.query.get_meta(), default_order=order))\n             else:\n                 if col not in self.query.extra_select:\n                     order_by.append((",
+  "implementation_notes": "Changed the default_order parameter passed to find_ordering_name from 'asc' to 'order' in the get_order_by method. This preserves the descending direction parsed from '-pk' when handling inherited models, ensuring the correct ORDER BY direction is used in the generated SQL query.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-12470</instance_id>\n\n<problem_statement>\nInherited model doesn't correctly order by \"-pk\" when specified on Parent.Meta.ordering\nDescription\n\t\nGiven the following model definition:\nfrom django.db import models\nclass Parent(models.Model):\n\tclass Meta:\n\t\tordering = [\"-pk\"]\nclass Child(Parent):\n\tpass\nQuerying the Child class results in the following:\n>>> print(Child.objects.all().query)\nSELECT \"myapp_parent\".\"id\", \"myapp_child\".\"parent_ptr_id\" FROM \"myapp_child\" INNER JOIN \"myapp_parent\" ON (\"myapp_child\".\"parent_ptr_id\" = \"myapp_parent\".\"id\") ORDER BY \"myapp_parent\".\"id\" ASC\nThe query is ordered ASC but I expect the order to be DESC.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The get_order_by method in SQLCompiler correctly parses '-pk' into descending direction using get_order_dir, but when handling inherited models, the ordering direction is lost during field resolution. The method processes ordering fields from the model's Meta.ordering, correctly identifies '-pk' as descending order, but when resolving the field reference for inherited models (where pk points to the parent table), the descending direction is not preserved in the final SQL generation.\nExploration notes: The bug is in /testbed/django/db/models/sql/compiler.py around line 268 in the get_order_by method. The method calls get_order_dir from /testbed/django/db/models/sql/query.py line 2256 which correctly parses '-pk' into ('pk', 'DESC'). However, the descending direction gets lost when the compiler resolves field references for inherited models where the primary key field refers to the parent table. The test target 'test_inherited_ordering_pk_desc (model_inheritance.tests.ModelInheritanceTests)' indicates this should be tested with inherited model classes like Child(Parent) where Parent has ordering = ['-pk'].\n</localization_report>\n\n<solution_proposal>\nFix strategy: Pattern PH: The find_ordering_name call receives the wrong argument - it gets default_order=asc instead of default_order=order, causing the direction parsed by get_order_dir to be ignored. This single argument change preserves the descending direction for inherited model ordering.\n\nFiles to modify: [\n  \"/testbed/django/db/models/sql/compiler.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/sql/compiler.py\n  Location: SQLCompiler.get_order_by, line 323\n  Change  : REPLACE line 323:\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=asc))\nWITH:\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=order))\n  Rationale: The method correctly parses '-pk' into ('pk', 'DESC') using get_order_dir on line 302, but then incorrectly passes default_order=asc to find_ordering_name instead of the parsed order direction. This causes the descending direction to be lost for inherited models where the pk field resolves to the parent table.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified to understand the context and locate the exact line to change.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Tcr4k67Ggf5ENHo6sCzZBY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -n 350 django/db/models/sql/compiler.py | tail -n 100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Tcr4k67Ggf5ENHo6sCzZBY",
+          "content": "[exit_code=0]\nget_select_from_parent(klass_info)\n\n        ret = []\n        for col, alias in select:\n            try:\n                sql, params = self.compile(col)\n            except EmptyResultSet:\n                # Select a predicate that's always False.\n                sql, params = '0', ()\n            else:\n                sql, params = col.select_format(self, sql, params)\n            ret.append((col, (sql, params), alias))\n        return ret, klass_info, annotations\n\n    def get_order_by(self):\n        \"\"\"\n        Return a list of 2-tuples of form (expr, (sql, params, is_ref)) for the\n        ORDER BY clause.\n\n        The order_by clause can alter the select clause (for example it\n        can add aliases to clauses that do not yet have one, or it can\n        add totally new select clauses).\n        \"\"\"\n        if self.query.extra_order_by:\n            ordering = self.query.extra_order_by\n        elif not self.query.default_ordering:\n            ordering = self.query.order_by\n        elif self.query.order_by:\n            ordering = self.query.order_by\n        elif self.query.get_meta().ordering:\n            ordering = self.query.get_meta().ordering\n            self._meta_ordering = ordering\n        else:\n            ordering = []\n        if self.query.standard_ordering:\n            asc, desc = ORDER_DIR['ASC']\n        else:\n            asc, desc = ORDER_DIR['DESC']\n\n        order_by = []\n        for field in ordering:\n            if hasattr(field, 'resolve_expression'):\n                if isinstance(field, Value):\n                    # output_field must be resolved for constants.\n                    field = Cast(field, field.output_field)\n                if not isinstance(field, OrderBy):\n                    field = field.asc()\n                if not self.query.standard_ordering:\n                    field = field.copy()\n                    field.reverse_ordering()\n                order_by.append((field, False))\n                continue\n            if field == '?':  # random\n                order_by.append((OrderBy(Random()), False))\n                continue\n\n            col, order = get_order_dir(field, asc)\n            descending = order == 'DESC'\n\n            if col in self.query.annotation_select:\n                # Reference to expression in SELECT clause\n                order_by.append((\n                    OrderBy(Ref(col, self.query.annotation_select[col]), descending=descending),\n                    True))\n                continue\n            if col in self.query.annotations:\n                # References to an expression which is masked out of the SELECT\n                # clause.\n                expr = self.query.annotations[col]\n                if isinstance(expr, Value):\n                    # output_field must be resolved for constants.\n                    expr = Cast(expr, expr.output_field)\n                order_by.append((OrderBy(expr, descending=descending), False))\n                continue\n\n            if '.' in field:\n                # This came in through an extra(order_by=...) addition. Pass it\n                # on verbatim.\n                table, col = col.split('.', 1)\n                order_by.append((\n                    OrderBy(\n                        RawSQL('%s.%s' % (self.quote_name_unless_alias(table), col), []),\n                        descending=descending\n                    ), False))\n                continue\n\n            if not self.query.extra or col not in self.query.extra:\n                # 'col' is of the form 'field' or 'field1__field2' or\n                # '-field1__field2__field', etc.\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=asc))\n            else:\n                if col not in self.query.extra_select:\n                    order_by.append((\n                        OrderBy(RawSQL(*self.query.extra[col]), descending=descending),\n                        False))\n                else:\n                    order_by.append((\n                        OrderBy(Ref(col, RawSQL(*self.query.extra[col])), descending=descending),\n                        True))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read more context around the area, specifically looking at the get_order_by method more completely:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Bd5TCuRhm2jAqnvThrjPRe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '270,340p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Bd5TCuRhm2jAqnvThrjPRe",
+          "content": "[exit_code=0]\nThe order_by clause can alter the select clause (for example it\n        can add aliases to clauses that do not yet have one, or it can\n        add totally new select clauses).\n        \"\"\"\n        if self.query.extra_order_by:\n            ordering = self.query.extra_order_by\n        elif not self.query.default_ordering:\n            ordering = self.query.order_by\n        elif self.query.order_by:\n            ordering = self.query.order_by\n        elif self.query.get_meta().ordering:\n            ordering = self.query.get_meta().ordering\n            self._meta_ordering = ordering\n        else:\n            ordering = []\n        if self.query.standard_ordering:\n            asc, desc = ORDER_DIR['ASC']\n        else:\n            asc, desc = ORDER_DIR['DESC']\n\n        order_by = []\n        for field in ordering:\n            if hasattr(field, 'resolve_expression'):\n                if isinstance(field, Value):\n                    # output_field must be resolved for constants.\n                    field = Cast(field, field.output_field)\n                if not isinstance(field, OrderBy):\n                    field = field.asc()\n                if not self.query.standard_ordering:\n                    field = field.copy()\n                    field.reverse_ordering()\n                order_by.append((field, False))\n                continue\n            if field == '?':  # random\n                order_by.append((OrderBy(Random()), False))\n                continue\n\n            col, order = get_order_dir(field, asc)\n            descending = order == 'DESC'\n\n            if col in self.query.annotation_select:\n                # Reference to expression in SELECT clause\n                order_by.append((\n                    OrderBy(Ref(col, self.query.annotation_select[col]), descending=descending),\n                    True))\n                continue\n            if col in self.query.annotations:\n                # References to an expression which is masked out of the SELECT\n                # clause.\n                expr = self.query.annotations[col]\n                if isinstance(expr, Value):\n                    # output_field must be resolved for constants.\n                    expr = Cast(expr, expr.output_field)\n                order_by.append((OrderBy(expr, descending=descending), False))\n                continue\n\n            if '.' in field:\n                # This came in through an extra(order_by=...) addition. Pass it\n                # on verbatim.\n                table, col = col.split('.', 1)\n                order_by.append((\n                    OrderBy(\n                        RawSQL('%s.%s' % (self.quote_name_unless_alias(table), col), []),\n                        descending=descending\n                    ), False))\n                continue\n\n            if not self.query.extra or col not in self.query.extra:\n                # 'col' is of the form 'field' or 'field1__field2' or\n                # '-field1__field2__field', etc.\n                order_by.extend(self.find_ordering_name("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get a few more lines to see the complete call:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XEWz2AqpR12TtehxXYfT3p",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '320,335p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XEWz2AqpR12TtehxXYfT3p",
+          "content": "[exit_code=0]\nif isinstance(expr, Value):\n                    # output_field must be resolved for constants.\n                    expr = Cast(expr, expr.output_field)\n                order_by.append((OrderBy(expr, descending=descending), False))\n                continue\n\n            if '.' in field:\n                # This came in through an extra(order_by=...) addition. Pass it\n                # on verbatim.\n                table, col = col.split('.', 1)\n                order_by.append((\n                    OrderBy(\n                        RawSQL('%s.%s' % (self.quote_name_unless_alias(table), col), []),\n                        descending=descending\n                    ), False))\n                continue"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get the complete get_order_by method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MrocxpkAF9GpJ2KnTh1Qiv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '266,350p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MrocxpkAF9GpJ2KnTh1Qiv",
+          "content": "[exit_code=0]\n\"\"\"\n        Return a list of 2-tuples of form (expr, (sql, params, is_ref)) for the\n        ORDER BY clause.\n\n        The order_by clause can alter the select clause (for example it\n        can add aliases to clauses that do not yet have one, or it can\n        add totally new select clauses).\n        \"\"\"\n        if self.query.extra_order_by:\n            ordering = self.query.extra_order_by\n        elif not self.query.default_ordering:\n            ordering = self.query.order_by\n        elif self.query.order_by:\n            ordering = self.query.order_by\n        elif self.query.get_meta().ordering:\n            ordering = self.query.get_meta().ordering\n            self._meta_ordering = ordering\n        else:\n            ordering = []\n        if self.query.standard_ordering:\n            asc, desc = ORDER_DIR['ASC']\n        else:\n            asc, desc = ORDER_DIR['DESC']\n\n        order_by = []\n        for field in ordering:\n            if hasattr(field, 'resolve_expression'):\n                if isinstance(field, Value):\n                    # output_field must be resolved for constants.\n                    field = Cast(field, field.output_field)\n                if not isinstance(field, OrderBy):\n                    field = field.asc()\n                if not self.query.standard_ordering:\n                    field = field.copy()\n                    field.reverse_ordering()\n                order_by.append((field, False))\n                continue\n            if field == '?':  # random\n                order_by.append((OrderBy(Random()), False))\n                continue\n\n            col, order = get_order_dir(field, asc)\n            descending = order == 'DESC'\n\n            if col in self.query.annotation_select:\n                # Reference to expression in SELECT clause\n                order_by.append((\n                    OrderBy(Ref(col, self.query.annotation_select[col]), descending=descending),\n                    True))\n                continue\n            if col in self.query.annotations:\n                # References to an expression which is masked out of the SELECT\n                # clause.\n                expr = self.query.annotations[col]\n                if isinstance(expr, Value):\n                    # output_field must be resolved for constants.\n                    expr = Cast(expr, expr.output_field)\n                order_by.append((OrderBy(expr, descending=descending), False))\n                continue\n\n            if '.' in field:\n                # This came in through an extra(order_by=...) addition. Pass it\n                # on verbatim.\n                table, col = col.split('.', 1)\n                order_by.append((\n                    OrderBy(\n                        RawSQL('%s.%s' % (self.quote_name_unless_alias(table), col), []),\n                        descending=descending\n                    ), False))\n                continue\n\n            if not self.query.extra or col not in self.query.extra:\n                # 'col' is of the form 'field' or 'field1__field2' or\n                # '-field1__field2__field', etc.\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=asc))\n            else:\n                if col not in self.query.extra_select:\n                    order_by.append((\n                        OrderBy(RawSQL(*self.query.extra[col]), descending=descending),\n                        False))\n                else:\n                    order_by.append((\n                        OrderBy(Ref(col, RawSQL(*self.query.extra[col])), descending=descending),\n                        True))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the issue. On line 338 (in the output above, which is line 323 in the actual file based on the location mentioned in the solution), the `find_ordering_name` call uses `default_order=asc` but it should use `default_order=order` to preserve the parsed direction. Let me verify the exact line number:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01LpqFcNjm23bS4NHxZidAUh",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"find_ordering_name\" django/db/models/sql/compiler.py | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LpqFcNjm23bS4NHxZidAUh",
+          "content": "[exit_code=0]\n340:                order_by.extend(self.find_ordering_name(\n699:    def find_ordering_name(self, name, opts, alias=None, default_order='ASC',\n729:                results.extend(self.find_ordering_name(item, opts, alias,"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "So the line is around 340-341. Let me view the exact context around line 340:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JcSGcs4oyCXxhj4sLKFeup",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '335,345p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JcSGcs4oyCXxhj4sLKFeup",
+          "content": "[exit_code=0]\ncontinue\n\n            if not self.query.extra or col not in self.query.extra:\n                # 'col' is of the form 'field' or 'field1__field2' or\n                # '-field1__field2__field', etc.\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=asc))\n            else:\n                if col not in self.query.extra_select:\n                    order_by.append((\n                        OrderBy(RawSQL(*self.query.extra[col]), descending=descending),"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the exact issue. On line 341, we have `default_order=asc` but it should be `default_order=order`. Let me also verify what `order` contains by looking at line 306 where it's set:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HLfJsBBTSUXhuBQG6SvnNn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '300,310p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HLfJsBBTSUXhuBQG6SvnNn",
+          "content": "[exit_code=0]\nfield.reverse_ordering()\n                order_by.append((field, False))\n                continue\n            if field == '?':  # random\n                order_by.append((OrderBy(Random()), False))\n                continue\n\n            col, order = get_order_dir(field, asc)\n            descending = order == 'DESC'\n\n            if col in self.query.annotation_select:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! So on line 306, `order` is set from `get_order_dir(field, asc)` which returns a tuple where the second element is either 'ASC' or 'DESC'. The `order` variable contains the correct direction that should be passed to `find_ordering_name`. \n\nNow let me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CnkS6c8mKuqu1ZPb1ftwpA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\nimport re\n\nwith open('django/db/models/sql/compiler.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the specific line\n# We need to change: default_order=asc to default_order=order\n# Looking for the exact pattern on line 341\n\nold_pattern = r\"order_by\\.extend\\(self\\.find_ordering_name\\(\\s+field, self\\.query\\.get_meta\\(\\), default_order=asc\\)\\)\"\nnew_text = \"order_by.extend(self.find_ordering_name(\\n                    field, self.query.get_meta(), default_order=order))\"\n\ncontent = re.sub(old_pattern, new_text, content)\n\nwith open('django/db/models/sql/compiler.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CnkS6c8mKuqu1ZPb1ftwpA",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JAWpsULBNLTQpc4V86qigW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '335,345p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JAWpsULBNLTQpc4V86qigW",
+          "content": "[exit_code=0]\ncontinue\n\n            if not self.query.extra or col not in self.query.extra:\n                # 'col' is of the form 'field' or 'field1__field2' or\n                # '-field1__field2__field', etc.\n                order_by.extend(self.find_ordering_name(\n                    field, self.query.get_meta(), default_order=order))\n            else:\n                if col not in self.query.extra_select:\n                    order_by.append((\n                        OrderBy(RawSQL(*self.query.extra[col]), descending=descending),"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! The change has been applied. Now let's verify it with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0194Aaae2H6Ru6ZmYiUbgRUd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0194Aaae2H6Ru6ZmYiUbgRUd",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex 92213a4e67..b6ad12cc67 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -338,7 +338,7 @@ class SQLCompiler:\n                 # 'col' is of the form 'field' or 'field1__field2' or\n                 # '-field1__field2__field', etc.\n                 order_by.extend(self.find_ordering_name(\n-                    field, self.query.get_meta(), default_order=asc))\n+                    field, self.query.get_meta(), default_order=order))\n             else:\n                 if col not in self.query.extra_select:\n                     order_by.append(("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been correctly applied. The modification changes `default_order=asc` to `default_order=order` on line 341 of the `get_order_by` method in `/testbed/django/db/models/sql/compiler.py`. This ensures that the parsed ordering direction from `get_order_dir` (which correctly extracts 'DESC' from '-pk') is passed to `find_ordering_name` instead of always using the default ASC order.\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\\nindex 92213a4e67..b6ad12cc67 100644\\n--- a/django/db/models/sql/compiler.py\\n+++ b/django/db/models/sql/compiler.py\\n@@ -338,7 +338,7 @@ class SQLCompiler:\\n                 # 'col' is of the form 'field' or 'field1__field2' or\\n                 # '-field1__field2__field', etc.\\n                 order_by.extend(self.find_ordering_name(\\n-                    field, self.query.get_meta(), default_order=asc))\\n+                    field, self.query.get_meta(), default_order=order))\\n             else:\\n                 if col not in self.query.extra_select:\\n                     order_by.append((\",\n  \"implementation_notes\": \"Changed the default_order parameter passed to find_ordering_name from 'asc' to 'order' in the get_order_by method. This preserves the descending direction parsed from '-pk' when handling inherited models, ensuring the correct ORDER BY direction is used in the generated SQL query.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 11,
+  "timestamp": "2026-04-13T07:58:30Z"
+}

@@ -1,0 +1,150 @@
+{
+  "instance_id": "django__django-15347",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/contrib/messages/storage/cookie.py b/django/contrib/messages/storage/cookie.py\nindex 1d390c71dd..e48d4edb08 100644\n--- a/django/contrib/messages/storage/cookie.py\n+++ b/django/contrib/messages/storage/cookie.py\n@@ -19,7 +19,7 @@ class MessageEncoder(json.JSONEncoder):\n             # Using 0/1 here instead of False/True to produce more compact json\n             is_safedata = 1 if isinstance(obj.message, SafeData) else 0\n             message = [self.message_key, is_safedata, obj.level, obj.message]\n-            if obj.extra_tags:\n+            if obj.extra_tags is not None:\n                 message.append(obj.extra_tags)\n             return message\n         return super().default(obj)",
+  "implementation_notes": "Changed the condition in MessageEncoder.default from `if obj.extra_tags:` to `if obj.extra_tags is not None:` to properly serialize empty strings instead of treating them as falsy values. This preserves empty string extra_tags during serialization and deserialization cycles.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-15347</instance_id>\n\n<problem_statement>\nMessages framework incorrectly serializes/deserializes extra_tags when it's an empty string\nDescription\n\t\nWhen a message is serialised and then deserialised with any of the built in storage backends, then extra_tags==\"\" is converted to extra_tags==None. This is because MessageEncoder checks for the truthyness of extra_tags rather than checking it is not None.\nTo replicate this bug\n>>> from django.conf import settings\n>>> settings.configure() # Just to allow the following import\n>>> from django.contrib.messages.storage.base import Message\n>>> from django.contrib.messages.storage.cookie import MessageEncoder, MessageDecoder\n>>> original_message = Message(10, \"Here is a message\", extra_tags=\"\")\n>>> encoded_message = MessageEncoder().encode(original_message)\n>>> decoded_message = MessageDecoder().decode(encoded_message)\n>>> original_message.extra_tags == \"\"\nTrue\n>>> decoded_message.extra_tags is None\nTrue\nEffect of the bug in application behaviour\nThis error occurred in the wild with a template tag similar to the following:\n{% if x not in message.extra_tags %}\nWhen the message was displayed as part of a redirect, it had been serialised and deserialized which meant that extra_tags was None instead of the empty string. This caused an error.\nIt's important to note that this bug affects all of the standard API (messages.debug, messages.info etc. all have a default value of extra_tags equal to \"\").\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The MessageEncoder.default method checks if obj.extra_tags is truthy before including it in the serialized message. When extra_tags is an empty string, this condition evaluates to False and extra_tags is omitted from serialization. During deserialization, the Message constructor uses its default value of extra_tags=None instead of preserving the empty string.\nExploration notes: The MessageEncoder class is imported from django.contrib.messages.storage.cookie. The problematic code is in the default method around line 24-25 where 'if obj.extra_tags:' should check 'if obj.extra_tags is not None:' instead. The Message class constructor in /testbed/django/contrib/messages/storage/base.py shows extra_tags defaults to None. The BaseStorage.add method in the same file shows extra_tags defaults to empty string when adding messages.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: Change the condition from checking truthiness to checking for None specifically, allowing empty strings to be properly serialized and preserved during deserialization.\n\nFiles to modify: [\n  \"/testbed/django/contrib/messages/storage/cookie.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/contrib/messages/storage/cookie.py\n  Location: MessageEncoder.default, line 22\n  Change  : REPLACE line 22:\n            if obj.extra_tags:\nWITH:\n            if obj.extra_tags is not None:\n  Rationale: The condition `if obj.extra_tags:` excludes empty strings from serialization because empty strings are falsy. This causes deserialized messages to have extra_tags=None instead of preserving the original empty string. Changing to `is not None` check preserves empty strings while still excluding None values, maintaining the intended serialization behavior.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019oW5KwR6RZBnFZHKkJxszA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/contrib/messages/storage/cookie.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019oW5KwR6RZBnFZHKkJxszA",
+          "content": "[exit_code=0]\nimport binascii\nimport json\n\nfrom django.conf import settings\nfrom django.contrib.messages.storage.base import BaseStorage, Message\nfrom django.core import signing\nfrom django.http import SimpleCookie\nfrom django.utils.safestring import SafeData, mark_safe\n\n\nclass MessageEncoder(json.JSONEncoder):\n    \"\"\"\n    Compactly serialize instances of the ``Message`` class as JSON.\n    \"\"\"\n    message_key = '__json_message'\n\n    def default(self, obj):\n        if isinstance(obj, Message):\n            # Using 0/1 here instead of False/True to produce more compact json\n            is_safedata = 1 if isinstance(obj.message, SafeData) else 0\n            message = [self.message_key, is_safedata, obj.level, obj.message]\n            if obj.extra_tags:\n                message.append(obj.extra_tags)\n            return message\n        return super().default(obj)\n\n\nclass MessageDecoder(json.JSONDecoder):\n    \"\"\"\n    Decode JSON that includes serialized ``Message`` instances.\n    \"\"\"\n\n    def process_messages(self, obj):\n        if isinstance(obj, list) and obj:\n            if obj[0] == MessageEncoder.message_key:\n                if obj[1]:\n                    obj[3] = mark_safe(obj[3])\n                return Message(*obj[2:])\n            return [self.process_messages(item) for item in obj]\n        if isinstance(obj, dict):\n            return {key: self.process_messages(value)\n                    for key, value in obj.items()}\n        return obj\n\n    def decode(self, s, **kwargs):\n        decoded = super().decode(s, **kwargs)\n        return self.process_messages(decoded)\n\n\nclass MessageSerializer:\n    def dumps(self, obj):\n        return json.dumps(\n            obj,\n            separators=(',', ':'),\n            cls=MessageEncoder,\n        ).encode('latin-1')\n\n    def loads(self, data):\n        return json.loads(data.decode('latin-1'), cls=MessageDecoder)\n\n\nclass CookieStorage(BaseStorage):\n    \"\"\"\n    Store messages in a cookie.\n    \"\"\"\n    cookie_name = 'messages'\n    # uwsgi's default configuration enforces a maximum size of 4kb for all the\n    # HTTP headers. In order to leave some room for other cookies and headers,\n    # restrict the session cookie to 1/2 of 4kb. See #18781.\n    max_cookie_size = 2048\n    not_finished = '__messagesnotfinished__'\n    key_salt = 'django.contrib.messages'\n\n    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n        self.signer = signing.get_cookie_signer(salt=self.key_salt)\n\n    def _get(self, *args, **kwargs):\n        \"\"\"\n        Retrieve a list of messages from the messages cookie. If the\n        not_finished sentinel value is found at the end of the message list,\n        remove it and return a result indicating that not all messages were\n        retrieved by this storage.\n        \"\"\"\n        data = self.request.COOKIES.get(self.cookie_name)\n        messages = self._decode(data)\n        all_retrieved = not (messages and messages[-1] == self.not_finished)\n        if messages and not all_retrieved:\n            # remove the sentinel value\n            messages.pop()\n        return messages, all_retrieved\n\n    def _update_cookie(self, encoded_data, response):\n        \"\"\"\n        Either set the cookie with the encoded data if there is any data to\n        store, or delete the cookie.\n        \"\"\"\n        if encoded_data:\n            response.set_cookie(\n                self.cookie_name, encoded_data,\n                domain=settings.SESSION_COOKIE_DOMAIN,\n                secure=settings.SESSION_COOKIE_SECURE or None,\n                httponly=settings.SESSION_COOKIE_HTTPONLY or None,\n                samesite=settings.SESSION_COOKIE_SAMESITE,\n            )\n        else:\n            response.delete_cookie(\n                self.cookie_name,\n                domain=settings.SESSION_COOKIE_DOMAIN,\n                samesite=settings.SESSION_COOKIE_SAMESITE,\n            )\n\n    def _store(self, messages, response, remove_oldest=True, *args, **kwargs):\n        \"\"\"\n        Store the messages to a cookie and return a list of any messages which\n        could not be stored.\n\n        If the encoded data is larger than ``max_cookie_size``, remove\n        messages until the data fits (these are the messages which are\n        returned), and add the not_finished sentinel value to indicate as much.\n        \"\"\"\n        unstored_messages = []\n        encoded_data = self._encode(messages)\n        if self.max_cookie_size:\n            # data is going to be stored eventually by SimpleCookie, which\n            # adds its own overhead, which we must account for.\n            cookie = SimpleCookie()  # create outside the loop\n\n            def stored_length(val):\n                return len(cookie.value_encode(val)[1])\n\n            while encoded_data and stored_length(encoded_data) > self.max_cookie_size:\n                if remove_oldest:\n                    unstored_messages.append(messages.pop(0))\n                else:\n                    unstored_messages.insert(0, messages.pop())\n                encoded_data = self._encode(messages + [self.not_finished],\n                                            encode_empty=unstored_messages)\n        self._update_cookie(encoded_data, response)\n        return unstored_messages\n\n    def _encode(self, messages, encode_empty=False):\n        \"\"\"\n        Return an encoded version of the messages list which can be stored as\n        plain text.\n\n        Since the data will be retrieved from the client-side, the encoded data\n        also contains a hash to ensure that the data was not tampered with.\n        \"\"\"\n        if messages or encode_empty:\n            return self.signer.sign_object(messages, serializer=MessageSerializer, compress=True)\n\n    def _decode(self, data):\n        \"\"\"\n        Safely decode an encoded text stream back into a list of messages.\n\n        If the encoded text stream contained an invalid hash or was in an\n        invalid format, return None.\n        \"\"\"\n        if not data:\n            return None\n        try:\n            return self.signer.unsign_object(data, serializer=MessageSerializer)\n        except (signing.BadSignature, binascii.Error, json.JSONDecodeError):\n            pass\n        # Mark the data as used (so it gets removed) since something was wrong\n        # with the data.\n        self.used = True\n        return None"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the issue. On line 22, the condition `if obj.extra_tags:` needs to be changed to `if obj.extra_tags is not None:` to properly preserve empty strings during serialization. Let me apply this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01LCM2RM8qLsoitD3587Pu4x",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/contrib/messages/storage/cookie.py', 'r') as f:\n    content = f.read()\n\n# Replace the condition on line 22\n# Find the specific line in the default method\nold_code = \"            if obj.extra_tags:\\n                message.append(obj.extra_tags)\"\nnew_code = \"            if obj.extra_tags is not None:\\n                message.append(obj.extra_tags)\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    print(\"\u2713 Replacement successful\")\nelse:\n    print(\"\u2717 Pattern not found\")\n    sys.exit(1)\n\n# Write the file back\nwith open('/testbed/django/contrib/messages/storage/cookie.py', 'w') as f:\n    f.write(content)\n\nEOF\npython /tmp/fix.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LCM2RM8qLsoitD3587Pu4x",
+          "content": "[exit_code=0]\n\u2713 Replacement successful"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was made correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UShLpZrGWg7fGLtP9wUwuL",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '15,30p' /testbed/django/contrib/messages/storage/cookie.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UShLpZrGWg7fGLtP9wUwuL",
+          "content": "[exit_code=0]\nmessage_key = '__json_message'\n\n    def default(self, obj):\n        if isinstance(obj, Message):\n            # Using 0/1 here instead of False/True to produce more compact json\n            is_safedata = 1 if isinstance(obj.message, SafeData) else 0\n            message = [self.message_key, is_safedata, obj.level, obj.message]\n            if obj.extra_tags is not None:\n                message.append(obj.extra_tags)\n            return message\n        return super().default(obj)\n\n\nclass MessageDecoder(json.JSONDecoder):\n    \"\"\"\n    Decode JSON that includes serialized ``Message`` instances."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run git diff to confirm:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014TeadhEybqmbVo36x52voF",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014TeadhEybqmbVo36x52voF",
+          "content": "[exit_code=0]\ndiff --git a/django/contrib/messages/storage/cookie.py b/django/contrib/messages/storage/cookie.py\nindex 1d390c71dd..e48d4edb08 100644\n--- a/django/contrib/messages/storage/cookie.py\n+++ b/django/contrib/messages/storage/cookie.py\n@@ -19,7 +19,7 @@ class MessageEncoder(json.JSONEncoder):\n             # Using 0/1 here instead of False/True to produce more compact json\n             is_safedata = 1 if isinstance(obj.message, SafeData) else 0\n             message = [self.message_key, is_safedata, obj.level, obj.message]\n-            if obj.extra_tags:\n+            if obj.extra_tags is not None:\n                 message.append(obj.extra_tags)\n             return message\n         return super().default(obj)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly what was requested. The change is minimal and focused - only the condition on line 22 was modified from `if obj.extra_tags:` to `if obj.extra_tags is not None:`. This will ensure that empty strings are properly serialized and preserved during deserialization, while still excluding None values.\n\n```json\n{\n  \"patch\": \"diff --git a/django/contrib/messages/storage/cookie.py b/django/contrib/messages/storage/cookie.py\\nindex 1d390c71dd..e48d4edb08 100644\\n--- a/django/contrib/messages/storage/cookie.py\\n+++ b/django/contrib/messages/storage/cookie.py\\n@@ -19,7 +19,7 @@ class MessageEncoder(json.JSONEncoder):\\n             # Using 0/1 here instead of False/True to produce more compact json\\n             is_safedata = 1 if isinstance(obj.message, SafeData) else 0\\n             message = [self.message_key, is_safedata, obj.level, obj.message]\\n-            if obj.extra_tags:\\n+            if obj.extra_tags is not None:\\n                 message.append(obj.extra_tags)\\n             return message\\n         return super().default(obj)\",\n  \"implementation_notes\": \"Changed the condition in MessageEncoder.default from `if obj.extra_tags:` to `if obj.extra_tags is not None:` to properly serialize empty strings instead of treating them as falsy values. This preserves empty string extra_tags during serialization and deserialization cycles.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T11:15:39Z"
+}

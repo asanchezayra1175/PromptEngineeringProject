@@ -1,0 +1,269 @@
+{
+  "instance_id": "django__django-16408",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex 7c433b3f06..0ad56f09f1 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -1277,6 +1277,9 @@ class SQLCompiler:\n             def remote_setter(name, obj, from_obj):\n                 setattr(from_obj, name, obj)\n \n+\n+            def no_local_setter(obj, from_obj):\n+                pass\n             for name in list(requested):\n                 # Filtered relations work only on the topmost level.\n                 if cur_depth > 1:\n@@ -1295,7 +1298,7 @@ class SQLCompiler:\n                         \"model\": model,\n                         \"field\": final_field,\n                         \"reverse\": True,\n-                        \"local_setter\": partial(local_setter, final_field),\n+                        \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\n                         \"remote_setter\": partial(remote_setter, name),\n                         \"from_parent\": from_parent,\n                     }",
+  "implementation_notes": "Added a no-op function `no_local_setter` and conditionally used it instead of `local_setter` when processing FilteredRelation with more than 2 joins to prevent incorrect caching of intermediate objects in multi-level relationships.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-16408</instance_id>\n\n<problem_statement>\nMulti-level FilteredRelation with select_related() may set wrong related object.\nDescription\n\t\ntest case:\n# add to known_related_objects.tests.ExistingRelatedInstancesTests\n\tdef test_wrong_select_related(self):\n\t\twith self.assertNumQueries(3):\n\t\t\tp = list(PoolStyle.objects.annotate(\n\t\t\t\ttournament_pool=FilteredRelation('pool__tournament__pool'),\n\t\t\t\t).select_related('tournament_pool'))\n\t\t\tself.assertEqual(p[0].pool.tournament, p[0].tournament_pool.tournament)\nresult:\n======================================================================\nFAIL: test_wrong_select_related (known_related_objects.tests.ExistingRelatedInstancesTests.test_wrong_select_related)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n File \"D:\\Work\\django\\tests\\known_related_objects\\tests.py\", line 171, in test_wrong_select_related\n\tself.assertEqual(p[0].pool.tournament, p[0].tournament_pool.tournament)\nAssertionError: <Tournament: Tournament object (1)> != <PoolStyle: PoolStyle object (1)>\n----------------------------------------------------------------------\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The get_related_selections method always assigns partial(local_setter, final_field) to the local_setter key in klass_info dict when processing FilteredRelation with select_related(). When there are more than 2 joins, the local_setter attempts to set cached values on intermediate objects that are not fetched in the query results, causing incorrect related object assignments where wrong objects get cached as related instances.\nExploration notes: The bug is on line 1298 in /testbed/django/db/models/sql/compiler.py where 'local_setter': partial(local_setter, final_field) is assigned unconditionally. The joins variable is available from line 1286 via self.query.setup_joins([name], opts, root_alias). The PR diff shows the fix involves: (1) adding a local_setter_noop function that does nothing, and (2) conditionally using partial(local_setter, final_field) if len(joins) <= 2 else local_setter_noop. The local_setter function is defined on line 1272. Before: 'local_setter': partial(local_setter, final_field), After: 'local_setter': (partial(local_setter, final_field) if len(joins) <= 2 else local_setter_noop),\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Add conditional assignment to prevent local_setter from operating on intermediate objects that aren't fetched when there are more than 2 joins in multi-level FilteredRelation queries. This follows the maintainer's suggested fix exactly.\n\nFiles to modify: [\n  \"/testbed/django/db/models/sql/compiler.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/sql/compiler.py\n  Location: SQLCompiler.get_related_selections, line 1278\n  Change  : INSERT after line 1278:\n\n            def no_local_setter(obj, from_obj):\n                pass\n  Rationale: Add a no-op function to use when len(joins) > 2 to avoid setting cached values on intermediate objects that aren't fetched\n\nChange 2:\n  File    : /testbed/django/db/models/sql/compiler.py\n  Location: SQLCompiler.get_related_selections, line 1298\n  Change  : REPLACE line 1298:\n                        \"local_setter\": partial(local_setter, final_field),\nWITH:\n                        \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\n  Rationale: Conditionally use local_setter only when len(joins) <= 2 to prevent setting cached values on intermediate objects that are not available in multi-level FilteredRelation queries\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current code structure and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013HAEVCzV97qgMrv7jbfyTv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -n 1350 django/db/models/sql/compiler.py | tail -n 100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013HAEVCzV97qgMrv7jbfyTv",
+          "content": "[exit_code=0]\nrelated_select_mask,\n                    start_alias=alias,\n                    opts=model._meta,\n                    from_parent=opts.model,\n                )\n                for col in columns:\n                    select_fields.append(len(select))\n                    select.append((col, None))\n                klass_info[\"select_fields\"] = select_fields\n                next = requested.get(related_field.related_query_name(), {})\n                next_klass_infos = self.get_related_selections(\n                    select,\n                    related_select_mask,\n                    model._meta,\n                    alias,\n                    cur_depth + 1,\n                    next,\n                    restricted,\n                )\n                get_related_klass_infos(klass_info, next_klass_infos)\n\n            def local_setter(final_field, obj, from_obj):\n                # Set a reverse fk object when relation is non-empty.\n                if from_obj:\n                    final_field.remote_field.set_cached_value(from_obj, obj)\n\n            def remote_setter(name, obj, from_obj):\n                setattr(from_obj, name, obj)\n\n            for name in list(requested):\n                # Filtered relations work only on the topmost level.\n                if cur_depth > 1:\n                    break\n                if name in self.query._filtered_relations:\n                    fields_found.add(name)\n                    final_field, _, join_opts, joins, _, _ = self.query.setup_joins(\n                        [name], opts, root_alias\n                    )\n                    model = join_opts.model\n                    alias = joins[-1]\n                    from_parent = (\n                        issubclass(model, opts.model) and model is not opts.model\n                    )\n                    klass_info = {\n                        \"model\": model,\n                        \"field\": final_field,\n                        \"reverse\": True,\n                        \"local_setter\": partial(local_setter, final_field),\n                        \"remote_setter\": partial(remote_setter, name),\n                        \"from_parent\": from_parent,\n                    }\n                    related_klass_infos.append(klass_info)\n                    select_fields = []\n                    field_select_mask = select_mask.get((name, final_field)) or {}\n                    columns = self.get_default_columns(\n                        field_select_mask,\n                        start_alias=alias,\n                        opts=model._meta,\n                        from_parent=opts.model,\n                    )\n                    for col in columns:\n                        select_fields.append(len(select))\n                        select.append((col, None))\n                    klass_info[\"select_fields\"] = select_fields\n                    next_requested = requested.get(name, {})\n                    next_klass_infos = self.get_related_selections(\n                        select,\n                        field_select_mask,\n                        opts=model._meta,\n                        root_alias=alias,\n                        cur_depth=cur_depth + 1,\n                        requested=next_requested,\n                        restricted=restricted,\n                    )\n                    get_related_klass_infos(klass_info, next_klass_infos)\n            fields_not_found = set(requested).difference(fields_found)\n            if fields_not_found:\n                invalid_fields = (\"'%s'\" % s for s in fields_not_found)\n                raise FieldError(\n                    \"Invalid field name(s) given in select_related: %s. \"\n                    \"Choices are: %s\"\n                    % (\n                        \", \".join(invalid_fields),\n                        \", \".join(_get_field_choices()) or \"(none)\",\n                    )\n                )\n        return related_klass_infos\n\n    def get_select_for_update_of_arguments(self):\n        \"\"\"\n        Return a quoted list of arguments for the SELECT FOR UPDATE OF part of\n        the query.\n        \"\"\"\n\n        def _get_parent_klass_info(klass_info):\n            concrete_model = klass_info[\"model\"]._meta.concrete_model\n            for parent_model, parent_link in concrete_model._meta.parents.items():\n                parent_list = parent_model._meta.get_parent_list()\n                yield {\n                    \"model\": parent_model,"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read the specific area around line 1298 and the local_setter function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0197SePi11FrEyw5MYcs5Y3v",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1250,1330p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0197SePi11FrEyw5MYcs5Y3v",
+          "content": "[exit_code=0]\ncolumns = self.get_default_columns(\n                    related_select_mask,\n                    start_alias=alias,\n                    opts=model._meta,\n                    from_parent=opts.model,\n                )\n                for col in columns:\n                    select_fields.append(len(select))\n                    select.append((col, None))\n                klass_info[\"select_fields\"] = select_fields\n                next = requested.get(related_field.related_query_name(), {})\n                next_klass_infos = self.get_related_selections(\n                    select,\n                    related_select_mask,\n                    model._meta,\n                    alias,\n                    cur_depth + 1,\n                    next,\n                    restricted,\n                )\n                get_related_klass_infos(klass_info, next_klass_infos)\n\n            def local_setter(final_field, obj, from_obj):\n                # Set a reverse fk object when relation is non-empty.\n                if from_obj:\n                    final_field.remote_field.set_cached_value(from_obj, obj)\n\n            def remote_setter(name, obj, from_obj):\n                setattr(from_obj, name, obj)\n\n            for name in list(requested):\n                # Filtered relations work only on the topmost level.\n                if cur_depth > 1:\n                    break\n                if name in self.query._filtered_relations:\n                    fields_found.add(name)\n                    final_field, _, join_opts, joins, _, _ = self.query.setup_joins(\n                        [name], opts, root_alias\n                    )\n                    model = join_opts.model\n                    alias = joins[-1]\n                    from_parent = (\n                        issubclass(model, opts.model) and model is not opts.model\n                    )\n                    klass_info = {\n                        \"model\": model,\n                        \"field\": final_field,\n                        \"reverse\": True,\n                        \"local_setter\": partial(local_setter, final_field),\n                        \"remote_setter\": partial(remote_setter, name),\n                        \"from_parent\": from_parent,\n                    }\n                    related_klass_infos.append(klass_info)\n                    select_fields = []\n                    field_select_mask = select_mask.get((name, final_field)) or {}\n                    columns = self.get_default_columns(\n                        field_select_mask,\n                        start_alias=alias,\n                        opts=model._meta,\n                        from_parent=opts.model,\n                    )\n                    for col in columns:\n                        select_fields.append(len(select))\n                        select.append((col, None))\n                    klass_info[\"select_fields\"] = select_fields\n                    next_requested = requested.get(name, {})\n                    next_klass_infos = self.get_related_selections(\n                        select,\n                        field_select_mask,\n                        opts=model._meta,\n                        root_alias=alias,\n                        cur_depth=cur_depth + 1,\n                        requested=next_requested,\n                        restricted=restricted,\n                    )\n                    get_related_klass_infos(klass_info, next_klass_infos)\n            fields_not_found = set(requested).difference(fields_found)\n            if fields_not_found:\n                invalid_fields = (\"'%s'\" % s for s in fields_not_found)\n                raise FieldError(\n                    \"Invalid field name(s) given in select_related: %s. \""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me find the exact line numbers where I need to make changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JXaiqkjbSuxu6p6ypDkM8m",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"def local_setter\" django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JXaiqkjbSuxu6p6ypDkM8m",
+          "content": "[exit_code=0]\n1272:            def local_setter(final_field, obj, from_obj):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_012Takgr2Xt36RgMdVHVkoCq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1270,1310p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012Takgr2Xt36RgMdVHVkoCq",
+          "content": "[exit_code=0]\nget_related_klass_infos(klass_info, next_klass_infos)\n\n            def local_setter(final_field, obj, from_obj):\n                # Set a reverse fk object when relation is non-empty.\n                if from_obj:\n                    final_field.remote_field.set_cached_value(from_obj, obj)\n\n            def remote_setter(name, obj, from_obj):\n                setattr(from_obj, name, obj)\n\n            for name in list(requested):\n                # Filtered relations work only on the topmost level.\n                if cur_depth > 1:\n                    break\n                if name in self.query._filtered_relations:\n                    fields_found.add(name)\n                    final_field, _, join_opts, joins, _, _ = self.query.setup_joins(\n                        [name], opts, root_alias\n                    )\n                    model = join_opts.model\n                    alias = joins[-1]\n                    from_parent = (\n                        issubclass(model, opts.model) and model is not opts.model\n                    )\n                    klass_info = {\n                        \"model\": model,\n                        \"field\": final_field,\n                        \"reverse\": True,\n                        \"local_setter\": partial(local_setter, final_field),\n                        \"remote_setter\": partial(remote_setter, name),\n                        \"from_parent\": from_parent,\n                    }\n                    related_klass_infos.append(klass_info)\n                    select_fields = []\n                    field_select_mask = select_mask.get((name, final_field)) or {}\n                    columns = self.get_default_columns(\n                        field_select_mask,\n                        start_alias=alias,\n                        opts=model._meta,\n                        from_parent=opts.model,\n                    )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the code structure. Let me apply the changes according to the proposal. I need to:\n\n1. Add a `no_local_setter` function after line 1278 (after the `remote_setter` function)\n2. Modify line 1298 to conditionally use `local_setter` based on the length of `joins`\n\nLet me make these changes using Python:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BUe2bJ8Je4xQxYnH56sQfd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/db/models/sql/compiler.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line with \"def remote_setter\" and the line with \"local_setter\": partial(local_setter, final_field),\nremote_setter_line = None\nlocal_setter_assignment_line = None\n\nfor i, line in enumerate(lines):\n    if 'def remote_setter(name, obj, from_obj):' in line:\n        remote_setter_line = i\n    if '\"local_setter\": partial(local_setter, final_field),' in line:\n        local_setter_assignment_line = i\n\nprint(f\"remote_setter_line: {remote_setter_line}\")\nprint(f\"local_setter_assignment_line: {local_setter_assignment_line}\")\n\n# Verify the lines\nif remote_setter_line:\n    print(f\"\\nLine {remote_setter_line+1}: {lines[remote_setter_line]}\")\n    print(f\"Line {remote_setter_line+2}: {lines[remote_setter_line+1]}\")\n    print(f\"Line {remote_setter_line+3}: {lines[remote_setter_line+2]}\")\n\nif local_setter_assignment_line:\n    print(f\"\\nLine {local_setter_assignment_line+1}: {lines[local_setter_assignment_line]}\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BUe2bJ8Je4xQxYnH56sQfd",
+          "content": "[exit_code=0]\nremote_setter_line: 1276\nlocal_setter_assignment_line: 1297\n\nLine 1277:             def remote_setter(name, obj, from_obj):\n\nLine 1278:                 setattr(from_obj, name, obj)\n\nLine 1279: \n\n\nLine 1298:                         \"local_setter\": partial(local_setter, final_field),"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me make the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GN53jgQa7nUXro91TyJ6o7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/db/models/sql/compiler.py', 'r') as f:\n    lines = f.readlines()\n\n# Change 1: Insert no_local_setter function after remote_setter (after line 1278)\n# Line 1278 is 0-indexed as 1277, but we want to insert after the remote_setter body\n# Looking at the output: line 1277 is \"def remote_setter\", line 1278 is \"setattr\", line 1279 is blank\n\ninsert_position = 1279  # Insert after the blank line (0-indexed)\n\nno_local_setter_func = [\n    \"\\n\",\n    \"            def no_local_setter(obj, from_obj):\\n\",\n    \"                pass\\n\",\n]\n\n# Insert the new function\nfor i, line in enumerate(no_local_setter_func):\n    lines.insert(insert_position + i, line)\n\n# Now we need to update the local_setter_assignment_line since we added lines\n# It was at 1297 (0-indexed), now it should be at 1297 + 3 = 1300\nlocal_setter_assignment_line = 1297 + len(no_local_setter_func)\n\n# Change 2: Replace the line with the conditional assignment\nold_line = lines[local_setter_assignment_line]\nprint(f\"Old line {local_setter_assignment_line + 1}: {old_line}\")\n\n# Replace with conditional\nnew_line = '                        \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\\n'\nlines[local_setter_assignment_line] = new_line\n\nprint(f\"New line {local_setter_assignment_line + 1}: {lines[local_setter_assignment_line]}\")\n\n# Write the file back\nwith open('django/db/models/sql/compiler.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"\\nChanges applied successfully!\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GN53jgQa7nUXro91TyJ6o7",
+          "content": "[exit_code=0]\nOld line 1301:                         \"local_setter\": partial(local_setter, final_field),\n\nNew line 1301:                         \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\n\n\nChanges applied successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes by viewing the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UMCsad2eSWNUogTAZk8yJu",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1270,1315p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UMCsad2eSWNUogTAZk8yJu",
+          "content": "[exit_code=0]\nget_related_klass_infos(klass_info, next_klass_infos)\n\n            def local_setter(final_field, obj, from_obj):\n                # Set a reverse fk object when relation is non-empty.\n                if from_obj:\n                    final_field.remote_field.set_cached_value(from_obj, obj)\n\n            def remote_setter(name, obj, from_obj):\n                setattr(from_obj, name, obj)\n\n\n            def no_local_setter(obj, from_obj):\n                pass\n            for name in list(requested):\n                # Filtered relations work only on the topmost level.\n                if cur_depth > 1:\n                    break\n                if name in self.query._filtered_relations:\n                    fields_found.add(name)\n                    final_field, _, join_opts, joins, _, _ = self.query.setup_joins(\n                        [name], opts, root_alias\n                    )\n                    model = join_opts.model\n                    alias = joins[-1]\n                    from_parent = (\n                        issubclass(model, opts.model) and model is not opts.model\n                    )\n                    klass_info = {\n                        \"model\": model,\n                        \"field\": final_field,\n                        \"reverse\": True,\n                        \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\n                        \"remote_setter\": partial(remote_setter, name),\n                        \"from_parent\": from_parent,\n                    }\n                    related_klass_infos.append(klass_info)\n                    select_fields = []\n                    field_select_mask = select_mask.get((name, final_field)) or {}\n                    columns = self.get_default_columns(\n                        field_select_mask,\n                        start_alias=alias,\n                        opts=model._meta,\n                        from_parent=opts.model,\n                    )\n                    for col in columns:\n                        select_fields.append(len(select))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. Now let me run git diff to verify the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017d57tx6UGDEb4rWoTxncLg",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017d57tx6UGDEb4rWoTxncLg",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex 7c433b3f06..0ad56f09f1 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -1277,6 +1277,9 @@ class SQLCompiler:\n             def remote_setter(name, obj, from_obj):\n                 setattr(from_obj, name, obj)\n \n+\n+            def no_local_setter(obj, from_obj):\n+                pass\n             for name in list(requested):\n                 # Filtered relations work only on the topmost level.\n                 if cur_depth > 1:\n@@ -1295,7 +1298,7 @@ class SQLCompiler:\n                         \"model\": model,\n                         \"field\": final_field,\n                         \"reverse\": True,\n-                        \"local_setter\": partial(local_setter, final_field),\n+                        \"local_setter\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\n                         \"remote_setter\": partial(remote_setter, name),\n                         \"from_parent\": from_parent,\n                     }"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly what was requested. Let me verify the changes are correct:\n\n1. \u2705 Added `no_local_setter` function after the `remote_setter` function definition (around line 1280-1282)\n2. \u2705 Modified line 1301 to conditionally use `local_setter` or `no_local_setter` based on the length of `joins`\n\nThe implementation correctly addresses the bug by:\n- Creating a no-op function `no_local_setter` that does nothing\n- Using this no-op function when `len(joins) > 2`, preventing the incorrect caching of intermediate objects in multi-level FilteredRelation queries\n- Keeping the original behavior when `len(joins) <= 2`\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\\nindex 7c433b3f06..0ad56f09f1 100644\\n--- a/django/db/models/sql/compiler.py\\n+++ b/django/db/models/sql/compiler.py\\n@@ -1277,6 +1277,9 @@ class SQLCompiler:\\n             def remote_setter(name, obj, from_obj):\\n                 setattr(from_obj, name, obj)\\n \\n+\\n+            def no_local_setter(obj, from_obj):\\n+                pass\\n             for name in list(requested):\\n                 # Filtered relations work only on the topmost level.\\n                 if cur_depth > 1:\\n@@ -1295,7 +1298,7 @@ class SQLCompiler:\\n                         \\\"model\\\": model,\\n                         \\\"field\\\": final_field,\\n                         \\\"reverse\\\": True,\\n-                        \\\"local_setter\\\": partial(local_setter, final_field),\\n+                        \\\"local_setter\\\": partial(local_setter, final_field) if len(joins) <= 2 else no_local_setter,\\n                         \\\"remote_setter\\\": partial(remote_setter, name),\\n                         \\\"from_parent\\\": from_parent,\\n                     }\",\n  \"implementation_notes\": \"Added a no-op function `no_local_setter` and conditionally used it instead of `local_setter` when processing FilteredRelation with more than 2 joins to prevent incorrect caching of intermediate objects in multi-level relationships.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T08:58:27Z"
+}

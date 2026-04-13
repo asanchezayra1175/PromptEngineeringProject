@@ -1,0 +1,150 @@
+{
+  "instance_id": "django__django-15790",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/core/checks/templates.py b/django/core/checks/templates.py\nindex 5214276987..128658de32 100644\n--- a/django/core/checks/templates.py\n+++ b/django/core/checks/templates.py\n@@ -50,15 +50,15 @@ def check_string_if_invalid_is_string(app_configs, **kwargs):\n @register(Tags.templates)\n def check_for_template_tags_with_the_same_name(app_configs, **kwargs):\n     errors = []\n-    libraries = defaultdict(list)\n+    libraries = defaultdict(set)\n \n     for conf in settings.TEMPLATES:\n         custom_libraries = conf.get(\"OPTIONS\", {}).get(\"libraries\", {})\n         for module_name, module_path in custom_libraries.items():\n-            libraries[module_name].append(module_path)\n+            libraries[module_name].add(module_path)\n \n     for module_name, module_path in get_template_tag_modules():\n-        libraries[module_name].append(module_path)\n+        libraries[module_name].add(module_path)\n \n     for library_name, items in libraries.items():\n         if len(items) > 1:",
+  "implementation_notes": "Changed the check_for_template_tags_with_the_same_name function to use defaultdict(set) instead of defaultdict(list) and .add() instead of .append() to automatically deduplicate module paths when the same library appears in both INSTALLED_APPS and TEMPLATES['OPTIONS']['libraries'], preventing false positive duplicate detections.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-15790</instance_id>\n\n<problem_statement>\ncheck_for_template_tags_with_the_same_name with libraries in TEMPLATES\nDescription\n\t\nI didn't explore this thoroughly, but I think there might be an issue with the check_for_template_tags_with_the_same_name when you add a template tag library into TEMPLATES['OPTIONS']['librairies'].\nI'm getting an error like: \n(templates.E003) 'my_tags' is used for multiple template tag modules: 'someapp.templatetags.my_tags', 'someapp.templatetags.my_tags'\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The check_for_template_tags_with_the_same_name function uses defaultdict(list) to collect template tag library modules by name. When a library exists both in INSTALLED_APPS (discovered via get_template_tag_modules) and is explicitly listed in TEMPLATES['OPTIONS']['libraries'], it gets added to the list twice with the same module path. This causes the function to incorrectly report duplicates when the same library appears in both locations.\nExploration notes: The function is defined in django.core.checks.templates and registered as a template check. The bug occurs because libraries[module_name].append(module_path) is called for both custom_libraries from TEMPLATES settings and modules from get_template_tag_modules(), allowing duplicate entries. The patch changes defaultdict(list) to defaultdict(set) and append() to add() to deduplicate automatically. Test case test_template_tags_same_library_in_installed_apps_libraries verifies the scenario where a library appears in both INSTALLED_APPS and template libraries should return no errors. PR diff shows: before: libraries = defaultdict(list) and libraries[module_name].append(module_path), after: libraries = defaultdict(set) and libraries[module_name].add(module_path).\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Change data structure from defaultdict(list) to defaultdict(set) to automatically deduplicate module paths when the same library appears in both discovery sources, preventing false positive duplicate detection.\n\nFiles to modify: [\n  \"/testbed/django/core/checks/templates.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/core/checks/templates.py\n  Location: check_for_template_tags_with_the_same_name, line 53\n  Change  : REPLACE line 53:\n    libraries = defaultdict(list)\nWITH:\n    libraries = defaultdict(set)\n  Rationale: Change from list to set to automatically deduplicate module paths when the same library appears in both INSTALLED_APPS and TEMPLATES['OPTIONS']['libraries']\n\nChange 2:\n  File    : /testbed/django/core/checks/templates.py\n  Location: check_for_template_tags_with_the_same_name, line 57\n  Change  : REPLACE line 57:\n            libraries[module_name].append(module_path)\nWITH:\n            libraries[module_name].add(module_path)\n  Rationale: Use set.add() instead of list.append() to prevent duplicate entries\n\nChange 3:\n  File    : /testbed/django/core/checks/templates.py\n  Location: check_for_template_tags_with_the_same_name, line 60\n  Change  : REPLACE line 60:\n        libraries[module_name].append(module_path)\nWITH:\n        libraries[module_name].add(module_path)\n  Rationale: Use set.add() instead of list.append() to prevent duplicate entries\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal by modifying the template checks file. Let me start by reading the file to understand its current state.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014CTPpkKCXKfi7TiajYhBiB",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/core/checks/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014CTPpkKCXKfi7TiajYhBiB",
+          "content": "[exit_code=0]\nimport copy\nfrom collections import defaultdict\n\nfrom django.conf import settings\nfrom django.template.backends.django import get_template_tag_modules\n\nfrom . import Error, Tags, register\n\nE001 = Error(\n    \"You have 'APP_DIRS': True in your TEMPLATES but also specify 'loaders' \"\n    \"in OPTIONS. Either remove APP_DIRS or remove the 'loaders' option.\",\n    id=\"templates.E001\",\n)\nE002 = Error(\n    \"'string_if_invalid' in TEMPLATES OPTIONS must be a string but got: {} ({}).\",\n    id=\"templates.E002\",\n)\nE003 = Error(\n    \"{} is used for multiple template tag modules: {}\",\n    id=\"templates.E003\",\n)\n\n\n@register(Tags.templates)\ndef check_setting_app_dirs_loaders(app_configs, **kwargs):\n    return (\n        [E001]\n        if any(\n            conf.get(\"APP_DIRS\") and \"loaders\" in conf.get(\"OPTIONS\", {})\n            for conf in settings.TEMPLATES\n        )\n        else []\n    )\n\n\n@register(Tags.templates)\ndef check_string_if_invalid_is_string(app_configs, **kwargs):\n    errors = []\n    for conf in settings.TEMPLATES:\n        string_if_invalid = conf.get(\"OPTIONS\", {}).get(\"string_if_invalid\", \"\")\n        if not isinstance(string_if_invalid, str):\n            error = copy.copy(E002)\n            error.msg = error.msg.format(\n                string_if_invalid, type(string_if_invalid).__name__\n            )\n            errors.append(error)\n    return errors\n\n\n@register(Tags.templates)\ndef check_for_template_tags_with_the_same_name(app_configs, **kwargs):\n    errors = []\n    libraries = defaultdict(list)\n\n    for conf in settings.TEMPLATES:\n        custom_libraries = conf.get(\"OPTIONS\", {}).get(\"libraries\", {})\n        for module_name, module_path in custom_libraries.items():\n            libraries[module_name].append(module_path)\n\n    for module_name, module_path in get_template_tag_modules():\n        libraries[module_name].append(module_path)\n\n    for library_name, items in libraries.items():\n        if len(items) > 1:\n            errors.append(\n                Error(\n                    E003.msg.format(\n                        repr(library_name),\n                        \", \".join(repr(item) for item in items),\n                    ),\n                    id=E003.id,\n                )\n            )\n\n    return errors"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the exact structure. Now I'll apply the three changes:\n1. Line 53: Change `defaultdict(list)` to `defaultdict(set)`\n2. Line 57: Change `.append(module_path)` to `.add(module_path)`\n3. Line 60: Change `.append(module_path)` to `.add(module_path)`\n\nLet me apply these changes using Python:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013FjPykWi8Xqen36wBBDNhy",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_templates.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/core/checks/templates.py', 'r') as f:\n    content = f.read()\n\n# Replace the three occurrences\n# Change 1: defaultdict(list) -> defaultdict(set)\ncontent = content.replace(\n    'libraries = defaultdict(list)',\n    'libraries = defaultdict(set)',\n    1\n)\n\n# Change 2: First .append(module_path) -> .add(module_path) (in custom_libraries loop)\ncontent = content.replace(\n    'libraries[module_name].append(module_path)',\n    'libraries[module_name].add(module_path)',\n    2\n)\n\n# Write back\nwith open('/testbed/django/core/checks/templates.py', 'w') as f:\n    f.write(content)\n\nprint(\"File modified successfully\")\nEOF\n\npython /tmp/fix_templates.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013FjPykWi8Xqen36wBBDNhy",
+          "content": "[exit_code=0]\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes by viewing the modified file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UP1tteb1hjT3GyF9pcuhJ1",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/core/checks/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UP1tteb1hjT3GyF9pcuhJ1",
+          "content": "[exit_code=0]\nimport copy\nfrom collections import defaultdict\n\nfrom django.conf import settings\nfrom django.template.backends.django import get_template_tag_modules\n\nfrom . import Error, Tags, register\n\nE001 = Error(\n    \"You have 'APP_DIRS': True in your TEMPLATES but also specify 'loaders' \"\n    \"in OPTIONS. Either remove APP_DIRS or remove the 'loaders' option.\",\n    id=\"templates.E001\",\n)\nE002 = Error(\n    \"'string_if_invalid' in TEMPLATES OPTIONS must be a string but got: {} ({}).\",\n    id=\"templates.E002\",\n)\nE003 = Error(\n    \"{} is used for multiple template tag modules: {}\",\n    id=\"templates.E003\",\n)\n\n\n@register(Tags.templates)\ndef check_setting_app_dirs_loaders(app_configs, **kwargs):\n    return (\n        [E001]\n        if any(\n            conf.get(\"APP_DIRS\") and \"loaders\" in conf.get(\"OPTIONS\", {})\n            for conf in settings.TEMPLATES\n        )\n        else []\n    )\n\n\n@register(Tags.templates)\ndef check_string_if_invalid_is_string(app_configs, **kwargs):\n    errors = []\n    for conf in settings.TEMPLATES:\n        string_if_invalid = conf.get(\"OPTIONS\", {}).get(\"string_if_invalid\", \"\")\n        if not isinstance(string_if_invalid, str):\n            error = copy.copy(E002)\n            error.msg = error.msg.format(\n                string_if_invalid, type(string_if_invalid).__name__\n            )\n            errors.append(error)\n    return errors\n\n\n@register(Tags.templates)\ndef check_for_template_tags_with_the_same_name(app_configs, **kwargs):\n    errors = []\n    libraries = defaultdict(set)\n\n    for conf in settings.TEMPLATES:\n        custom_libraries = conf.get(\"OPTIONS\", {}).get(\"libraries\", {})\n        for module_name, module_path in custom_libraries.items():\n            libraries[module_name].add(module_path)\n\n    for module_name, module_path in get_template_tag_modules():\n        libraries[module_name].add(module_path)\n\n    for library_name, items in libraries.items():\n        if len(items) > 1:\n            errors.append(\n                Error(\n                    E003.msg.format(\n                        repr(library_name),\n                        \", \".join(repr(item) for item in items),\n                    ),\n                    id=E003.id,\n                )\n            )\n\n    return errors"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! All three changes have been applied correctly:\n1. Line 53: `defaultdict(list)` \u2192 `defaultdict(set)` \u2713\n2. Line 57: `.append(module_path)` \u2192 `.add(module_path)` \u2713\n3. Line 60: `.append(module_path)` \u2192 `.add(module_path)` \u2713\n\nNow let me verify the changes with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014rv2pzMU4s78iX1wrSiAw9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014rv2pzMU4s78iX1wrSiAw9",
+          "content": "[exit_code=0]\ndiff --git a/django/core/checks/templates.py b/django/core/checks/templates.py\nindex 5214276987..128658de32 100644\n--- a/django/core/checks/templates.py\n+++ b/django/core/checks/templates.py\n@@ -50,15 +50,15 @@ def check_string_if_invalid_is_string(app_configs, **kwargs):\n @register(Tags.templates)\n def check_for_template_tags_with_the_same_name(app_configs, **kwargs):\n     errors = []\n-    libraries = defaultdict(list)\n+    libraries = defaultdict(set)\n \n     for conf in settings.TEMPLATES:\n         custom_libraries = conf.get(\"OPTIONS\", {}).get(\"libraries\", {})\n         for module_name, module_path in custom_libraries.items():\n-            libraries[module_name].append(module_path)\n+            libraries[module_name].add(module_path)\n \n     for module_name, module_path in get_template_tag_modules():\n-        libraries[module_name].append(module_path)\n+        libraries[module_name].add(module_path)\n \n     for library_name, items in libraries.items():\n         if len(items) > 1:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the changes needed. The patch is correct and minimal, changing only what was specified in the solution proposal. The modifications:\n\n1. Change `defaultdict(list)` to `defaultdict(set)` on line 53\n2. Change `.append(module_path)` to `.add(module_path)` on line 57 (in the custom libraries loop)\n3. Change `.append(module_path)` to `.add(module_path)` on line 60 (in the discovered modules loop)\n\nThis fix prevents false positive duplicate detection by using a set data structure that automatically deduplicates module paths when the same library appears in both INSTALLED_APPS and TEMPLATES['OPTIONS']['libraries'].\n\n```json\n{\n  \"patch\": \"diff --git a/django/core/checks/templates.py b/django/core/checks/templates.py\\nindex 5214276987..128658de32 100644\\n--- a/django/core/checks/templates.py\\n+++ b/django/core/checks/templates.py\\n@@ -50,15 +50,15 @@ def check_string_if_invalid_is_string(app_configs, **kwargs):\\n @register(Tags.templates)\\n def check_for_template_tags_with_the_same_name(app_configs, **kwargs):\\n     errors = []\\n-    libraries = defaultdict(list)\\n+    libraries = defaultdict(set)\\n \\n     for conf in settings.TEMPLATES:\\n         custom_libraries = conf.get(\\\"OPTIONS\\\", {}).get(\\\"libraries\\\", {})\\n         for module_name, module_path in custom_libraries.items():\\n-            libraries[module_name].append(module_path)\\n+            libraries[module_name].add(module_path)\\n \\n     for module_name, module_path in get_template_tag_modules():\\n-        libraries[module_name].append(module_path)\\n+        libraries[module_name].add(module_path)\\n \\n     for library_name, items in libraries.items():\\n         if len(items) > 1:\",\n  \"implementation_notes\": \"Changed the check_for_template_tags_with_the_same_name function to use defaultdict(set) instead of defaultdict(list) and .add() instead of .append() to automatically deduplicate module paths when the same library appears in both INSTALLED_APPS and TEMPLATES['OPTIONS']['libraries'], preventing false positive duplicate detections.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T11:57:39Z"
+}

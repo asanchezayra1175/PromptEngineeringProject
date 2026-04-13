@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-14155",
+  "status": "success",
+  "cycle": 2,
+  "attempt": 1,
+  "patch": "diff --git a/django/urls/resolvers.py b/django/urls/resolvers.py\nindex 9b00e24509..b28c8e8651 100644\n--- a/django/urls/resolvers.py\n+++ b/django/urls/resolvers.py\n@@ -44,13 +44,17 @@ class ResolverMatch:\n         self.app_name = ':'.join(self.app_names)\n         self.namespaces = [x for x in namespaces if x] if namespaces else []\n         self.namespace = ':'.join(self.namespaces)\n+        # Unwrap functools.partial for better representation\n+        func_for_path = func\n+        while isinstance(func_for_path, functools.partial):\n+            func_for_path = func_for_path.func\n \n-        if not hasattr(func, '__name__'):\n+        if not hasattr(func_for_path, '__name__'):\n             # A class-based view\n-            self._func_path = func.__class__.__module__ + '.' + func.__class__.__name__\n+            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\n         else:\n             # A function-based view\n-            self._func_path = func.__module__ + '.' + func.__name__\n+            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\n \n         view_path = url_name or self._func_path\n         self.view_name = ':'.join(self.namespaces + [view_path])",
+  "implementation_notes": "Replaced single-level functools.partial unwrapping with a while loop to handle nested partials. This ensures _func_path always reflects the underlying function name instead of 'functools.partial', making ResolverMatch.__repr__() output more helpful for debugging.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-14155</instance_id>\n\n<problem_statement>\nResolverMatch.__repr__() doesn't handle functools.partial() nicely.\nDescription\n\t \n\t\t(last modified by Nick Pope)\n\t \nWhen a partial function is passed as the view, the __repr__ shows the func argument as functools.partial which isn't very helpful, especially as it doesn't reveal the underlying function or arguments provided.\nBecause a partial function also has arguments provided up front, we need to handle those specially so that they are accessible in __repr__.\nISTM that we can simply unwrap functools.partial objects in ResolverMatch.__init__().\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The ResolverMatch.__init__ method computes _func_path from func.__module__ + '.' + func.__name__, but when func is a functools.partial object, this results in 'functools.partial' instead of the underlying function's path. The __repr__ method then displays this unhelpful _func_path, obscuring the actual wrapped function and its arguments.\nExploration notes: The ResolverMatch class is in /testbed/django/urls/resolvers.py. Test partial functions are defined in /testbed/tests/urlpatterns_reverse/views.py as empty_view_partial, empty_view_nested_partial, and empty_view_wrapped. The _func_path is set in lines around line 34-39 in __init__ method. The __repr__ method uses self._func_path on line 45. The functools module is already imported at the top of the file.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Replace single-level functools.partial unwrapping with a while loop to handle nested partials, ensuring _func_path always reflects the underlying function name for better __repr__ output.\n\nFiles to modify: [\n  \"/testbed/django/urls/resolvers.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/urls/resolvers.py\n  Location: ResolverMatch.__init__, lines 48-49\n  Change  : REPLACE lines 48-49:\n        if isinstance(func, functools.partial):\n            func_for_path = func.func\nWITH:\n        while isinstance(func_for_path, functools.partial):\n            func_for_path = func_for_path.func\n  Rationale: The single 'if isinstance' check only unwraps one level of functools.partial. For nested partials like empty_view_nested_partial (a partial of another partial), we need a while loop to fully unwrap all levels until reaching the underlying function. This ensures _func_path shows the actual function name instead of 'functools.partial'.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01AhxQkYismNDM8M6XTZuUiB",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -100 /testbed/django/urls/resolvers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01AhxQkYismNDM8M6XTZuUiB",
+          "content": "[exit_code=0]\n\"\"\"\nThis module converts requested URLs to callback view functions.\n\nURLResolver is the main class here. Its resolve() method takes a URL (as\na string) and returns a ResolverMatch object which provides access to all\nattributes of the resolved URL match.\n\"\"\"\nimport functools\nimport inspect\nimport re\nimport string\nfrom importlib import import_module\nfrom urllib.parse import quote\n\nfrom asgiref.local import Local\n\nfrom django.conf import settings\nfrom django.core.checks import Error, Warning\nfrom django.core.checks.urls import check_resolver\nfrom django.core.exceptions import ImproperlyConfigured, ViewDoesNotExist\nfrom django.utils.datastructures import MultiValueDict\nfrom django.utils.functional import cached_property\nfrom django.utils.http import RFC3986_SUBDELIMS, escape_leading_slashes\nfrom django.utils.regex_helper import _lazy_re_compile, normalize\nfrom django.utils.translation import get_language\n\nfrom .converters import get_converter\nfrom .exceptions import NoReverseMatch, Resolver404\nfrom .utils import get_callable\n\n\nclass ResolverMatch:\n    def __init__(self, func, args, kwargs, url_name=None, app_names=None, namespaces=None, route=None, tried=None):\n        self.func = func\n        self.args = args\n        self.kwargs = kwargs\n        self.url_name = url_name\n        self.route = route\n        self.tried = tried\n\n        # If a URLRegexResolver doesn't have a namespace or app_name, it passes\n        # in an empty value.\n        self.app_names = [x for x in app_names if x] if app_names else []\n        self.app_name = ':'.join(self.app_names)\n        self.namespaces = [x for x in namespaces if x] if namespaces else []\n        self.namespace = ':'.join(self.namespaces)\n        # Unwrap functools.partial for better representation\n        func_for_path = func\n        if isinstance(func, functools.partial):\n            func_for_path = func.func\n\n        if not hasattr(func_for_path, '__name__'):\n            # A class-based view\n            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\n        else:\n            # A function-based view\n            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\n\n        view_path = url_name or self._func_path\n        self.view_name = ':'.join(self.namespaces + [view_path])\n\n    def __getitem__(self, index):\n        return (self.func, self.args, self.kwargs)[index]\n\n    def __repr__(self):\n        return \"ResolverMatch(func=%s, args=%s, kwargs=%s, url_name=%s, app_names=%s, namespaces=%s, route=%s)\" % (\n            self._func_path, self.args, self.kwargs, self.url_name,\n            self.app_names, self.namespaces, self.route,\n        )\n\n\ndef get_resolver(urlconf=None):\n    if urlconf is None:\n        urlconf = settings.ROOT_URLCONF\n    return _get_cached_resolver(urlconf)\n\n\n@functools.lru_cache(maxsize=None)\ndef _get_cached_resolver(urlconf=None):\n    return URLResolver(RegexPattern(r'^/'), urlconf)\n\n\n@functools.lru_cache(maxsize=None)\ndef get_ns_resolver(ns_pattern, resolver, converters):\n    # Build a namespaced resolver for the given parent URLconf pattern.\n    # This makes it possible to have captured parameters in the parent\n    # URLconf pattern.\n    pattern = RegexPattern(ns_pattern)\n    pattern.converters = dict(converters)\n    ns_resolver = URLResolver(pattern, resolver.url_patterns)\n    return URLResolver(RegexPattern(r'^/'), [ns_resolver])\n\n\nclass LocaleRegexDescriptor:\n    def __init__(self, attr):\n        self.attr = attr\n\n    def __get__(self, instance, cls=None):\n        \"\"\"\n        Return a compiled regular expression based on the active language."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see the current implementation in the ResolverMatch.__init__ method (lines 34-64). Now let me look at the specific lines mentioned in the solution proposal (lines 48-49):",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01A5GKCu4RWSUq9JpXYAQCW6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '34,65p' /testbed/django/urls/resolvers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A5GKCu4RWSUq9JpXYAQCW6",
+          "content": "[exit_code=0]\nself.func = func\n        self.args = args\n        self.kwargs = kwargs\n        self.url_name = url_name\n        self.route = route\n        self.tried = tried\n\n        # If a URLRegexResolver doesn't have a namespace or app_name, it passes\n        # in an empty value.\n        self.app_names = [x for x in app_names if x] if app_names else []\n        self.app_name = ':'.join(self.app_names)\n        self.namespaces = [x for x in namespaces if x] if namespaces else []\n        self.namespace = ':'.join(self.namespaces)\n        # Unwrap functools.partial for better representation\n        func_for_path = func\n        if isinstance(func, functools.partial):\n            func_for_path = func.func\n\n        if not hasattr(func_for_path, '__name__'):\n            # A class-based view\n            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\n        else:\n            # A function-based view\n            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\n\n        view_path = url_name or self._func_path\n        self.view_name = ':'.join(self.namespaces + [view_path])\n\n    def __getitem__(self, index):\n        return (self.func, self.args, self.kwargs)[index]\n\n    def __repr__(self):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the current code has already been partially updated with the comment \"Unwrap functools.partial for better representation\" and has the single `if isinstance` check on lines 48-49. According to the solution proposal, I need to replace this single `if` with a `while` loop to handle nested partials. Let me now apply the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XuTpzHM11vrcgLXoxHL5XE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat > /tmp/fix_partial.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/urls/resolvers.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the single if with a while loop\n# We need to replace:\n#         if isinstance(func, functools.partial):\n#             func_for_path = func.func\n# With:\n#         while isinstance(func_for_path, functools.partial):\n#             func_for_path = func_for_path.func\n\nold_code = \"\"\"        # Unwrap functools.partial for better representation\n        func_for_path = func\n        if isinstance(func, functools.partial):\n            func_for_path = func.func\"\"\"\n\nnew_code = \"\"\"        # Unwrap functools.partial for better representation\n        func_for_path = func\n        while isinstance(func_for_path, functools.partial):\n            func_for_path = func_for_path.func\"\"\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    with open('/testbed/django/urls/resolvers.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully replaced if with while loop\")\nelse:\n    print(\"Old code pattern not found!\")\n    sys.exit(1)\nEOF\n\npython /tmp/fix_partial.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XuTpzHM11vrcgLXoxHL5XE",
+          "content": "[exit_code=0]\nSuccessfully replaced if with while loop"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FzQJQ8b8danBjS6YSDXXaC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '34,65p' /testbed/django/urls/resolvers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FzQJQ8b8danBjS6YSDXXaC",
+          "content": "[exit_code=0]\nself.func = func\n        self.args = args\n        self.kwargs = kwargs\n        self.url_name = url_name\n        self.route = route\n        self.tried = tried\n\n        # If a URLRegexResolver doesn't have a namespace or app_name, it passes\n        # in an empty value.\n        self.app_names = [x for x in app_names if x] if app_names else []\n        self.app_name = ':'.join(self.app_names)\n        self.namespaces = [x for x in namespaces if x] if namespaces else []\n        self.namespace = ':'.join(self.namespaces)\n        # Unwrap functools.partial for better representation\n        func_for_path = func\n        while isinstance(func_for_path, functools.partial):\n            func_for_path = func_for_path.func\n\n        if not hasattr(func_for_path, '__name__'):\n            # A class-based view\n            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\n        else:\n            # A function-based view\n            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\n\n        view_path = url_name or self._func_path\n        self.view_name = ':'.join(self.namespaces + [view_path])\n\n    def __getitem__(self, index):\n        return (self.func, self.args, self.kwargs)[index]\n\n    def __repr__(self):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. The single `if isinstance(func, functools.partial)` check has been replaced with a `while isinstance(func_for_path, functools.partial)` loop. This will now handle nested partials properly by continuing to unwrap until reaching the underlying function.\n\nNow let me run `git diff` to confirm the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0136grtovuDATH8YWxnFwong",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0136grtovuDATH8YWxnFwong",
+          "content": "[exit_code=0]\ndiff --git a/django/urls/resolvers.py b/django/urls/resolvers.py\nindex 9b00e24509..b28c8e8651 100644\n--- a/django/urls/resolvers.py\n+++ b/django/urls/resolvers.py\n@@ -44,13 +44,17 @@ class ResolverMatch:\n         self.app_name = ':'.join(self.app_names)\n         self.namespaces = [x for x in namespaces if x] if namespaces else []\n         self.namespace = ':'.join(self.namespaces)\n+        # Unwrap functools.partial for better representation\n+        func_for_path = func\n+        while isinstance(func_for_path, functools.partial):\n+            func_for_path = func_for_path.func\n \n-        if not hasattr(func, '__name__'):\n+        if not hasattr(func_for_path, '__name__'):\n             # A class-based view\n-            self._func_path = func.__class__.__module__ + '.' + func.__class__.__name__\n+            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\n         else:\n             # A function-based view\n-            self._func_path = func.__module__ + '.' + func.__name__\n+            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\n \n         view_path = url_name or self._func_path\n         self.view_name = ':'.join(self.namespaces + [view_path])"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly what we intended to change:\n\n1. We replaced the single `if isinstance(func, functools.partial)` check with a `while isinstance(func_for_path, functools.partial)` loop to handle nested partials\n2. All references to `func` when determining the path have been changed to `func_for_path` to use the unwrapped function\n\nThis change ensures that when a partial function (or nested partial functions) is passed as the view, the `__repr__` method will show the underlying function's path instead of just \"functools.partial\", making it much more helpful for debugging.\n\n```json\n{\n  \"patch\": \"diff --git a/django/urls/resolvers.py b/django/urls/resolvers.py\\nindex 9b00e24509..b28c8e8651 100644\\n--- a/django/urls/resolvers.py\\n+++ b/django/urls/resolvers.py\\n@@ -44,13 +44,17 @@ class ResolverMatch:\\n         self.app_name = ':'.join(self.app_names)\\n         self.namespaces = [x for x in namespaces if x] if namespaces else []\\n         self.namespace = ':'.join(self.namespaces)\\n+        # Unwrap functools.partial for better representation\\n+        func_for_path = func\\n+        while isinstance(func_for_path, functools.partial):\\n+            func_for_path = func_for_path.func\\n \\n-        if not hasattr(func, '__name__'):\\n+        if not hasattr(func_for_path, '__name__'):\\n             # A class-based view\\n-            self._func_path = func.__class__.__module__ + '.' + func.__class__.__name__\\n+            self._func_path = func_for_path.__class__.__module__ + '.' + func_for_path.__class__.__name__\\n         else:\\n             # A function-based view\\n-            self._func_path = func.__module__ + '.' + func.__name__\\n+            self._func_path = func_for_path.__module__ + '.' + func_for_path.__name__\\n \\n         view_path = url_name or self._func_path\\n         self.view_name = ':'.join(self.namespaces + [view_path])\",\n  \"implementation_notes\": \"Replaced single-level functools.partial unwrapping with a while loop to handle nested partials. This ensures _func_path always reflects the underlying function name instead of 'functools.partial', making ResolverMatch.__repr__() output more helpful for debugging.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T09:19:35Z"
+}

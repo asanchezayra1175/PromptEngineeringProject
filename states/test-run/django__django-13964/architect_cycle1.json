@@ -1,0 +1,214 @@
+{
+  "instance_id": "django__django-13964",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/base.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/base.py",
+      "location": "Model._prepare_related_fields_for_save, line 936",
+      "change": "REPLACE line 936:\n                elif getattr(self, field.attname) is None:\nWITH:\n                elif getattr(self, field.attname) in field.empty_values:",
+      "rationale": "The current condition only checks for None, but CharField primary keys initialize to empty string, not None. Using field.empty_values (which includes None, '', [], (), {}) handles both None and empty string cases, ensuring the foreign key field gets updated with the related object's primary key regardless of the field type."
+    }
+  ],
+  "fix_strategy": "PD \u2014 Condition boundary wrong (too specific): Change condition from `is None` to `in field.empty_values` to handle both None and empty string initial values for foreign key fields, ensuring proper primary key assignment for all field types.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim.\n   Line 936: `elif getattr(self, field.attname) is None:`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\n   Lines 937-941:\n   ```\n                       # Use pk from related object if it has been saved after\n                       # an assignment.\n                       setattr(self, field.attname, obj.pk)\n                   # If the relationship's pk/to_field was changed, clear the\n                   # cached relationship.\n   ```\n   No, my fix doesn't change what these lines receive. The same setattr call will be executed, just with a broader condition that includes empty strings.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\n   Yes, this is **PD \u2014 Condition boundary wrong (too specific)**. The condition `is None` is too specific and misses valid cases where the field value is an empty string. The fix adjusts the comparator from `is None` to `in field.empty_values`.\n\n4. Count the lines your fix changes. If more than 5, simplify.\n   Just 1 line changes.\n</think>\n\nNow let me produce the solution proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/base.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/base.py\",\n      \"location\": \"Model._prepare_related_fields_for_save, line 936\",\n      \"change\": \"REPLACE line 936:\\n                elif getattr(self, field.attname) is None:\\nWITH:\\n                elif getattr(self, field.attname) in field.empty_values:\",\n      \"rationale\": \"The current condition only checks for None, but CharField primary keys initialize to empty string, not None. Using field.empty_values (which includes None, '', [], (), {}) handles both None and empty string cases, ensuring the foreign key field gets updated with the related object's primary key regardless of the field type.\"\n    }\n  ],\n  \"fix_strategy\": \"PD \u2014 Condition boundary wrong (too specific): Change condition from `is None` to `in field.empty_values` to handle both None and empty string initial values for foreign key fields, ensuring proper primary key assignment for all field types.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-13964</instance_id>\n\n<problem_statement>\nSaving parent object after setting on child leads to data loss for parents with non-numeric primary key.\nDescription\n\t \n\t\t(last modified by Charlie DeTar)\n\t \nGiven a model with a foreign key relation to another model that has a non-auto CharField as its primary key:\nclass Product(models.Model):\n\tsku = models.CharField(primary_key=True, max_length=50)\nclass Order(models.Model):\n\tproduct = models.ForeignKey(Product, on_delete=models.CASCADE)\nIf the relation is initialized on the parent with an empty instance that does not yet specify its primary key, and the primary key is subsequently defined, the parent does not \"see\" the primary key's change:\nwith transaction.atomic():\n\torder = Order()\n\torder.product = Product()\n\torder.product.sku = \"foo\"\n\torder.product.save()\n\torder.save()\n\tassert Order.objects.filter(product_id=\"\").exists() # Succeeds, but shouldn't\n\tassert Order.objects.filter(product=order.product).exists() # Fails\nInstead of product_id being populated with product.sku, it is set to emptystring. The foreign key constraint which would enforce the existence of a product with sku=\"\" is deferred until the transaction commits. The transaction does correctly fail on commit with a ForeignKeyViolation due to the non-existence of a product with emptystring as its primary key.\nOn the other hand, if the related unsaved instance is initialized with its primary key before assignment to the parent, it is persisted correctly:\nwith transaction.atomic():\n\torder = Order()\n\torder.product = Product(sku=\"foo\")\n\torder.product.save()\n\torder.save()\n\tassert Order.objects.filter(product=order.product).exists() # succeeds\nCommitting the transaction also succeeds.\nThis may have something to do with how the Order.product_id field is handled at assignment, together with something about handling fetching of auto vs non-auto primary keys from the related instance.\n\n</problem_statement>\n\n<hints>\nThanks for this report. product_id is an empty string in \u200b_prepare_related_fields_for_save() that's why pk from a related object is not used. We could use empty_values: diff --git a/django/db/models/base.py b/django/db/models/base.py index 822aad080d..8e7a8e3ae7 100644 --- a/django/db/models/base.py +++ b/django/db/models/base.py @@ -933,7 +933,7 @@ class Model(metaclass=ModelBase): \"%s() prohibited to prevent data loss due to unsaved \" \"related object '%s'.\" % (operation_name, field.name) ) - elif getattr(self, field.attname) is None: + elif getattr(self, field.attname) in field.empty_values: # Use pk from related object if it has been saved after # an assignment. setattr(self, field.attname, obj.pk) but I'm not sure. Related with #28147.\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/base.py\"\n]\nRelevant symbols: [\n  \"Model._prepare_related_fields_for_save\"\n]\nBug analysis: The _prepare_related_fields_for_save method checks if getattr(self, field.attname) is None before setting the foreign key field to the related object's primary key. For CharField primary keys, the initial value is an empty string ('') rather than None, so the condition fails and the foreign key field remains set to empty string instead of being updated with the actual primary key value.\nExploration notes: The bug is on line 936 in django/db/models/base.py. The current condition 'elif getattr(self, field.attname) is None:' should be changed to 'elif getattr(self, field.attname) in field.empty_values:' to handle both None and empty string cases. The empty_values attribute is defined in django/db/models/fields/__init__.py as list(validators.EMPTY_VALUES) which includes (None, '', [], (), {}).\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the bug and produce a solution proposal. Let me start by understanding the problem and reading the relevant source code.\n\n<think>\n1. What is the function SUPPOSED to do in plain English?\n   The `_prepare_related_fields_for_save` method should set the foreign key field to the related object's primary key when the related object has been saved after assignment.\n\n2. What input triggers the failure and what error results?\n   When a parent object has a foreign key to a child with a CharField primary key, and the child's primary key is set after assignment to the parent, the foreign key field remains as empty string instead of being updated with the actual primary key value.\n\n3. Which fix pattern matches this bug?\n   This looks like **PD \u2014 Condition boundary wrong (too broad or too specific)**. The condition `is None` is too specific and misses the case where the field value is an empty string.\n\n4. Where should the fix live?\n   Inside the `_prepare_related_fields_for_save` method that crashes/misbehaves, not at call sites. This protects all callers.\n\n5. How many lines need to change?\n   Just 1 line - changing the condition from `is None` to `in field.empty_values`.\n</think>\n\nLet me read the source code to understand the exact implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Kp1bXP5sw8nMiTij2Yt5UT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/base.py",
+            "method_name": "_prepare_related_fields_for_save"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Kp1bXP5sw8nMiTij2Yt5UT",
+          "content": "[exit_code=0]\n--- _prepare_related_fields_for_save (lines 911-943) ---\n    def _prepare_related_fields_for_save(self, operation_name):\n        # Ensure that a model instance without a PK hasn't been assigned to\n        # a ForeignKey or OneToOneField on this model. If the field is\n        # nullable, allowing the save would result in silent data loss.\n        for field in self._meta.concrete_fields:\n            # If the related field isn't cached, then an instance hasn't been\n            # assigned and there's no need to worry about this check.\n            if field.is_relation and field.is_cached(self):\n                obj = getattr(self, field.name, None)\n                if not obj:\n                    continue\n                # A pk may have been assigned manually to a model instance not\n                # saved to the database (or auto-generated in a case like\n                # UUIDField), but we allow the save to proceed and rely on the\n                # database to raise an IntegrityError if applicable. If\n                # constraints aren't supported by the database, there's the\n                # unavoidable risk of data corruption.\n                if obj.pk is None:\n                    # Remove the object from a related instance cache.\n                    if not field.remote_field.multiple:\n                        field.remote_field.delete_cached_value(obj)\n                    raise ValueError(\n                        \"%s() prohibited to prevent data loss due to unsaved \"\n                        \"related object '%s'.\" % (operation_name, field.name)\n                    )\n                elif getattr(self, field.attname) is None:\n                    # Use pk from related object if it has been saved after\n                    # an assignment.\n                    setattr(self, field.attname, obj.pk)\n                # If the relationship's pk/to_field was changed, clear the\n                # cached relationship.\n                if getattr(obj, field.target_field.attname) != getattr(self, field.attname):\n                    field.delete_cached_value(self)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check what `field.empty_values` contains to understand the suggested fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QCRYkE6pZuSGAmfd2dNbyk",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"*.py\" -exec grep -l \"empty_values\" {} \\; | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QCRYkE6pZuSGAmfd2dNbyk",
+          "content": "[exit_code=0]\n./django/contrib/admin/widgets.py\n./django/contrib/gis/forms/fields.py\n./django/contrib/postgres/forms/array.py\n./django/db/models/base.py\n./django/db/models/fields/__init__.py\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13\nfind: 'grep' terminated by signal 13"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01H2tHgYBvrMemsnPEWa17XM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -A 5 -B 5 \"empty_values\" django/db/models/fields/__init__.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01H2tHgYBvrMemsnPEWa17XM",
+          "content": "[exit_code=0]\n\"\"\"Base class for all field types\"\"\"\n\n    # Designates whether empty strings fundamentally are allowed at the\n    # database level.\n    empty_strings_allowed = True\n    empty_values = list(validators.EMPTY_VALUES)\n\n    # These track each time a Field instance is created. Used to retain order.\n    # The auto_creation_counter is used for fields that Django implicitly\n    # creates, creation_counter is used for all user-specified fields.\n    creation_counter = 0\n--\n        This method provides a way to delay their creation until required.\n        \"\"\"\n        return [*self.default_validators, *self._validators]\n\n    def run_validators(self, value):\n        if value in self.empty_values:\n            return\n\n        errors = []\n        for v in self.validators:\n            try:\n--\n        \"\"\"\n        if not self.editable:\n            # Skip validation for non-editable fields.\n            return\n\n        if self.choices is not None and value not in self.empty_values:\n            for option_key, option_value in self.choices:\n                if isinstance(option_value, (list, tuple)):\n                    # This is an optgroup, so look inside the group for\n                    # options.\n                    for optgroup_key, optgroup_value in option_value:\n--\n            )\n\n        if value is None and not self.null:\n            raise exceptions.ValidationError(self.error_messages['null'], code='null')\n\n        if not self.blank and value in self.empty_values:\n            raise exceptions.ValidationError(self.error_messages['blank'], code='blank')\n\n    def clean(self, value, model_instance):\n        \"\"\"\n        Convert the value's type and run validation. Validation errors\n--\n\n    def get_internal_type(self):\n        return \"BooleanField\"\n\n    def to_python(self, value):\n        if self.null and value in self.empty_values:\n            return None\n        if value in (True, False):\n            # 1/0 are equal to True/False. bool() converts former to latter.\n            return bool(value)\n        if value in ('t', 'True', '1'):\n--\n        })\n\n\nclass BinaryField(Field):\n    description = _(\"Raw binary data\")\n    empty_values = [None, b'']\n\n    def __init__(self, *args, **kwargs):\n        kwargs.setdefault('editable', False)\n        super().__init__(*args, **kwargs)\n        if self.max_length is not None:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check what `validators.EMPTY_VALUES` contains:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01X38ZGSCsW52ShY3BATijUq",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"*.py\" -exec grep -l \"EMPTY_VALUES\" {} \\; | head -3"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01X38ZGSCsW52ShY3BATijUq",
+          "content": "[exit_code=0]\n./django/core/validators.py\n./django/db/models/fields/__init__.py\n./django/forms/fields.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01NrsvBPDfvhJ4uAWUwb8Knv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -A 5 -B 5 \"EMPTY_VALUES\" django/core/validators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NrsvBPDfvhJ4uAWUwb8Knv",
+          "content": "[exit_code=0]\nfrom django.utils.ipv6 import is_valid_ipv6_address\nfrom django.utils.regex_helper import _lazy_re_compile\nfrom django.utils.translation import gettext_lazy as _, ngettext_lazy\n\n# These values, if given to validate(), will trigger the self.required check.\nEMPTY_VALUES = (None, '', [], (), {})\n\n\n@deconstructible\nclass RegexValidator:\n    regex = ''"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I understand the issue completely. Let me also check the lines immediately after the buggy line to see if there are any downstream dependencies:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0145nWZcavbpBD5BtqHerKLx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '936,941p' django/db/models/base.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0145nWZcavbpBD5BtqHerKLx",
+          "content": "[exit_code=0]\nelif getattr(self, field.attname) is None:\n                    # Use pk from related object if it has been saved after\n                    # an assignment.\n                    setattr(self, field.attname, obj.pk)\n                # If the relationship's pk/to_field was changed, clear the\n                # cached relationship."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim.\n   Line 936: `elif getattr(self, field.attname) is None:`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\n   Lines 937-941:\n   ```\n                       # Use pk from related object if it has been saved after\n                       # an assignment.\n                       setattr(self, field.attname, obj.pk)\n                   # If the relationship's pk/to_field was changed, clear the\n                   # cached relationship.\n   ```\n   No, my fix doesn't change what these lines receive. The same setattr call will be executed, just with a broader condition that includes empty strings.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\n   Yes, this is **PD \u2014 Condition boundary wrong (too specific)**. The condition `is None` is too specific and misses valid cases where the field value is an empty string. The fix adjusts the comparator from `is None` to `in field.empty_values`.\n\n4. Count the lines your fix changes. If more than 5, simplify.\n   Just 1 line changes.\n</think>\n\nNow let me produce the solution proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/base.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/base.py\",\n      \"location\": \"Model._prepare_related_fields_for_save, line 936\",\n      \"change\": \"REPLACE line 936:\\n                elif getattr(self, field.attname) is None:\\nWITH:\\n                elif getattr(self, field.attname) in field.empty_values:\",\n      \"rationale\": \"The current condition only checks for None, but CharField primary keys initialize to empty string, not None. Using field.empty_values (which includes None, '', [], (), {}) handles both None and empty string cases, ensuring the foreign key field gets updated with the related object's primary key regardless of the field type.\"\n    }\n  ],\n  \"fix_strategy\": \"PD \u2014 Condition boundary wrong (too specific): Change condition from `is None` to `in field.empty_values` to handle both None and empty string initial values for foreign key fields, ensuring proper primary key assignment for all field types.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T09:01:45Z"
+}

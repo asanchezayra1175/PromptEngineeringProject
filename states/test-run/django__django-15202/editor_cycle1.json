@@ -1,0 +1,150 @@
+{
+  "instance_id": "django__django-15202",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/core/validators.py b/django/core/validators.py\nindex 72fbe15551..9d1fe22f17 100644\n--- a/django/core/validators.py\n+++ b/django/core/validators.py\n@@ -127,7 +127,10 @@ class URLValidator(RegexValidator):\n                 raise\n         else:\n             # Now verify IPv6 in the netloc part\n-            host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n+            try:\n+                host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n+            except ValueError:  # for example, \"Invalid IPv6 URL\"\n+                raise ValidationError(self.message, code=self.code, params={'value': value})\n             if host_match:\n                 potential_ip = host_match[1]\n                 try:\n@@ -139,7 +142,12 @@ class URLValidator(RegexValidator):\n         # section 3.1. It's defined to be 255 bytes or less, but this includes\n         # one byte for the length of the name and one byte for the trailing dot\n         # that's used to indicate absolute names in DNS.\n-        if len(urlsplit(value).hostname) > 253:\n+        try:\n+            hostname = urlsplit(value).hostname\n+            hostname_length = len(hostname) if hostname else 0\n+        except ValueError:  # for example, \"Invalid IPv6 URL\"\n+            raise ValidationError(self.message, code=self.code, params={'value': value})\n+        if hostname_length > 253:\n             raise ValidationError(self.message, code=self.code, params={'value': value})",
+  "implementation_notes": "Wrapped two urlsplit() calls in URLValidator.__call__ with try-except blocks to catch ValueError exceptions and convert them to ValidationError, following the existing pattern used elsewhere in the method. This fixes the issue where malformed URLs like '////]@N.AN' would raise ValueError instead of ValidationError.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-15202</instance_id>\n\n<problem_statement>\nURLField throws ValueError instead of ValidationError on clean\nDescription\n\t\nforms.URLField( ).clean('////]@N.AN')\nresults in:\n\tValueError: Invalid IPv6 URL\n\tTraceback (most recent call last):\n\t File \"basic_fuzzer.py\", line 22, in TestOneInput\n\t File \"fuzzers.py\", line 350, in test_forms_URLField\n\t File \"django/forms/fields.py\", line 151, in clean\n\t File \"django/forms/fields.py\", line 136, in run_validators\n\t File \"django/core/validators.py\", line 130, in __call__\n\t File \"urllib/parse.py\", line 440, in urlsplit\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The URLValidator.__call__ method calls urlsplit(value).netloc at line 130 to extract the netloc for IPv6 validation. When urlsplit() encounters malformed URLs like '////]@N.AN', it raises ValueError('Invalid IPv6 URL') which is not caught and converted to ValidationError.\nExploration notes: URLValidator is imported in django/forms/fields.py and used as default_validators = [validators.URLValidator()] for URLField class. The unhandled ValueError occurs in the IPv6 verification section after the main URL validation passes. Line 108-110 already shows the correct pattern for catching ValueError from urlsplit and converting to ValidationError.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PC - Generic exception type: Catch ValueError from urlsplit() calls and convert to ValidationError, following the existing pattern in the same method. The fix protects all two unguarded urlsplit() calls that can raise ValueError for malformed IPv6 URLs.\n\nFiles to modify: [\n  \"/testbed/django/core/validators.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/core/validators.py\n  Location: URLValidator.__call__, line 129\n  Change  : INSERT after line 129:\n            try:\n  Rationale: Wrap the urlsplit call that can raise ValueError for malformed IPv6 URLs\n\nChange 2:\n  File    : /testbed/django/core/validators.py\n  Location: URLValidator.__call__, line 130\n  Change  : REPLACE line 130:\n            host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\nWITH:\n                host_match = re.search(r'^\\[(.+)\\](?:\\d{1,5})?$', urlsplit(value).netloc)\n  Rationale: Indent the line to be inside the try block\n\nChange 3:\n  File    : /testbed/django/core/validators.py\n  Location: URLValidator.__call__, line 131\n  Change  : INSERT after line 135:\n            except ValueError:  # for example, \"Invalid IPv6 URL\"\n                raise ValidationError(self.message, code=self.code, params={'value': value})\n  Rationale: Add except block to catch ValueError and convert to ValidationError, following the same pattern used in lines 108-110\n\nChange 4:\n  File    : /testbed/django/core/validators.py\n  Location: URLValidator.__call__, line 142\n  Change  : REPLACE line 143:\n        if len(urlsplit(value).hostname) > 253:\nWITH:\n        try:\n            hostname_length = len(urlsplit(value).hostname) if urlsplit(value).hostname else 0\n        except ValueError:  # for example, \"Invalid IPv6 URL\"\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        if hostname_length > 253:\n  Rationale: Protect the second urlsplit call and handle the case where hostname is None\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01J6dqEDw9cwsESRDRimn8B5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/core/validators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01J6dqEDw9cwsESRDRimn8B5",
+          "content": "[exit_code=0]\nimport ipaddress\nimport re\nfrom pathlib import Path\nfrom urllib.parse import urlsplit, urlunsplit\n\nfrom django.core.exceptions import ValidationError\nfrom django.utils.deconstruct import deconstructible\nfrom django.utils.encoding import punycode\nfrom django.utils.ipv6 import is_valid_ipv6_address\nfrom django.utils.regex_helper import _lazy_re_compile\nfrom django.utils.translation import gettext_lazy as _, ngettext_lazy\n\n# These values, if given to validate(), will trigger the self.required check.\nEMPTY_VALUES = (None, '', [], (), {})\n\n\n@deconstructible\nclass RegexValidator:\n    regex = ''\n    message = _('Enter a valid value.')\n    code = 'invalid'\n    inverse_match = False\n    flags = 0\n\n    def __init__(self, regex=None, message=None, code=None, inverse_match=None, flags=None):\n        if regex is not None:\n            self.regex = regex\n        if message is not None:\n            self.message = message\n        if code is not None:\n            self.code = code\n        if inverse_match is not None:\n            self.inverse_match = inverse_match\n        if flags is not None:\n            self.flags = flags\n        if self.flags and not isinstance(self.regex, str):\n            raise TypeError(\"If the flags are set, regex must be a regular expression string.\")\n\n        self.regex = _lazy_re_compile(self.regex, self.flags)\n\n    def __call__(self, value):\n        \"\"\"\n        Validate that the input contains (or does *not* contain, if\n        inverse_match is True) a match for the regular expression.\n        \"\"\"\n        regex_matches = self.regex.search(str(value))\n        invalid_input = regex_matches if self.inverse_match else not regex_matches\n        if invalid_input:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n\n    def __eq__(self, other):\n        return (\n            isinstance(other, RegexValidator) and\n            self.regex.pattern == other.regex.pattern and\n            self.regex.flags == other.regex.flags and\n            (self.message == other.message) and\n            (self.code == other.code) and\n            (self.inverse_match == other.inverse_match)\n        )\n\n\n@deconstructible\nclass URLValidator(RegexValidator):\n    ul = '\\u00a1-\\uffff'  # Unicode letters range (must not be a raw string).\n\n    # IP patterns\n    ipv4_re = r'(?:0|25[0-5]|2[0-4]\\d|1\\d?\\d?|[1-9]\\d?)(?:\\.(?:0|25[0-5]|2[0-4]\\d|1\\d?\\d?|[1-9]\\d?)){3}'\n    ipv6_re = r'\\[[0-9a-f:.]+\\]'  # (simple regex, validated later)\n\n    # Host patterns\n    hostname_re = r'[a-z' + ul + r'0-9](?:[a-z' + ul + r'0-9-]{0,61}[a-z' + ul + r'0-9])?'\n    # Max length for domain name labels is 63 characters per RFC 1034 sec. 3.1\n    domain_re = r'(?:\\.(?!-)[a-z' + ul + r'0-9-]{1,63}(?<!-))*'\n    tld_re = (\n        r'\\.'                                # dot\n        r'(?!-)'                             # can't start with a dash\n        r'(?:[a-z' + ul + '-]{2,63}'         # domain label\n        r'|xn--[a-z0-9]{1,59})'              # or punycode label\n        r'(?<!-)'                            # can't end with a dash\n        r'\\.?'                               # may have a trailing dot\n    )\n    host_re = '(' + hostname_re + domain_re + tld_re + '|localhost)'\n\n    regex = _lazy_re_compile(\n        r'^(?:[a-z0-9.+-]*)://'  # scheme is validated separately\n        r'(?:[^\\s:@/]+(?::[^\\s:@/]*)?@)?'  # user:pass authentication\n        r'(?:' + ipv4_re + '|' + ipv6_re + '|' + host_re + ')'\n        r'(?::\\d{1,5})?'  # port\n        r'(?:[/?#][^\\s]*)?'  # resource path\n        r'\\Z', re.IGNORECASE)\n    message = _('Enter a valid URL.')\n    schemes = ['http', 'https', 'ftp', 'ftps']\n    unsafe_chars = frozenset('\\t\\r\\n')\n\n    def __init__(self, schemes=None, **kwargs):\n        super().__init__(**kwargs)\n        if schemes is not None:\n            self.schemes = schemes\n\n    def __call__(self, value):\n        if not isinstance(value, str):\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        if self.unsafe_chars.intersection(value):\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        # Check if the scheme is valid.\n        scheme = value.split('://')[0].lower()\n        if scheme not in self.schemes:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n\n        # Then check full URL\n        try:\n            super().__call__(value)\n        except ValidationError as e:\n            # Trivial case failed. Try for possible IDN domain\n            if value:\n                try:\n                    scheme, netloc, path, query, fragment = urlsplit(value)\n                except ValueError:  # for example, \"Invalid IPv6 URL\"\n                    raise ValidationError(self.message, code=self.code, params={'value': value})\n                try:\n                    netloc = punycode(netloc)  # IDN -> ACE\n                except UnicodeError:  # invalid domain part\n                    raise e\n                url = urlunsplit\n...[truncated]...\nwed_extensions = allowed_extensions\n        if message is not None:\n            self.message = message\n        if code is not None:\n            self.code = code\n\n    def __call__(self, value):\n        extension = Path(value.name).suffix[1:].lower()\n        if self.allowed_extensions is not None and extension not in self.allowed_extensions:\n            raise ValidationError(\n                self.message,\n                code=self.code,\n                params={\n                    'extension': extension,\n                    'allowed_extensions': ', '.join(self.allowed_extensions),\n                    'value': value,\n                }\n            )\n\n    def __eq__(self, other):\n        return (\n            isinstance(other, self.__class__) and\n            self.allowed_extensions == other.allowed_extensions and\n            self.message == other.message and\n            self.code == other.code\n        )\n\n\ndef get_available_image_extensions():\n    try:\n        from PIL import Image\n    except ImportError:\n        return []\n    else:\n        Image.init()\n        return [ext.lower()[1:] for ext in Image.EXTENSION]\n\n\ndef validate_image_file_extension(value):\n    return FileExtensionValidator(allowed_extensions=get_available_image_extensions())(value)\n\n\n@deconstructible\nclass ProhibitNullCharactersValidator:\n    \"\"\"Validate that the string doesn't contain the null character.\"\"\"\n    message = _('Null characters are not allowed.')\n    code = 'null_characters_not_allowed'\n\n    def __init__(self, message=None, code=None):\n        if message is not None:\n            self.message = message\n        if code is not None:\n            self.code = code\n\n    def __call__(self, value):\n        if '\\x00' in str(value):\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n\n    def __eq__(self, other):\n        return (\n            isinstance(other, self.__class__) and\n            self.message == other.message and\n            self.code == other.code\n        )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me get the full URLValidator.__call__ method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01ScVVeh7tccuGGTdrchfSz5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '97,160p' /testbed/django/core/validators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ScVVeh7tccuGGTdrchfSz5",
+          "content": "[exit_code=0]\nif schemes is not None:\n            self.schemes = schemes\n\n    def __call__(self, value):\n        if not isinstance(value, str):\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        if self.unsafe_chars.intersection(value):\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        # Check if the scheme is valid.\n        scheme = value.split('://')[0].lower()\n        if scheme not in self.schemes:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n\n        # Then check full URL\n        try:\n            super().__call__(value)\n        except ValidationError as e:\n            # Trivial case failed. Try for possible IDN domain\n            if value:\n                try:\n                    scheme, netloc, path, query, fragment = urlsplit(value)\n                except ValueError:  # for example, \"Invalid IPv6 URL\"\n                    raise ValidationError(self.message, code=self.code, params={'value': value})\n                try:\n                    netloc = punycode(netloc)  # IDN -> ACE\n                except UnicodeError:  # invalid domain part\n                    raise e\n                url = urlunsplit((scheme, netloc, path, query, fragment))\n                super().__call__(url)\n            else:\n                raise\n        else:\n            # Now verify IPv6 in the netloc part\n            host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n            if host_match:\n                potential_ip = host_match[1]\n                try:\n                    validate_ipv6_address(potential_ip)\n                except ValidationError:\n                    raise ValidationError(self.message, code=self.code, params={'value': value})\n\n        # The maximum length of a full host name is 253 characters per RFC 1034\n        # section 3.1. It's defined to be 255 bytes or less, but this includes\n        # one byte for the length of the name and one byte for the trailing dot\n        # that's used to indicate absolute names in DNS.\n        if len(urlsplit(value).hostname) > 253:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n\n\ninteger_validator = RegexValidator(\n    _lazy_re_compile(r'^-?\\d+\\Z'),\n    message=_('Enter a valid integer.'),\n    code='invalid',\n)\n\n\ndef validate_integer(value):\n    return integer_validator(value)\n\n\n@deconstructible\nclass EmailValidator:\n    message = _('Enter a valid email address.')\n    code = 'invalid'"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the URLValidator.__call__ method clearly. I need to:\n1. Wrap the first urlsplit call at line 130 with try-except\n2. Wrap the second urlsplit call at line 143 with try-except\n\nLet me apply the fixes using Python to modify the file carefully:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UFmMWrtHeSpFCTzRzbRFck",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_validators.py << 'EOF'\nimport re\n\n# Read the file\nwith open('/testbed/django/core/validators.py', 'r') as f:\n    content = f.read()\n\n# First fix: wrap the IPv6 verification urlsplit call\n# Find the line: host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n# And wrap it with try-except\n\nold_ipv6_block = \"\"\"        else:\n            # Now verify IPv6 in the netloc part\n            host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n            if host_match:\n                potential_ip = host_match[1]\n                try:\n                    validate_ipv6_address(potential_ip)\n                except ValidationError:\n                    raise ValidationError(self.message, code=self.code, params={'value': value})\"\"\"\n\nnew_ipv6_block = \"\"\"        else:\n            # Now verify IPv6 in the netloc part\n            try:\n                host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n            except ValueError:  # for example, \"Invalid IPv6 URL\"\n                raise ValidationError(self.message, code=self.code, params={'value': value})\n            if host_match:\n                potential_ip = host_match[1]\n                try:\n                    validate_ipv6_address(potential_ip)\n                except ValidationError:\n                    raise ValidationError(self.message, code=self.code, params={'value': value})\"\"\"\n\ncontent = content.replace(old_ipv6_block, new_ipv6_block)\n\n# Second fix: wrap the hostname length check\nold_hostname_block = \"\"\"        # The maximum length of a full host name is 253 characters per RFC 1034\n        # section 3.1. It's defined to be 255 bytes or less, but this includes\n        # one byte for the length of the name and one byte for the trailing dot\n        # that's used to indicate absolute names in DNS.\n        if len(urlsplit(value).hostname) > 253:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\"\"\"\n\nnew_hostname_block = \"\"\"        # The maximum length of a full host name is 253 characters per RFC 1034\n        # section 3.1. It's defined to be 255 bytes or less, but this includes\n        # one byte for the length of the name and one byte for the trailing dot\n        # that's used to indicate absolute names in DNS.\n        try:\n            hostname = urlsplit(value).hostname\n            hostname_length = len(hostname) if hostname else 0\n        except ValueError:  # for example, \"Invalid IPv6 URL\"\n            raise ValidationError(self.message, code=self.code, params={'value': value})\n        if hostname_length > 253:\n            raise ValidationError(self.message, code=self.code, params={'value': value})\"\"\"\n\ncontent = content.replace(old_hostname_block, new_hostname_block)\n\n# Write back the file\nwith open('/testbed/django/core/validators.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\npython /tmp/fix_validators.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UFmMWrtHeSpFCTzRzbRFck",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UB6s569hNX5Uc6J7hnWRUY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UB6s569hNX5Uc6J7hnWRUY",
+          "content": "[exit_code=0]\ndiff --git a/django/core/validators.py b/django/core/validators.py\nindex 72fbe15551..9d1fe22f17 100644\n--- a/django/core/validators.py\n+++ b/django/core/validators.py\n@@ -127,7 +127,10 @@ class URLValidator(RegexValidator):\n                 raise\n         else:\n             # Now verify IPv6 in the netloc part\n-            host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n+            try:\n+                host_match = re.search(r'^\\[(.+)\\](?::\\d{1,5})?$', urlsplit(value).netloc)\n+            except ValueError:  # for example, \"Invalid IPv6 URL\"\n+                raise ValidationError(self.message, code=self.code, params={'value': value})\n             if host_match:\n                 potential_ip = host_match[1]\n                 try:\n@@ -139,7 +142,12 @@ class URLValidator(RegexValidator):\n         # section 3.1. It's defined to be 255 bytes or less, but this includes\n         # one byte for the length of the name and one byte for the trailing dot\n         # that's used to indicate absolute names in DNS.\n-        if len(urlsplit(value).hostname) > 253:\n+        try:\n+            hostname = urlsplit(value).hostname\n+            hostname_length = len(hostname) if hostname else 0\n+        except ValueError:  # for example, \"Invalid IPv6 URL\"\n+            raise ValidationError(self.message, code=self.code, params={'value': value})\n+        if hostname_length > 253:\n             raise ValidationError(self.message, code=self.code, params={'value': value})"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. The diff shows:\n\n1. **First fix (lines 130-136)**: Wrapped the `urlsplit(value).netloc` call in a try-except block to catch `ValueError` and convert it to `ValidationError`.\n\n2. **Second fix (lines 145-150)**: Wrapped the `urlsplit(value).hostname` call in a try-except block to catch `ValueError` and convert it to `ValidationError`, while also handling the case where `hostname` is `None`.\n\nBoth changes follow the existing pattern used in lines 108-110 of the same method, where `ValueError` from `urlsplit()` is caught and converted to `ValidationError`.\n\n```json\n{\n  \"patch\": \"diff --git a/django/core/validators.py b/django/core/validators.py\\nindex 72fbe15551..9d1fe22f17 100644\\n--- a/django/core/validators.py\\n+++ b/django/core/validators.py\\n@@ -127,7 +127,10 @@ class URLValidator(RegexValidator):\\n                 raise\\n         else:\\n             # Now verify IPv6 in the netloc part\\n-            host_match = re.search(r'^\\\\[(.+)\\\\](?::\\\\d{1,5})?$', urlsplit(value).netloc)\\n+            try:\\n+                host_match = re.search(r'^\\\\[(.+)\\\\](?::\\\\d{1,5})?$', urlsplit(value).netloc)\\n+            except ValueError:  # for example, \\\"Invalid IPv6 URL\\\"\\n+                raise ValidationError(self.message, code=self.code, params={'value': value})\\n             if host_match:\\n                 potential_ip = host_match[1]\\n                 try:\\n@@ -139,7 +142,12 @@ class URLValidator(RegexValidator):\\n         # section 3.1. It's defined to be 255 bytes or less, but this includes\\n         # one byte for the length of the name and one byte for the trailing dot\\n         # that's used to indicate absolute names in DNS.\\n-        if len(urlsplit(value).hostname) > 253:\\n+        try:\\n+            hostname = urlsplit(value).hostname\\n+            hostname_length = len(hostname) if hostname else 0\\n+        except ValueError:  # for example, \\\"Invalid IPv6 URL\\\"\\n+            raise ValidationError(self.message, code=self.code, params={'value': value})\\n+        if hostname_length > 253:\\n             raise ValidationError(self.message, code=self.code, params={'value': value})\",\n  \"implementation_notes\": \"Wrapped two urlsplit() calls in URLValidator.__call__ with try-except blocks to catch ValueError exceptions and convert them to ValidationError, following the existing pattern used elsewhere in the method. This fixes the issue where malformed URLs like '////]@N.AN' would raise ValueError instead of ValidationError.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T10:37:41Z"
+}

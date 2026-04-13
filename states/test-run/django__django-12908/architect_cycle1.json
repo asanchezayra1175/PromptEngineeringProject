@@ -1,0 +1,164 @@
+{
+  "instance_id": "django__django-12908",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/query.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/query.py",
+      "location": "QuerySet.distinct, line 1137",
+      "change": "INSERT after line 1137:\n        self._not_support_combined_queries('distinct')",
+      "rationale": "The distinct() method is missing the _not_support_combined_queries guard that all other unsupported operations have after union/intersection/difference. This causes distinct() to silently fail instead of raising NotSupportedError as documented."
+    }
+  ],
+  "fix_strategy": "PA: Add the missing guard call at the very beginning of distinct() method to match the pattern used by all other QuerySet methods that should be unsupported after union operations. This protects all callers automatically by raising NotSupportedError when distinct() is called on a combined queryset.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim.\nThe distinct method doesn't have any call to _not_support_combined_queries. The bug is that there's no guard at the beginning.\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nThe 5 lines after the method signature are:\n```\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n```\nMy fix (adding _not_support_combined_queries call) won't change what these lines receive.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nYes, Pattern PA applies exactly: I need to add the guard at the TOP of the method, before any other logic. The pattern is to add `self._not_support_combined_queries('distinct')` as the very first line of the method body.\n\n4. Count the lines your fix changes. If more than 5, simplify.\nOnly 1 line needs to be added.\n</think>\n\nPerfect! I can see that the `distinct()` method is missing the `_not_support_combined_queries('distinct')` call at the beginning, while all other methods that should be unsupported after union operations have this guard.\n\nLooking at the pattern used by other methods like `filter()`, `exclude()`, `annotate()`, etc., they all call `self._not_support_combined_queries('operation_name')` as their first line.\n\nThe fix is straightforward - I need to add this guard call at the very beginning of the `distinct()` method.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet.distinct, line 1137\",\n      \"change\": \"INSERT after line 1137:\\n        self._not_support_combined_queries('distinct')\",\n      \"rationale\": \"The distinct() method is missing the _not_support_combined_queries guard that all other unsupported operations have after union/intersection/difference. This causes distinct() to silently fail instead of raising NotSupportedError as documented.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: Add the missing guard call at the very beginning of distinct() method to match the pattern used by all other QuerySet methods that should be unsupported after union operations. This protects all callers automatically by raising NotSupportedError when distinct() is called on a combined queryset.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-12908</instance_id>\n\n<problem_statement>\nUnion queryset should raise on distinct().\nDescription\n\t \n\t\t(last modified by Sielc Technologies)\n\t \nAfter using\n.annotate() on 2 different querysets\nand then .union()\n.distinct() will not affect the queryset\n\tdef setUp(self) -> None:\n\t\tuser = self.get_or_create_admin_user()\n\t\tSample.h.create(user, name=\"Sam1\")\n\t\tSample.h.create(user, name=\"Sam2 acid\")\n\t\tSample.h.create(user, name=\"Sam3\")\n\t\tSample.h.create(user, name=\"Sam4 acid\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tself.user = user\n\tdef test_union_annotated_diff_distinct(self):\n\t\tqs = Sample.objects.filter(user=self.user)\n\t\tqs1 = qs.filter(name='Dub').annotate(rank=Value(0, IntegerField()))\n\t\tqs2 = qs.filter(name='Sam1').annotate(rank=Value(1, IntegerField()))\n\t\tqs = qs1.union(qs2)\n\t\tqs = qs.order_by('name').distinct('name') # THIS DISTINCT DOESN'T WORK\n\t\tself.assertEqual(qs.count(), 2)\nexpected to get wrapped union\n\tSELECT DISTINCT ON (siebox_sample.name) * FROM (SELECT ... UNION SELECT ...) AS siebox_sample\n\n</problem_statement>\n\n<hints>\ndistinct() is not supported but doesn't raise an error yet. As \u200b\u200bper the documentation, \"only LIMIT, OFFSET, COUNT(*), ORDER BY, and specifying columns (i.e. slicing, count(), order_by(), and values()/values_list()) are allowed on the resulting QuerySet.\". Follow up to #27995.\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/query.py\"\n]\nRelevant symbols: [\n  \"QuerySet.distinct\"\n]\nBug analysis: The distinct() method in QuerySet does not call _not_support_combined_queries('distinct') at its beginning, unlike other QuerySet methods that are supposed to be unsupported after union operations. When distinct() is called on a union queryset, it proceeds normally instead of raising a NotSupportedError.\nExploration notes: The _not_support_combined_queries method checks if self.query.combinator is set and raises NotSupportedError if an operation is called after union/intersection/difference. Methods like filter, exclude, annotate, select_related, prefetch_related, defer, only, extra, update, delete all call self._not_support_combined_queries() but distinct does not. The test test_unsupported_operations_on_combined_qs validates that various operations raise NotSupportedError but distinct is not included in the tested operations list.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze this bug step by step. Let me first understand the issue and then examine the source code.\n\n<think>\nMaintainer constraints: None mentioned in the hints.\n\n1. What is the function SUPPOSED to do in plain English?\nThe distinct() method should raise a NotSupportedError when called on a union queryset, similar to other unsupported operations like filter(), exclude(), etc.\n\n2. What input triggers the failure and what error results?\nInput: Calling .distinct() on a union queryset\nError: No error is raised (but should be), and distinct() doesn't work as expected\n\n3. Which fix pattern from the library below matches this bug?\nThis looks like Pattern PA - None/empty guard placed at wrong level. The guard (_not_support_combined_queries) should be at the TOP of the distinct() method to protect all callers automatically.\n\n4. Where should the fix live?\nInside the distinct() method itself, at the very beginning, to protect all callers.\n\n5. How many lines need to change?\nLikely just 1 line - adding the _not_support_combined_queries('distinct') call.\n</think>\n\nLet me examine the source code to understand the current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016cSfVp3XKh2cvx2XmTTQpV",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/query.py"
+          },
+          "name": "get_classes_and_methods",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016cSfVp3XKh2cvx2XmTTQpV",
+          "content": "[exit_code=0]\nclass BaseIterable (line 37)\nclass ModelIterable (line 44)\nclass ValuesIterable (line 94)\nclass ValuesListIterable (line 115)\nclass NamedValuesListIterable (line 145)\nclass FlatValuesListIterable (line 171)\nclass QuerySet (line 184)\nclass InstanceCheckMeta (line 1383)\nclass EmptyQuerySet (line 1388)\nclass RawQuerySet (line 1398)\nclass Prefetch (line 1550)\nclass RelatedPopulator (line 1894)\n  def __init__ (line 38)\n  def __iter__ (line 47)\n  def __iter__ (line 99)\n  def __iter__ (line 121)\n  def create_namedtuple_class (line 153)\n  def __iter__ (line 158)\n  def __iter__ (line 177)\n  def __init__ (line 187)\n  def query (line 204)\n  def query (line 212)\n  def as_manager (line 215)\n  def __deepcopy__ (line 228)\n  def __getstate__ (line 238)\n  def __setstate__ (line 243)\n  def __repr__ (line 262)\n  def __len__ (line 268)\n  def __iter__ (line 272)\n  def __bool__ (line 290)\n  def __getitem__ (line 294)\n  def __class_getitem__ (line 327)\n  def __and__ (line 330)\n  def __or__ (line 341)\n  def _iterator (line 359)\n  def iterator (line 362)\n  def aggregate (line 372)\n  def count (line 400)\n  def get (line 413)\n  def create (line 440)\n  def _populate_pk_values (line 450)\n  def bulk_create (line 455)\n  def bulk_update (line 519)\n  def get_or_create (line 563)\n  def update_or_create (line 578)\n  def _create_object_from_params (line 602)\n  def _extract_model_params (line 620)\n  def _earliest (line 645)\n  def earliest (line 670)\n  def latest (line 673)\n  def first (line 676)\n  def last (line 681)\n  def in_bulk (line 686)\n  def delete (line 724)\n  def _raw_delete (line 756)\n  def update (line 770)\n  def _update (line 789)\n  def exists (line 807)\n  def _prefetch_related_objects (line 812)\n  def explain (line 817)\n  def raw (line 824)\n  def _values (line 831)\n  def values (line 839)\n  def values_list (line 845)\n  def dates (line 876)\n  def datetimes (line 892)\n  def none (line 919)\n  def all (line 929)\n  def filter (line 936)\n  def exclude (line 944)\n  def _filter_or_exclude (line 952)\n  def _filter_or_exclude_inplace (line 965)\n  def complex_filter (line 971)\n  def _combinator_query (line 988)\n  def union (line 999)\n  def intersection (line 1006)\n  def difference (line 1015)\n  def select_for_update (line 1021)\n  def select_related (line 1036)\n  def prefetch_related (line 1058)\n  def annotate (line 1081)\n  def order_by (line 1128)\n  def distinct (line 1137)\n  def extra (line 1147)\n  def reverse (line 1157)\n  def defer (line 1165)\n  def only (line 1182)\n  def using (line 1203)\n  def ordered (line 1214)\n  def db (line 1229)\n  def _insert (line 1239)\n  def _batched_insert (line 1253)\n  def _chain (line 1275)\n  def _clone (line 1287)\n  def _fetch_all (line 1301)\n  def _next_is_sticky (line 1307)\n  def _merge_sanity_check (line 1321)\n  def _merge_known_related_objects (line 1332)\n  def resolve_expression (line 1339)\n  def _add_hints (line 1349)\n  def _has_filters (line 1356)\n  def _validate_values_are_expressions (line 1365)\n  def _not_support_combined_queries (line 1375)\n  def __instancecheck__ (line 1384)\n  def __init__ (line 1394)\n  def __init__ (line 1403)\n  def resolve_model_init_order (line 1416)\n  def prefetch_related (line 1426)\n  def _prefetch_related_objects (line 1435)\n  def _clone (line 1439)\n  def _fetch_all (line 1448)\n  def __len__ (line 1454)\n  def __bool__ (line 1458)\n  def __iter__ (line 1462)\n  def iterator (line 1466)\n  def __repr__ (line 1501)\n  def __getitem__ (line 1504)\n  def db (line 1508)\n  def using (line 1512)\n  def columns (line 1522)\n  def model_fields (line 1540)\n  def __init__ (line 1551)\n  def __getstate__ (line 1572)\n  def add_prefix (line 1582)\n  def get_current_prefetch_to (line 1586)\n  def get_current_to_attr (line 1589)\n  def get_current_queryset (line 1595)\n  def __eq__ (line 1600)\n  def __hash__ (line 1605)\n  def normalize_prefetch_lookups (line 1609)\n  def prefetch_related_objects (line 1621)\n  def get_prefetcher (line 1747)\n  def prefetch_one_level (line 1794)\n  def __init__ (line 1909)\n  def populate (line 1955)\n  def get_related_populators (line 1971)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me examine the distinct method specifically:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CQXinMh5kqCK98BeB8RbP6",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/query.py",
+            "method_name": "distinct"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CQXinMh5kqCK98BeB8RbP6",
+          "content": "[exit_code=0]\n--- distinct (lines 1137-1145) ---\n    def distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check the `_not_support_combined_queries` method to understand how it works:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SMgjqR3YELxsBeynyHm52f",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/query.py",
+            "method_name": "_not_support_combined_queries"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SMgjqR3YELxsBeynyHm52f",
+          "content": "[exit_code=0]\n--- _not_support_combined_queries (lines 1375-1380) ---\n    def _not_support_combined_queries(self, operation_name):\n        if self.query.combinator:\n            raise NotSupportedError(\n                'Calling QuerySet.%s() after %s() is not supported.'\n                % (operation_name, self.query.combinator)\n            )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check how other methods use this pattern to confirm the correct approach:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SrPMsdXrTpR3XkHD4vFAMH",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "method_name": "_not_support_combined_queries",
+            "search_path": "/testbed/django/db/models/query.py"
+          },
+          "name": "find_similar_api_calls",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SrPMsdXrTpR3XkHD4vFAMH",
+          "content": "[exit_code=0]\n726:        self._not_support_combined_queries('delete')\n727-        assert not self.query.is_sliced, \\\n--\n775:        self._not_support_combined_queries('update')\n776-        assert not self.query.is_sliced, \\\n--\n941:        self._not_support_combined_queries('filter')\n942-        return self._filter_or_exclude(False, *args, **kwargs)\n--\n949:        self._not_support_combined_queries('exclude')\n950-        return self._filter_or_exclude(True, *args, **kwargs)\n--\n1045:        self._not_support_combined_queries('select_related')\n1046-        if self._fields is not None:\n--\n1067:        self._not_support_combined_queries('prefetch_related')\n1068-        clone = self._chain()\n--\n1086:        self._not_support_combined_queries('annotate')\n1087-        self._validate_values_are_expressions(args + tuple(kwargs.values()), method_name='annotate')\n--\n1150:        self._not_support_combined_queries('extra')\n1151-        assert not self.query.is_sliced, \\\n--\n1172:        self._not_support_combined_queries('defer')\n1173-        if self._fields is not None:\n--\n1188:        self._not_support_combined_queries('only')\n1189-        if self._fields is not None:\n--\n1375:    def _not_support_combined_queries(self, operation_name):\n1376-        if self.query.combinator:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim.\nThe distinct method doesn't have any call to _not_support_combined_queries. The bug is that there's no guard at the beginning.\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nThe 5 lines after the method signature are:\n```\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n```\nMy fix (adding _not_support_combined_queries call) won't change what these lines receive.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nYes, Pattern PA applies exactly: I need to add the guard at the TOP of the method, before any other logic. The pattern is to add `self._not_support_combined_queries('distinct')` as the very first line of the method body.\n\n4. Count the lines your fix changes. If more than 5, simplify.\nOnly 1 line needs to be added.\n</think>\n\nPerfect! I can see that the `distinct()` method is missing the `_not_support_combined_queries('distinct')` call at the beginning, while all other methods that should be unsupported after union operations have this guard.\n\nLooking at the pattern used by other methods like `filter()`, `exclude()`, `annotate()`, etc., they all call `self._not_support_combined_queries('operation_name')` as their first line.\n\nThe fix is straightforward - I need to add this guard call at the very beginning of the `distinct()` method.\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet.distinct, line 1137\",\n      \"change\": \"INSERT after line 1137:\\n        self._not_support_combined_queries('distinct')\",\n      \"rationale\": \"The distinct() method is missing the _not_support_combined_queries guard that all other unsupported operations have after union/intersection/difference. This causes distinct() to silently fail instead of raising NotSupportedError as documented.\"\n    }\n  ],\n  \"fix_strategy\": \"PA: Add the missing guard call at the very beginning of distinct() method to match the pattern used by all other QuerySet methods that should be unsupported after union operations. This protects all callers automatically by raising NotSupportedError when distinct() is called on a combined queryset.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T08:39:04Z"
+}

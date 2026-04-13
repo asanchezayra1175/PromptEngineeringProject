@@ -1,0 +1,152 @@
+{
+  "instance_id": "django__django-15814",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PE \u2014 Missing type conversion",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-15814</instance_id>\n\n<problem_statement>\nQuerySet.only() after select_related() crash on proxy models.\nDescription\n\t\nWhen I optimize a query using select_related() and only() methods from the proxy model I encounter an error:\nWindows 10; Python 3.10; Django 4.0.5\nTraceback (most recent call last):\n File \"D:\\study\\django_college\\manage.py\", line 22, in <module>\n\tmain()\n File \"D:\\study\\django_college\\manage.py\", line 18, in main\n\texecute_from_command_line(sys.argv)\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\core\\management\\__init__.py\", line 446, in execute_from_command_line\n\tutility.execute()\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\core\\management\\__init__.py\", line 440, in execute\n\tself.fetch_command(subcommand).run_from_argv(self.argv)\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\core\\management\\base.py\", line 414, in run_from_argv\n\tself.execute(*args, **cmd_options)\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\core\\management\\base.py\", line 460, in execute\n\toutput = self.handle(*args, **options)\n File \"D:\\study\\django_college\\project\\users\\management\\commands\\test_proxy.py\", line 9, in handle\n\tobjs = list(AnotherModel.objects.select_related(\"custom\").only(\"custom__name\").all())\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\db\\models\\query.py\", line 302, in __len__\n\tself._fetch_all()\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\db\\models\\query.py\", line 1507, in _fetch_all\n\tself._result_cache = list(self._iterable_class(self))\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\db\\models\\query.py\", line 71, in __iter__\n\trelated_populators = get_related_populators(klass_info, select, db)\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\db\\models\\query.py\", line 2268, in get_related_populators\n\trel_cls = RelatedPopulator(rel_klass_info, select, db)\n File \"D:\\Anaconda3\\envs\\django\\lib\\site-packages\\django\\db\\models\\query.py\", line 2243, in __init__\n\tself.pk_idx = self.init_list.index(self.model_cls._meta.pk.attname)\nValueError: 'id' is not in list\nModels:\nclass CustomModel(models.Model):\n\tname = models.CharField(max_length=16)\nclass ProxyCustomModel(CustomModel):\n\tclass Meta:\n\t\tproxy = True\nclass AnotherModel(models.Model):\n\tcustom = models.ForeignKey(\n\t\tProxyCustomModel,\n\t\ton_delete=models.SET_NULL,\n\t\tnull=True,\n\t\tblank=True,\n\t)\nCommand:\nclass Command(BaseCommand):\n\tdef handle(self, *args, **options):\n\t\tlist(AnotherModel.objects.select_related(\"custom\").only(\"custom__name\").all())\nAt django/db/models/sql/query.py in 745 line there is snippet:\nopts = cur_model._meta\nIf I replace it by \nopts = cur_model._meta.concrete_model._meta\nall works as expected.\n\n</problem_statement>\n\n<hints>\nThanks for the report. Would you like to prepare a patch? A regression test is required, e.g. tests/proxy_models/tests.py diff --git a/tests/proxy_models/tests.py b/tests/proxy_models/tests.py index f2f465678b..2081c0cbe3 100644 a b class ProxyModelTests(TestCase): 390390 repr(resp), \"<ProxyImprovement: ProxyImprovement:improve that>\" 391391 ) 392392 393 def test_select_related_only(self): 394 user = ProxyTrackerUser.objects.create(name=\"Joe Doe\", status=\"test\") 395 issue = Issue.objects.create(summary=\"New issue\", assignee=user) 396 qs = Issue.objects.select_related(\"assignee\").only(\"assignee__status\") 397 self.assertEqual(qs.get(), issue) 398 393399 def test_proxy_load_from_fixture(self): 394400 management.call_command(\"loaddata\", \"mypeople.json\", verbosity=0) 395401 p = MyPerson.objects.get(pk=100) If I replace it by opts = cur_model._meta.concrete_model._meta all works as expected. I would fix cur_model instead: cur_model = cur_model._meta.concrete_model opts = cur_model._meta\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/db/models/sql/query.py\"]\nBug analysis: The deferred_to_data method traverses related fields for select_related() queries and sets opts = cur_model._meta at line 751. When cur_model is a proxy model, this metadata doesn't contain the same field structure as the concrete model, causing RelatedPopulator.__init__ to fail when looking for the primary key index with ValueError: 'id' is not in list.\nExploration notes: The error occurs in Query.deferred_to_data method around line 751 where opts = cur_model._meta is set. The failure happens downstream in RelatedPopulator.__init__ at line 2599 when self.pk_idx = self.init_list.index(self.model_cls._meta.pk.attname) cannot find the primary key. The suggested fix is to use cur_model._meta.concrete_model._meta instead of cur_model._meta, or convert cur_model to cur_model._meta.concrete_model first.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PE - Missing type conversion wrapping an expression: Convert proxy model to concrete model before accessing _meta. This 1-line fix ensures that opts = cur_model._meta uses concrete model metadata, preventing the 'id' is not in list ValueError downstream in RelatedPopulator.__init__. Safe because all subsequent code expects concrete model behavior.\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/db/models/sql/query.py\",\n    \"location\": \"Query.deferred_to_data, line 750\",\n    \"change\": \"INSERT after line 750:\\n                cur_model = cur_model._meta.concrete_model\",\n    \"rationale\": \"When traversing related fields in select_related() queries, cur_model can be a proxy model. Proxy models share field definitions with their concrete models, but their _meta objects have different structures that cause RelatedPopulator.__init__ to fail when looking for primary key indices. Converting to the concrete model ensures consistent metadata access across proxy and concrete models.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py\nindex 33cc636b22..cf7566d771 100644\n--- a/django/db/models/sql/query.py\n+++ b/django/db/models/sql/query.py\n@@ -748,6 +748,7 @@ class Query(BaseExpression):\n                     cur_model = source.related_model\n                 else:\n                     cur_model = source.remote_field.model\n+                cur_model = cur_model._meta.concrete_model\n                 opts = cur_model._meta\n                 # Even if we're \"just passing through\" this model, we must add\n                 # both the current model's pk and the related reference field\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the patch by examining the modified code in context.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01A23duyAitDnS5AFZgFLMfs",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '730,780p' /testbed/django/db/models/sql/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A23duyAitDnS5AFZgFLMfs",
+          "content": "[exit_code=0]\nThe \"target\" parameter is the instance that is populated (in place).\n        \"\"\"\n        field_names, defer = self.deferred_loading\n        if not field_names:\n            return\n        orig_opts = self.get_meta()\n        seen = {}\n        must_include = {orig_opts.concrete_model: {orig_opts.pk}}\n        for field_name in field_names:\n            parts = field_name.split(LOOKUP_SEP)\n            cur_model = self.model._meta.concrete_model\n            opts = orig_opts\n            for name in parts[:-1]:\n                old_model = cur_model\n                if name in self._filtered_relations:\n                    name = self._filtered_relations[name].relation_name\n                source = opts.get_field(name)\n                if is_reverse_o2o(source):\n                    cur_model = source.related_model\n                else:\n                    cur_model = source.remote_field.model\n                cur_model = cur_model._meta.concrete_model\n                opts = cur_model._meta\n                # Even if we're \"just passing through\" this model, we must add\n                # both the current model's pk and the related reference field\n                # (if it's not a reverse relation) to the things we select.\n                if not is_reverse_o2o(source):\n                    must_include[old_model].add(source)\n                add_to_dict(must_include, cur_model, opts.pk)\n            field = opts.get_field(parts[-1])\n            is_reverse_object = field.auto_created and not field.concrete\n            model = field.related_model if is_reverse_object else field.model\n            model = model._meta.concrete_model\n            if model == opts.model:\n                model = cur_model\n            if not is_reverse_o2o(field):\n                add_to_dict(seen, model, field)\n\n        if defer:\n            # We need to load all fields for each model, except those that\n            # appear in \"seen\" (for all models that appear in \"seen\"). The only\n            # slight complexity here is handling fields that exist on parent\n            # models.\n            workset = {}\n            for model, values in seen.items():\n                for field in model._meta.local_fields:\n                    if field not in values:\n                        m = field.model._meta.concrete_model\n                        add_to_dict(workset, m, field)\n            for model, values in must_include.items():\n                # If we haven't included a model in workset, we don't add the"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch is clearly visible at line 751: `cur_model = cur_model._meta.concrete_model` has been inserted after the `cur_model` assignment from `source.remote_field.model` or `source.related_model`.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018yRQKaWkLzJr1JfemJzpom",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"concrete_model\" /testbed/django/db/models/sql/query.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018yRQKaWkLzJr1JfemJzpom",
+          "content": "[exit_code=0]\n737:        must_include = {orig_opts.concrete_model: {orig_opts.pk}}\n740:            cur_model = self.model._meta.concrete_model\n751:                cur_model = cur_model._meta.concrete_model\n762:            model = model._meta.concrete_model\n777:                        m = field.model._meta.concrete_model\n1695:                    model = field.model._meta.concrete_model"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe patch adds `cur_model = cur_model._meta.concrete_model` after the existing `cur_model` assignment inside the loop in `Query.deferred_to_data`. This converts any proxy model to its concrete model before accessing `_meta`.\n\nLet me check:\n1. **Correctness**: The fix directly addresses the root cause. When `source.remote_field.model` is a proxy model (like `ProxyCustomModel`), the `_meta` doesn't match what `RelatedPopulator.__init__` expects. Converting to `concrete_model` first gives consistent metadata. This is exactly what the problem statement's suggested fix is.\n\n2. **Completeness**: \n   - The fix is applied inside the `for name in parts[:-1]:` loop that traverses related field parts.\n   - The `cur_model` starts as `self.model._meta.concrete_model` (already concretized on line 740).\n   - After each traversal step, the new `cur_model` might be a proxy model, so converting it to `concrete_model` is correct.\n   - The hint suggests: \"I would fix cur_model instead: `cur_model = cur_model._meta.concrete_model` / `opts = cur_model._meta`\" \u2014 which is exactly what the patch does.\n   - Both `is_reverse_o2o` and the `else` branch update `cur_model`, and the conversion is placed AFTER both branches, covering both cases.\n\n3. **Alignment**: The Architect proposed inserting `cur_model = cur_model._meta.concrete_model` after line 750. The patch does exactly that.\n\n4. **Safety**: The change is minimal, only affects the path after `cur_model` has been updated in the loop, and uses the well-established `concrete_model` pattern already used elsewhere in the same function. No regressions expected.\n\nThe patch correctly implements the PE pattern (Missing type conversion wrapping an expression) by converting the proxy model to its concrete model inline before accessing `_meta`.\n</think>\n\nThe patch correctly inserts `cur_model = cur_model._meta.concrete_model` after the `cur_model` assignment block within the traversal loop. Let me verify the full context to ensure both branches (reverse O2O and normal) are covered:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Dm2pnEYrEnjv2DPDwhJmVV",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"is_reverse_o2o\\|cur_model\\|concrete_model\" /testbed/django/db/models/sql/query.py | sed -n '15,35p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Dm2pnEYrEnjv2DPDwhJmVV",
+          "content": "[exit_code=0]\n1695:                    model = field.model._meta.concrete_model\n2597:def is_reverse_o2o(field):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01AzvkGM4Nu9WQG6ocNAhWRc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '740,760p' /testbed/django/db/models/sql/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01AzvkGM4Nu9WQG6ocNAhWRc",
+          "content": "[exit_code=0]\ncur_model = self.model._meta.concrete_model\n            opts = orig_opts\n            for name in parts[:-1]:\n                old_model = cur_model\n                if name in self._filtered_relations:\n                    name = self._filtered_relations[name].relation_name\n                source = opts.get_field(name)\n                if is_reverse_o2o(source):\n                    cur_model = source.related_model\n                else:\n                    cur_model = source.remote_field.model\n                cur_model = cur_model._meta.concrete_model\n                opts = cur_model._meta\n                # Even if we're \"just passing through\" this model, we must add\n                # both the current model's pk and the related reference field\n                # (if it's not a reverse relation) to the things we select.\n                if not is_reverse_o2o(source):\n                    must_include[old_model].add(source)\n                add_to_dict(must_include, cur_model, opts.pk)\n            field = opts.get_field(parts[-1])\n            is_reverse_object = field.auto_created and not field.concrete"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch is correct and complete:\n\n1. **Correctness**: The `cur_model = cur_model._meta.concrete_model` line is placed after both branches of the if/else (covering both `source.related_model` and `source.remote_field.model`), ensuring any proxy model is converted to its concrete model before `opts = cur_model._meta` accesses its metadata.\n\n2. **Completeness**: Both reverse O2O and normal FK paths are covered. The initial `cur_model = self.model._meta.concrete_model` on line 740 already handles the starting model. The patch handles all subsequent traversal steps.\n\n3. **Alignment**: Exactly matches the Architect's proposal and the hint's suggestion (`cur_model = cur_model._meta.concrete_model` before `opts = cur_model._meta`).\n\n4. **Safety**: Minimal, targeted change. Follows the same pattern already used elsewhere in the same function (lines 737, 740, 762, 777).\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PE \u2014 Missing type conversion\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T12:03:08Z"
+}

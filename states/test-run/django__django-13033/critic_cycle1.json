@@ -1,0 +1,126 @@
+{
+  "instance_id": "django__django-13033",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PD \u2014 Condition boundary: comparator operand changed from full path 'name' to final component 'pieces[-1]'",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-13033</instance_id>\n\n<problem_statement>\nSelf referencing foreign key doesn't correctly order by a relation \"_id\" field.\nDescription\n\t\nInitially discovered on 2.2.10 but verified still happens on 3.0.6. Given the following models:\nclass OneModel(models.Model):\n\tclass Meta:\n\t\tordering = (\"-id\",)\n\tid = models.BigAutoField(primary_key=True)\n\troot = models.ForeignKey(\"OneModel\", on_delete=models.CASCADE, null=True)\n\toneval = models.BigIntegerField(null=True)\nclass TwoModel(models.Model):\n\tid = models.BigAutoField(primary_key=True)\n\trecord = models.ForeignKey(OneModel, on_delete=models.CASCADE)\n\ttwoval = models.BigIntegerField(null=True)\nThe following queryset gives unexpected results and appears to be an incorrect SQL query:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"record__root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") LEFT OUTER JOIN \"orion_onemodel\" T3 ON (\"orion_onemodel\".\"root_id\" = T3.\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY T3.\"id\" DESC\nThe query has an unexpected DESCENDING sort. That appears to come from the default sort order on the OneModel class, but I would expect the order_by() to take prececence. The the query has two JOINS, which is unnecessary. It appears that, since OneModel.root is a foreign key to itself, that is causing it to do the unnecessary extra join. In fact, testing a model where root is a foreign key to a third model doesn't show the problem behavior.\nNote also that the queryset with order_by(\"record__root\") gives the exact same SQL.\nThis queryset gives correct results and what looks like a pretty optimal SQL:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"record__root__id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY \"orion_onemodel\".\"root_id\" ASC\nSo is this a potential bug or a misunderstanding on my part?\nAnother queryset that works around the issue and gives a reasonable SQL query and expected results:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.annotate(root_id=F(\"record__root_id\"))\nqs = qs.order_by(\"root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY \"orion_onemodel\".\"zero_id\" ASC\nASCENDING sort, and a single INNER JOIN, as I'd expect. That actually works for my use because I need that output column anyway.\nOne final oddity; with the original queryset but the inverted sort order_by():\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"-record__root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") LEFT OUTER JOIN \"orion_onemodel\" T3 ON (\"orion_onemodel\".\"root_id\" = T3.\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY T3.\"id\" ASC\nOne gets the query with the two JOINs but an ASCENDING sort order. I was not under the impression that sort orders are somehow relative to the class level sort order, eg: does specifing order_by(\"-record__root_id\") invert the class sort order? Testing that on a simple case doesn't show that behavior at all.\nThanks for any assistance and clarification.\n\n</problem_statement>\n\n<hints>\nThis is with a postgres backend. Fairly vanilla Django. Some generic middleware installed (cors, csrf, auth, session). Apps are: INSTALLED_APPS = ( \"django.contrib.contenttypes\", \"django.contrib.auth\", \"django.contrib.admin\", \"django.contrib.sessions\", \"django.contrib.messages\", \"django.contrib.staticfiles\", \"corsheaders\", \"<ours>\" )\nSomething is definitely wrong here. order_by('record__root_id') should result in ORDER BY root_id order_by('record__root') should use OneModel.Meta.ordering because that's what the root foreign key points to \u200bas documented. That should result in ORDER BY root_join.id DESC order_by('record__root__id') should result in ORDER BY root_join.id\nThanks for this report. A potential fix could be: diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py index abbb1e37cb..a8f5b61fbe 100644 --- a/django/db/models/sql/compiler.py +++ b/django/db/models/sql/compiler.py @@ -727,7 +727,7 @@ class SQLCompiler: # If we get to this point and the field is a relation to another model, # append the default ordering for that model unless it is the pk # shortcut or the attribute name of the field that is specified. - if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk': + if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk': # Firstly, avoid infinite loops. already_seen = already_seen or set() join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins) but I didn't check this in details.\nFWIW, I did apply the suggested fix to my local version and I do now get what looks like correct behavior and results that match what Simon suggested should be the sort results. Also my annotate \"workaround\" continues to behave correctly. Looks promising.\nJack, would you like to prepare a patch?\n\u200bPR\nI did some additional work on this to verify the scope of the change. I added the following test code on master and ran the entire test suite: +++ b/django/db/models/sql/compiler.py @@ -727,6 +727,11 @@ class SQLCompiler: # If we get to this point and the field is a relation to another model, # append the default ordering for that model unless it is the pk # shortcut or the attribute name of the field that is specified. + if (field.is_relation and opts.ordering and name != 'pk' and + ((getattr(field, 'attname', None) != name) != + (getattr(field, 'attname', None) != pieces[-1]))): + print(f\"JJD <{getattr(field, 'attname', '')}> <{name}> <{pieces[-1]}>\") + breakpoint() if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk': # Firstly, avoid infinite loops. already_seen = already_seen or set() The idea being to display every time that the change from name to pieces[-1] in the code would make a difference in the execution. Of course verified that when running the reproducer one does go into the test block and outputs: JJD <root_id> <record__root_id> <root_id>. The code is not triggered for any other test across the entire test suite, so the scope of the change is not causing unexpected changes in other places. This seems reassuring.\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/db/models/sql/compiler.py\"]\nBug analysis: The find_ordering_name method incorrectly compares the field's attname against the full lookup path when determining whether to apply default model ordering. For self-referencing foreign keys with _id field lookups like 'record__root_id', it compares 'root_id' (field.attname) against 'record__root_id' (name), incorrectly triggering default ordering logic and causing unnecessary joins with wrong sort direction.\nExploration notes: The problematic code is at line 730: `if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':`. The condition `getattr(field, 'attname', None) != name` should compare against `pieces[-1]` instead of `name`. The `pieces` variable contains the split lookup path, where `pieces[-1]` is the final field component. The method belongs to the SQLCompiler class and handles ordering for ORM queries.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: Change the comparator from 'name' to 'pieces[-1]' to compare against the final field component instead of the full lookup path, preventing incorrect application of default model ordering for _id field access.\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/db/models/sql/compiler.py\",\n    \"location\": \"SQLCompiler.find_ordering_name, line 730\",\n    \"change\": \"REPLACE line 730:\\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\\nWITH:\\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\",\n    \"rationale\": \"The condition incorrectly compares field.attname against the full lookup path 'name' instead of just the final field component 'pieces[-1]'. For 'record__root_id', this causes the condition to incorrectly trigger default ordering logic because 'root_id' != 'record__root_id' when it should compare 'root_id' != 'root_id'.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex abbb1e37cb..a8f5b61fbe 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -727,7 +727,7 @@ class SQLCompiler:\n         # If we get to this point and the field is a relation to another model,\n         # append the default ordering for that model unless it is the pk\n         # shortcut or the attribute name of the field that is specified.\n-        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n+        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n             # Firstly, avoid infinite loops.\n             already_seen = already_seen or set()\n             join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze this patch carefully.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01VbpSg3qpKnAednEhDGPqYX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '700,760p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VbpSg3qpKnAednEhDGPqYX",
+          "content": "[exit_code=0]\nopts = self.query.get_meta()\n\n        for name in self.query.distinct_fields:\n            parts = name.split(LOOKUP_SEP)\n            _, targets, alias, joins, path, _, transform_function = self._setup_joins(parts, opts, None)\n            targets, alias, _ = self.query.trim_joins(targets, joins, path)\n            for target in targets:\n                if name in self.query.annotation_select:\n                    result.append(name)\n                else:\n                    r, p = self.compile(transform_function(target, alias))\n                    result.append(r)\n                    params.append(p)\n        return result, params\n\n    def find_ordering_name(self, name, opts, alias=None, default_order='ASC',\n                           already_seen=None):\n        \"\"\"\n        Return the table alias (the name might be ambiguous, the alias will\n        not be) and column name for ordering by the given 'name' parameter.\n        The 'name' is of the form 'field1__field2__...__fieldN'.\n        \"\"\"\n        name, order = get_order_dir(name, default_order)\n        descending = order == 'DESC'\n        pieces = name.split(LOOKUP_SEP)\n        field, targets, alias, joins, path, opts, transform_function = self._setup_joins(pieces, opts, alias)\n\n        # If we get to this point and the field is a relation to another model,\n        # append the default ordering for that model unless it is the pk\n        # shortcut or the attribute name of the field that is specified.\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n            # Firstly, avoid infinite loops.\n            already_seen = already_seen or set()\n            join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\n            if join_tuple in already_seen:\n                raise FieldError('Infinite loop caused by ordering.')\n            already_seen.add(join_tuple)\n\n            results = []\n            for item in opts.ordering:\n                if hasattr(item, 'resolve_expression') and not isinstance(item, OrderBy):\n                    item = item.desc() if descending else item.asc()\n                if isinstance(item, OrderBy):\n                    results.append((item, False))\n                    continue\n                results.extend(self.find_ordering_name(item, opts, alias,\n                                                       order, already_seen))\n            return results\n        targets, alias, _ = self.query.trim_joins(targets, joins, path)\n        return [(OrderBy(transform_function(t, alias), descending=descending), False) for t in targets]\n\n    def _setup_joins(self, pieces, opts, alias):\n        \"\"\"\n        Helper method for get_order_by() and get_distinct().\n\n        get_ordering() and get_distinct() must produce same target columns on\n        same input, as the prefixes of get_ordering() and get_distinct() must\n        match. Executing SQL where this is not true is an error.\n        \"\"\"\n        alias = alias or self.query.get_initial_alias()\n        field, targets, opts, joins, path, transform_function = self.query.setup_joins(pieces, opts, alias)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch has been applied. Let me verify the change is exactly as specified:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019TkwkT2std84pShSFgJkhd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"attname\" django/db/models/sql/compiler.py | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019TkwkT2std84pShSFgJkhd",
+          "content": "[exit_code=0]\n215:        The annotations is a dictionary of {'attname': column position} values.\n683:            if field.model in only_load and field.attname not in only_load[field.model]:\n730:        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n1290:            return getattr(obj, field.attname)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch is exactly as described. Let me now analyze the logic:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019aPixDBH5t9NGzLYdnvyJ3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git log --oneline -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019aPixDBH5t9NGzLYdnvyJ3",
+          "content": "[exit_code=0]\na78c933f9f SWE-bench\na59de6e89e Fixed #31675 -- Added warning to ExceptionReporter when exception chain has a cycle.\n69a78a4a63 Fixed comment in django/contrib/auth/urls.py.\n4339f2aff2 Refs #31682 -- Doc'd minimal sqlparse version in Django 2.2.\n92309e53d9 Fixed #31594 -- Added ASGIStaticFilesHandler.get_response_async().\n4652f1f0aa Fixed #31662 -- Added detection for GDAL 3.0 and 3.1 on Windows.\nb38d44229f Fixed #31664 -- Reallowed using non-expressions having filterable attribute as rhs in queryset filters.\n78ad4b4b02 Fixed #31660 -- Fixed queryset crash when grouping by m2o relation.\n07506a6114 Fixed #31661 -- Removed period in makemigrations history check warning.\n38a21f2d9e Fixed #31663 -- Made DecimalField.to_python() handle non-numeric invalid values."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe patch changes line 730 in `django/db/models/sql/compiler.py`:\n\n**Before:**\n```python\nif field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n```\n\n**After:**\n```python\nif field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n```\n\nThe problem:\n- When ordering by `record__root_id`, the `name` variable is `record__root_id` (full path)\n- `pieces[-1]` would be `root_id` (the last component)\n- `field.attname` for the `root` ForeignKey would be `root_id`\n- Old condition: `root_id != record__root_id` \u2192 True (incorrectly triggers default ordering)\n- New condition: `root_id != root_id` \u2192 False (correctly skips default ordering)\n\nThis is exactly the fix described in the hints. The condition was comparing the field's `attname` against the full lookup path instead of just the last component.\n\n**Correctness:** The fix correctly addresses the root cause. When a user specifies `record__root_id`, they're explicitly requesting the `root_id` field (the foreign key column), not the related model's default ordering. The comparison should be against `pieces[-1]` (the last component: `root_id`) to correctly detect this case.\n\n**Completeness:** The fix covers all cases where a `_id` field is specified at the end of a multi-part lookup path. The `name != 'pk'` check is still in place for the pk shortcut case.\n\n**Alignment:** The patch exactly matches what both the Architect and the hints suggest.\n\n**Safety:** The change is minimal and targeted. The hint mentions that the change only affects the test case described in the bug and doesn't trigger for any other test in the test suite. It's a one-character change from `name` to `pieces[-1]`.\n\nThis looks like a correct, complete, well-aligned, and safe fix. The verdict should be pass.\n</think>\n\nThe patch changes the condition at line 730 from comparing `field.attname` against `name` (the full lookup path) to comparing against `pieces[-1]` (the final component of the path).\n\n**Analysis:**\n- For `order_by(\"record__root_id\")`:\n  - `name` = `\"record__root_id\"` (full path)\n  - `pieces[-1]` = `\"root_id\"` (final component)\n  - `field.attname` = `\"root_id\"` (the FK column name)\n  - Old condition: `\"root_id\" != \"record__root_id\"` \u2192 **True** (incorrectly triggers default ordering)\n  - New condition: `\"root_id\" != \"root_id\"` \u2192 **False** (correctly skips default ordering)\n\nThis is exactly the described bug: when `_id` field access is used in a multi-part path, the comparison against the full path was always True (since the full path includes the join prefix), causing unnecessary default model ordering to be applied.\n\n**Correctness:** Directly addresses the root cause \u2014 the wrong variable was used for comparison.\n\n**Completeness:** The fix covers all cases. The `name != 'pk'` check remains for the pk shortcut. The hints note that running the entire test suite with this change only triggers the new behavior for the described bug case, not for any other tests.\n\n**Alignment:** Exactly matches the proposed fix from both the Architect and the hints.\n\n**Safety:** Minimal, targeted change. One variable substitution. No collateral impact on other code paths.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PD \u2014 Condition boundary: comparator operand changed from full path 'name' to final component 'pieces[-1]'\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 4,
+  "timestamp": "2026-04-13T08:54:37Z"
+}

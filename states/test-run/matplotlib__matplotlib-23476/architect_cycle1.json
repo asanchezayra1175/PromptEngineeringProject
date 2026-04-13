@@ -1,0 +1,366 @@
+{
+  "instance_id": "matplotlib__matplotlib-23476",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/lib/matplotlib/figure.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/lib/matplotlib/figure.py",
+      "location": "Figure.__setstate__, line 3055",
+      "change": "INSERT after line 3054:\n            # Preserve the figure's DPI during manager recreation to avoid\n            # double-scaling on high-DPI displays\n            original_dpi = self.dpi\nREPLACE line 3055:\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\nWITH:\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\n            self._set_dpi(original_dpi, forward=False)",
+      "rationale": "The figure manager creation triggers device pixel ratio handling which scales the figure's DPI by the display's pixel ratio. During unpickling, the figure's DPI is already scaled from the previous pickling, so this causes exponential DPI growth. By preserving and restoring the original DPI, we prevent this double-scaling."
+    }
+  ],
+  "fix_strategy": "PA pattern variation: Guard against DPI corruption during figure manager recreation. The fix saves the figure's DPI before the manager creation (which applies device pixel ratio scaling) and restores it afterward, preventing the exponential DPI growth on high-DPI displays like M1 Macs.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim:\n   Line 3055: `mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)`\n\n2. Quote the 5 lines immediately after:\n   ```\n   pylab_helpers.Gcf._set_new_active_manager(mgr)\n   plt.draw_if_interactive()\n\n   self.stale = True\n   ```\n   My fix won't change what these lines receive.\n\n3. Re-read my pattern choice from Step 1:\n   I initially thought PA but this is actually more like **PG \u2014 Shared mutable state modified in-place when copy needed**. The figure's DPI is getting corrupted by the figure manager recreation. However, looking more carefully, this is actually a case where we need to preserve the original DPI state around the figure manager recreation.\n\n   Actually, this is more like **PA \u2014 None/empty guard placed at wrong level** but instead of a None guard, we need to preserve the DPI state. The figure manager creation modifies the figure's DPI through device pixel ratio handling, but we want to restore it to what it was before unpickling.\n\n4. Count the lines: This should be 2-3 lines to save and restore the DPI.\n\nThe fix is to save the figure's DPI before creating the figure manager and restore it afterward, since the manager creation process will apply device pixel ratio scaling again to the already-scaled DPI.\n</think>\n\nNow I understand the issue. The `new_figure_manager_given_figure` call triggers device pixel ratio handling which doubles the DPI again. Looking at the backend_bases.py code, I see that when a FigureCanvasBase is created, it sets `figure._original_dpi = figure.dpi` and then when device pixel ratio is applied, it calculates `dpi = ratio * self.figure._original_dpi`. But during unpickling, the figure.dpi is already the doubled value, so when it gets set as `_original_dpi`, subsequent ratio application doubles it again.\n\nThe fix should preserve the figure's DPI during the figure manager recreation:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/lib/matplotlib/figure.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/lib/matplotlib/figure.py\",\n      \"location\": \"Figure.__setstate__, line 3055\",\n      \"change\": \"INSERT after line 3054:\\n            # Preserve the figure's DPI during manager recreation to avoid\\n            # double-scaling on high-DPI displays\\n            original_dpi = self.dpi\\nREPLACE line 3055:\\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\\nWITH:\\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\\n            self._set_dpi(original_dpi, forward=False)\",\n      \"rationale\": \"The figure manager creation triggers device pixel ratio handling which scales the figure's DPI by the display's pixel ratio. During unpickling, the figure's DPI is already scaled from the previous pickling, so this causes exponential DPI growth. By preserving and restoring the original DPI, we prevent this double-scaling.\"\n    }\n  ],\n  \"fix_strategy\": \"PA pattern variation: Guard against DPI corruption during figure manager recreation. The fix saves the figure's DPI before the manager creation (which applies device pixel ratio scaling) and restores it afterward, preventing the exponential DPI growth on high-DPI displays like M1 Macs.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>matplotlib__matplotlib-23476</instance_id>\n\n<problem_statement>\n[Bug]: DPI of a figure is doubled after unpickling on M1 Mac\n### Bug summary\r\n\r\nWhen a figure is unpickled, it's dpi is doubled. This behaviour happens every time and if done in a loop it can cause an `OverflowError`.\r\n\r\n### Code for reproduction\r\n\r\n```python\r\nimport numpy as np\r\nimport matplotlib\r\nimport matplotlib.pyplot as plt\r\nimport pickle\r\nimport platform\r\n\r\nprint(matplotlib.get_backend())\r\nprint('Matplotlib ver:', matplotlib.__version__)\r\nprint('Platform:', platform.platform())\r\nprint('System:', platform.system())\r\nprint('Release:', platform.release())\r\nprint('Python ver:', platform.python_version())\r\n\r\n\r\ndef dump_load_get_dpi(fig):\r\n    with open('sinus.pickle','wb') as file:\r\n        pickle.dump(fig, file)\r\n\r\n    with open('sinus.pickle', 'rb') as blob:\r\n        fig2 = pickle.load(blob)\r\n    return fig2, fig2.dpi\r\n\r\n\r\ndef run():\r\n    fig = plt.figure()\r\n    x = np.linspace(0,2*np.pi)\r\n    y = np.sin(x)\r\n\r\n    for i in range(32):\r\n        print(f'{i}: {fig.dpi}')\r\n        fig, dpi = dump_load_get_dpi(fig)\r\n\r\n\r\nif __name__ == '__main__':\r\n    run()\r\n```\r\n\r\n\r\n### Actual outcome\r\n\r\n```\r\nMacOSX\r\nMatplotlib ver: 3.5.2\r\nPlatform: macOS-12.4-arm64-arm-64bit\r\nSystem: Darwin\r\nRelease: 21.5.0\r\nPython ver: 3.9.12\r\n0: 200.0\r\n1: 400.0\r\n2: 800.0\r\n3: 1600.0\r\n4: 3200.0\r\n5: 6400.0\r\n6: 12800.0\r\n7: 25600.0\r\n8: 51200.0\r\n9: 102400.0\r\n10: 204800.0\r\n11: 409600.0\r\n12: 819200.0\r\n13: 1638400.0\r\n14: 3276800.0\r\n15: 6553600.0\r\n16: 13107200.0\r\n17: 26214400.0\r\n18: 52428800.0\r\n19: 104857600.0\r\n20: 209715200.0\r\n21: 419430400.0\r\nTraceback (most recent call last):\r\n  File \"/Users/wsykala/projects/matplotlib/example.py\", line 34, in <module>\r\n    run()\r\n  File \"/Users/wsykala/projects/matplotlib/example.py\", line 30, in run\r\n    fig, dpi = dump_load_get_dpi(fig)\r\n  File \"/Users/wsykala/projects/matplotlib/example.py\", line 20, in dump_load_get_dpi\r\n    fig2 = pickle.load(blob)\r\n  File \"/Users/wsykala/miniconda3/envs/playground/lib/python3.9/site-packages/matplotlib/figure.py\", line 2911, in __setstate__\r\n    mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\r\n  File \"/Users/wsykala/miniconda3/envs/playground/lib/python3.9/site-packages/matplotlib/backend_bases.py\", line 3499, in new_figure_manager_given_figure\r\n    canvas = cls.FigureCanvas(figure)\r\n  File \"/Users/wsykala/miniconda3/envs/playground/lib/python3.9/site-packages/matplotlib/backends/backend_macosx.py\", line 32, in __init__\r\n    _macosx.FigureCanvas.__init__(self, width, height)\r\nOverflowError: signed integer is greater than maximum\r\n```\r\n\r\n### Expected outcome\r\n\r\n```\r\nMacOSX\r\nMatplotlib ver: 3.5.2\r\nPlatform: macOS-12.4-arm64-arm-64bit\r\nSystem: Darwin\r\nRelease: 21.5.0\r\nPython ver: 3.9.12\r\n0: 200.0\r\n1: 200.0\r\n2: 200.0\r\n3: 200.0\r\n4: 200.0\r\n5: 200.0\r\n6: 200.0\r\n7: 200.0\r\n8: 200.0\r\n9: 200.0\r\n10: 200.0\r\n11: 200.0\r\n12: 200.0\r\n13: 200.0\r\n14: 200.0\r\n15: 200.0\r\n16: 200.0\r\n17: 200.0\r\n18: 200.0\r\n19: 200.0\r\n20: 200.0\r\n21: 200.0\r\n22: 200.0\r\n```\r\n\r\n### Additional information\r\n\r\nThis seems to happen only on M1 MacBooks and the version of python doesn't matter.\r\n\r\n### Operating system\r\n\r\nOS/X\r\n\r\n### Matplotlib Version\r\n\r\n3.5.2\r\n\r\n### Matplotlib Backend\r\n\r\nMacOSX\r\n\r\n### Python version\r\n\r\n3.9.12\r\n\r\n### Jupyter version\r\n\r\n_No response_\r\n\r\n### Installation\r\n\r\npip\n\n</problem_statement>\n\n<hints>\nI suspect this will also affect anything that know how to deal with high-dpi screens.\r\n\r\nFor, .... reasons..., when we handle high-dpi cases by doubling the dpi on the figure (we have ideas how to fix this, but it is a fair amount of work) when we show it.  We are saving the doubled dpi which when re-loaded in doubled again.\r\n\r\nI think there is an easy fix.....\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/lib/matplotlib/figure.py\"\n]\nRelevant symbols: [\n  \"Figure.__setstate__\"\n]\nBug analysis: The Figure.__setstate__ method recreates a figure manager during unpickling by calling plt._backend_mod.new_figure_manager_given_figure(num, self). On high-DPI displays like M1 Macs, the figure's DPI was already doubled before pickling to handle the high-DPI display. When unpickling, this already-doubled DPI gets doubled again during the figure manager recreation, causing exponential growth of DPI values with each pickle/unpickle cycle until an OverflowError occurs.\nExploration notes: The bug occurs at line 3050 in figure.py in the __setstate__ method: `mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)`. The stack trace shows this eventually calls backend_macosx.py FigureCanvas.__init__ which fails with OverflowError when DPI values become too large. The test target test_unpickle_with_device_pixel_ratio suggests this is related to device pixel ratio handling. The canvas._set_device_pixel_ratio method is referenced in the existing tests around line 519 of test_figure.py.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nMaintainer constraints:\n- \"I suspect this will also affect anything that knows how to deal with high-dpi screens.\"\n- \"when we handle high-dpi cases by doubling the dpi on the figure ... when we show it. We are saving the doubled dpi which when re-loaded is doubled again.\"\n- \"I think there is an easy fix.....\"\n\nThe maintainer suggests:\n1. This affects high-DPI screen handling\n2. The DPI is doubled when showing figures on high-DPI screens\n3. The doubled DPI is saved during pickling\n4. When unpickling, it gets doubled again\n5. There's an easy fix\n\n1. What is the function SUPPOSED to do in plain English?\n   Figure.__setstate__ should restore a figure from pickled state without changing its DPI.\n\n2. What input triggers the failure and what error results?\n   Unpickling a figure on M1 Mac (high-DPI) causes DPI to double each time, eventually causing OverflowError.\n\n3. Which fix pattern matches this bug?\n   This looks like **PA \u2014 None/empty guard placed at wrong level**. We need to preserve the original DPI before the figure manager recreation doubles it again.\n\n4. Where should the fix live?\n   Inside Figure.__setstate__ method - we need to save/restore the DPI around the figure manager recreation.\n\n5. How many lines need to change?\n   Probably 2-3 lines - save DPI, call manager creation, restore DPI.\n</think>\n\nLet me first read the source code to understand the issue:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FE6PrkSS1g4ARWZE3F4Dfk",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/lib/matplotlib/figure.py",
+            "method_name": "__setstate__"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FE6PrkSS1g4ARWZE3F4Dfk",
+          "content": "[exit_code=0]\n--- __setstate__ (lines 3035-3059) ---\n    def __setstate__(self, state):\n        version = state.pop('__mpl_version__')\n        restore_to_pylab = state.pop('_restore_to_pylab', False)\n\n        if version != mpl.__version__:\n            _api.warn_external(\n                f\"This figure was saved with matplotlib version {version} and \"\n                f\"is unlikely to function correctly.\")\n\n        self.__dict__ = state\n\n        # re-initialise some of the unstored state information\n        FigureCanvasBase(self)  # Set self.canvas.\n\n        if restore_to_pylab:\n            # lazy import to avoid circularity\n            import matplotlib.pyplot as plt\n            import matplotlib._pylab_helpers as pylab_helpers\n            allnums = plt.get_fignums()\n            num = max(allnums) + 1 if allnums else 1\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\n            pylab_helpers.Gcf._set_new_active_manager(mgr)\n            plt.draw_if_interactive()\n\n        self.stale = True"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the lines after the buggy line to see what's happening:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_015h3Ea8neyCUjUeVf2Bvdfx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"new_figure_manager_given_figure\" lib/matplotlib/figure.py -A 10 -B 5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_015h3Ea8neyCUjUeVf2Bvdfx",
+          "content": "[exit_code=0]\n3050-            # lazy import to avoid circularity\n3051-            import matplotlib.pyplot as plt\n3052-            import matplotlib._pylab_helpers as pylab_helpers\n3053-            allnums = plt.get_fignums()\n3054-            num = max(allnums) + 1 if allnums else 1\n3055:            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\n3056-            pylab_helpers.Gcf._set_new_active_manager(mgr)\n3057-            plt.draw_if_interactive()\n3058-\n3059-        self.stale = True\n3060-\n3061-    def add_axobserver(self, func):\n3062-        \"\"\"Whenever the Axes state change, ``func(self)`` will be called.\"\"\"\n3063-        # Connect a wrapper lambda and not func itself, to avoid it being\n3064-        # weakref-collected.\n3065-        self._axobservers.connect(\"_axes_change_event\", lambda arg: func(arg))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check the backend_macosx.py file to understand how the DPI doubling happens:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WfEZrF6en1Hg6vjcoHQeJp",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -name \"backend_macosx.py\" | head -1"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WfEZrF6en1Hg6vjcoHQeJp",
+          "content": "[exit_code=0]\n./lib/matplotlib/backends/backend_macosx.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01EaYC9wP2LNUeFct786Xh2e",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"device.*pixel.*ratio\\|dpi.*2\\|dpi.*double\" lib/matplotlib/backends/backend_macosx.py -i"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EaYC9wP2LNUeFct786Xh2e",
+          "content": "[exit_code=0]\n97:        scale = self.figure.dpi / self.device_pixel_ratio"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check the test file mentioned in the localization report:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JMKjRYqWBs4x2ugKWU2MHa",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"test_unpickle_with_device_pixel_ratio\\|_set_device_pixel_ratio\" lib/matplotlib/tests/test_figure.py -A 10 -B 5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JMKjRYqWBs4x2ugKWU2MHa",
+          "content": "[exit_code=0]\n514-        ratio1 = Image.open(buf)\n515-        ratio1.load()\n516-\n517-    fig, ax = plt.subplots()\n518-    ax.plot([1, 2, 3])\n519:    fig.canvas._set_device_pixel_ratio(2)\n520-    with io.BytesIO() as buf:\n521-        fig.savefig(buf, format='png')\n522-        ratio2 = Image.open(buf)\n523-        ratio2.load()\n524-\n525-    assert ratio1 == ratio2\n526-\n527-\n528-def test_figure_repr():\n529-    fig = plt.figure(figsize=(10, 20), dpi=10)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me find the actual test for unpickling:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01F6zV63PCQccBgx6btXskRA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"unpickle\" lib/matplotlib/tests/test_figure.py -A 10 -B 5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01F6zV63PCQccBgx6btXskRA",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01KqznsuD5dVuBqJWYqjdZAS",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -rn \"test_unpickle_with_device_pixel_ratio\" lib/matplotlib/tests/"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KqznsuD5dVuBqJWYqjdZAS",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me check if there's a device pixel ratio setter method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HM9yYNzTxFMffhxngmfE9A",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "method_name": "_set_device_pixel_ratio",
+            "search_path": "/testbed"
+          },
+          "name": "find_similar_api_calls",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HM9yYNzTxFMffhxngmfE9A",
+          "content": "[exit_code=0]\n/testbed/lib/matplotlib/backend_bases.py:2071:    def _set_device_pixel_ratio(self, ratio):\n/testbed/lib/matplotlib/backend_bases.py-2072-        \"\"\"\n--\n/testbed/lib/matplotlib/backends/_backend_tk.py:222:        if self._set_device_pixel_ratio(ratio):\n/testbed/lib/matplotlib/backends/_backend_tk.py-223-            # The easiest way to resize the canvas is to resize the canvas\n--\n/testbed/lib/matplotlib/backends/backend_gtk3.py:224:        if self._set_device_pixel_ratio(self.get_scale_factor()):\n/testbed/lib/matplotlib/backends/backend_gtk3.py-225-            # The easiest way to resize the canvas is to emit a resize event\n--\n/testbed/lib/matplotlib/backends/backend_gtk4.py:182:        if self._set_device_pixel_ratio(self.get_scale_factor()):\n/testbed/lib/matplotlib/backends/backend_gtk4.py-183-            self.draw()\n--\n/testbed/lib/matplotlib/backends/backend_qt.py:225:        if self._set_device_pixel_ratio(_devicePixelRatioF(self)):\n/testbed/lib/matplotlib/backends/backend_qt.py-226-            # The easiest way to resize the canvas is to emit a resizeEvent\n--\n/testbed/lib/matplotlib/backends/backend_webagg_core.py:352:    def handle_set_device_pixel_ratio(self, event):\n/testbed/lib/matplotlib/backends/backend_webagg_core.py:353:        self._handle_set_device_pixel_ratio(event.get('device_pixel_ratio', 1))\n/testbed/lib/matplotlib/backends/backend_webagg_core.py-354-\n--\n/testbed/lib/matplotlib/backends/backend_webagg_core.py:357:        self._handle_set_device_pixel_ratio(event.get('dpi_ratio', 1))\n/testbed/lib/matplotlib/backends/backend_webagg_core.py-358-\n/testbed/lib/matplotlib/backends/backend_webagg_core.py:359:    def _handle_set_device_pixel_ratio(self, device_pixel_ratio):\n/testbed/lib/matplotlib/backends/backend_webagg_core.py:360:        if self._set_device_pixel_ratio(device_pixel_ratio):\n/testbed/lib/matplotlib/backends/backend_webagg_core.py-361-            self._force_full = True\n--\n/testbed/lib/matplotlib/tests/test_figure.py:519:    fig.canvas._set_device_pixel_ratio(2)\n/testbed/lib/matplotlib/tests/test_figure.py-520-    with io.BytesIO() as buf:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me look at the `_set_device_pixel_ratio` implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014ojuM6VvpSM4yXjbUEnc7E",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/lib/matplotlib/backend_bases.py",
+            "method_name": "_set_device_pixel_ratio"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014ojuM6VvpSM4yXjbUEnc7E",
+          "content": "[exit_code=0]\n--- _set_device_pixel_ratio (lines 2071-2107) ---\n    def _set_device_pixel_ratio(self, ratio):\n        \"\"\"\n        Set the ratio of physical to logical pixels used for the canvas.\n\n        Subclasses that support High DPI screens can set this property to\n        indicate that said ratio is different. The canvas itself will be\n        created at the physical size, while the client side will use the\n        logical size. Thus the DPI of the Figure will change to be scaled by\n        this ratio. Implementations that support High DPI screens should use\n        physical pixels for events so that transforms back to Axes space are\n        correct.\n\n        By default, this is 1, meaning physical and logical pixels are the same\n        size.\n\n        Parameters\n        ----------\n        ratio : float\n            The ratio of logical to physical pixels used for the canvas.\n\n        Returns\n        -------\n        bool\n            Whether the ratio has changed. Backends may interpret this as a\n            signal to resize the window, repaint the canvas, or change any\n            other relevant properties.\n        \"\"\"\n        if self._device_pixel_ratio == ratio:\n            return False\n        # In cases with mixed resolution displays, we need to be careful if the\n        # device pixel ratio changes - in this case we need to resize the\n        # canvas accordingly. Some backends provide events that indicate a\n        # change in DPI, but those that don't will update this before drawing.\n        dpi = ratio * self.figure._original_dpi\n        self.figure._set_dpi(dpi, forward=False)\n        self._device_pixel_ratio = ratio\n        return True"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I understand! The key is that there's an `_original_dpi` attribute that stores the original DPI, and when device pixel ratio is set, the actual figure DPI becomes `ratio * _original_dpi`. When unpickling, the figure manager recreation triggers the device pixel ratio setting again, causing the already-doubled DPI to be doubled again.\n\nLet me check how the original DPI is handled:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JxyDELTtswhkhCN8bMKELZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"_original_dpi\" lib/matplotlib/figure.py -A 5 -B 5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JxyDELTtswhkhCN8bMKELZ",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_014JPRUJkFmeH2JTTWnJG4Jt",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -rn \"_original_dpi\" lib/matplotlib/ | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014JPRUJkFmeH2JTTWnJG4Jt",
+          "content": "[exit_code=0]\nlib/matplotlib/backend_bases.py:1656:        figure._original_dpi = figure.dpi\nlib/matplotlib/backend_bases.py:2104:        dpi = ratio * self.figure._original_dpi\nlib/matplotlib/backend_bases.py:2284:            dpi = getattr(self.figure, '_original_dpi', self.figure.dpi)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim:\n   Line 3055: `mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)`\n\n2. Quote the 5 lines immediately after:\n   ```\n   pylab_helpers.Gcf._set_new_active_manager(mgr)\n   plt.draw_if_interactive()\n\n   self.stale = True\n   ```\n   My fix won't change what these lines receive.\n\n3. Re-read my pattern choice from Step 1:\n   I initially thought PA but this is actually more like **PG \u2014 Shared mutable state modified in-place when copy needed**. The figure's DPI is getting corrupted by the figure manager recreation. However, looking more carefully, this is actually a case where we need to preserve the original DPI state around the figure manager recreation.\n\n   Actually, this is more like **PA \u2014 None/empty guard placed at wrong level** but instead of a None guard, we need to preserve the DPI state. The figure manager creation modifies the figure's DPI through device pixel ratio handling, but we want to restore it to what it was before unpickling.\n\n4. Count the lines: This should be 2-3 lines to save and restore the DPI.\n\nThe fix is to save the figure's DPI before creating the figure manager and restore it afterward, since the manager creation process will apply device pixel ratio scaling again to the already-scaled DPI.\n</think>\n\nNow I understand the issue. The `new_figure_manager_given_figure` call triggers device pixel ratio handling which doubles the DPI again. Looking at the backend_bases.py code, I see that when a FigureCanvasBase is created, it sets `figure._original_dpi = figure.dpi` and then when device pixel ratio is applied, it calculates `dpi = ratio * self.figure._original_dpi`. But during unpickling, the figure.dpi is already the doubled value, so when it gets set as `_original_dpi`, subsequent ratio application doubles it again.\n\nThe fix should preserve the figure's DPI during the figure manager recreation:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/lib/matplotlib/figure.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/lib/matplotlib/figure.py\",\n      \"location\": \"Figure.__setstate__, line 3055\",\n      \"change\": \"INSERT after line 3054:\\n            # Preserve the figure's DPI during manager recreation to avoid\\n            # double-scaling on high-DPI displays\\n            original_dpi = self.dpi\\nREPLACE line 3055:\\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\\nWITH:\\n            mgr = plt._backend_mod.new_figure_manager_given_figure(num, self)\\n            self._set_dpi(original_dpi, forward=False)\",\n      \"rationale\": \"The figure manager creation triggers device pixel ratio handling which scales the figure's DPI by the display's pixel ratio. During unpickling, the figure's DPI is already scaled from the previous pickling, so this causes exponential DPI growth. By preserving and restoring the original DPI, we prevent this double-scaling.\"\n    }\n  ],\n  \"fix_strategy\": \"PA pattern variation: Guard against DPI corruption during figure manager recreation. The fix saves the figure's DPI before the manager creation (which applies device pixel ratio scaling) and restores it afterward, preventing the exponential DPI growth on high-DPI displays like M1 Macs.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 12,
+  "timestamp": "2026-04-13T10:38:43Z"
+}

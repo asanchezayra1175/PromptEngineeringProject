@@ -1,0 +1,194 @@
+{
+  "instance_id": "django__django-17051",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/query.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/query.py",
+      "location": "QuerySet._batched_insert, line 1840",
+      "change": "REPLACE line 1840:\n            if bulk_return and on_conflict is None:\nWITH:\n            if bulk_return and (on_conflict is None or on_conflict == OnConflict.UPDATE):",
+      "rationale": "The current condition is too restrictive, preventing ID return when update_conflicts=True. OnConflict.UPDATE should also allow returning IDs since databases support RETURNING clauses with ON CONFLICT DO UPDATE."
+    },
+    {
+      "file": "/testbed/django/db/models/query.py",
+      "location": "QuerySet._batched_insert, line 1846",
+      "change": "INSERT after line 1846:\n                        on_conflict=on_conflict,\n                        update_fields=update_fields,\n                        unique_fields=unique_fields,",
+      "rationale": "When on_conflict=UPDATE, the _insert call needs the conflict handling parameters that were previously only passed in the else branch."
+    }
+  ],
+  "fix_strategy": "PD \u2014 Condition boundary wrong: Change the condition from checking only `on_conflict is None` to also allow `on_conflict == OnConflict.UPDATE`, and add the missing conflict parameters to the _insert call. This allows bulk_create to return primary keys when using update_conflicts=True, matching the documented behavior and database capabilities.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim:\n   `if bulk_return and on_conflict is None:`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\n   Lines after are:\n   ```\n                inserted_rows.extend(\n                    self._insert(\n                        item,\n                        fields=fields,\n                        using=self.db,\n                        returning_fields=self.model._meta.db_returning_fields,\n                    )\n   ```\n   \n   My fix will make this branch execute when `on_conflict == OnConflict.UPDATE` as well. However, I notice the `_insert` call in this branch doesn't pass `on_conflict`, `update_fields`, or `unique_fields` parameters, but the else branch does. This means I need to also add those parameters to make the fix complete.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\n   Yes, this is PD - the condition boundary is wrong. It's too specific, excluding the valid UPDATE case. I need to change the condition to also include `on_conflict == OnConflict.UPDATE` and add the missing parameters.\n\n4. Count the lines your fix changes.\n   Based on the PR diff in hints: 1 line changed (the condition), and 3 lines added (the missing parameters). That's 4 lines total, which is reasonable.\n</think>\n\nBased on my analysis, here's the fix proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet._batched_insert, line 1840\",\n      \"change\": \"REPLACE line 1840:\\n            if bulk_return and on_conflict is None:\\nWITH:\\n            if bulk_return and (on_conflict is None or on_conflict == OnConflict.UPDATE):\",\n      \"rationale\": \"The current condition is too restrictive, preventing ID return when update_conflicts=True. OnConflict.UPDATE should also allow returning IDs since databases support RETURNING clauses with ON CONFLICT DO UPDATE.\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet._batched_insert, line 1846\",\n      \"change\": \"INSERT after line 1846:\\n                        on_conflict=on_conflict,\\n                        update_fields=update_fields,\\n                        unique_fields=unique_fields,\",\n      \"rationale\": \"When on_conflict=UPDATE, the _insert call needs the conflict handling parameters that were previously only passed in the else branch.\"\n    }\n  ],\n  \"fix_strategy\": \"PD \u2014 Condition boundary wrong: Change the condition from checking only `on_conflict is None` to also allow `on_conflict == OnConflict.UPDATE`, and add the missing conflict parameters to the _insert call. This allows bulk_create to return primary keys when using update_conflicts=True, matching the documented behavior and database capabilities.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-17051</instance_id>\n\n<problem_statement>\nAllow returning IDs in QuerySet.bulk_create() when updating conflicts.\nDescription\n\t\nCurrently, when using bulk_create with a conflict handling flag turned on (e.g. ignore_conflicts or update_conflicts), the primary keys are not set in the returned queryset, as documented in bulk_create.\nWhile I understand using ignore_conflicts can lead to PostgreSQL not returning the IDs when a row is ignored (see \u200bthis SO thread), I don't understand why we don't return the IDs in the case of update_conflicts.\nFor instance:\nMyModel.objects.bulk_create([MyModel(...)], update_conflicts=True, update_fields=[...], unique_fields=[...])\ngenerates a query without a RETURNING my_model.id part:\nINSERT INTO \"my_model\" (...)\nVALUES (...)\n\tON CONFLICT(...) DO UPDATE ...\nIf I append the RETURNING my_model.id clause, the query is indeed valid and the ID is returned (checked with PostgreSQL).\nI investigated a bit and \u200bthis in Django source is where the returning_fields gets removed.\nI believe we could discriminate the cases differently so as to keep those returning_fields in the case of update_conflicts.\nThis would be highly helpful when using bulk_create as a bulk upsert feature.\n\n</problem_statement>\n\n<hints>\nThanks for the ticket. I've checked and it works on PostgreSQL, MariaDB 10.5+, and SQLite 3.35+: django/db/models/query.py diff --git a/django/db/models/query.py b/django/db/models/query.py index a5b0f464a9..f1e052cb36 100644 a b class QuerySet(AltersData): 18371837 inserted_rows = [] 18381838 bulk_return = connection.features.can_return_rows_from_bulk_insert 18391839 for item in [objs[i : i + batch_size] for i in range(0, len(objs), batch_size)]: 1840 if bulk_return and on_conflict is None: 1840 if bulk_return and (on_conflict is None or on_conflict == OnConflict.UPDATE): 18411841 inserted_rows.extend( 18421842 self._insert( 18431843 item, 18441844 fields=fields, 18451845 using=self.db, 1846 on_conflict=on_conflict, 1847 update_fields=update_fields, 1848 unique_fields=unique_fields, 18461849 returning_fields=self.model._meta.db_returning_fields, 18471850 ) 18481851 ) Would you like to prepare a patch via GitHub PR? (docs changes and tests are required)\nSure I will.\nReplying to Thomas C: Sure I will. Thanks. About tests, it should be enough to add some assertions to existing tests: _test_update_conflicts_two_fields(), test_update_conflicts_unique_fields_pk(), _test_update_conflicts_unique_two_fields(), _test_update_conflicts(), and test_update_conflicts_unique_fields_update_fields_db_column() when connection.features.can_return_rows_from_bulk_insert is True.\nSee \u200bhttps://github.com/django/django/pull/17051\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/query.py\"\n]\nRelevant symbols: [\n  \"QuerySet._batched_insert\"\n]\nBug analysis: The _batched_insert method at line 1840 checks `if bulk_return and on_conflict is None:` before setting returning_fields, which prevents primary key IDs from being returned when update_conflicts=True is used in bulk_create(). When update_conflicts is enabled, on_conflict equals OnConflict.UPDATE, so the condition fails and returning_fields is not passed to _insert().\nExploration notes: The bulk_create method calls _batched_insert which conditionally sets returning_fields only when on_conflict is None. OnConflict enum is imported from django.db.models.constants with values IGNORE='ignore' and UPDATE='update'. The PR diff shows the fix: changing line 1840 from 'if bulk_return and on_conflict is None:' to 'if bulk_return and (on_conflict is None or on_conflict == OnConflict.UPDATE):' and adding the conflict parameters to the _insert call. Test methods _test_update_conflicts_two_fields, test_update_conflicts_unique_fields_pk, _test_update_conflicts_unique_two_fields, _test_update_conflicts, and test_update_conflicts_unique_fields_update_fields_db_column in bulk_create.tests need to verify that returned objects have primary keys when connection.features.can_return_rows_from_bulk_insert is True.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by understanding the problem and examining the relevant code.\n\n<think>\n1. What is the function SUPPOSED to do in plain English?\n   The bulk_create method should return primary key IDs for objects when using update_conflicts=True, similar to how it already returns IDs when no conflict handling is used. Currently it only returns IDs when on_conflict is None, but it should also return them when on_conflict is UPDATE.\n\n2. What input triggers the failure and what error results?\n   When using bulk_create with update_conflicts=True, the returned objects don't have their primary keys set, even though the database supports returning IDs in this case (PostgreSQL, MariaDB 10.5+, SQLite 3.35+).\n\n3. Which fix pattern from the library below matches this bug?\n   This looks like **PD \u2014 Condition boundary wrong (too broad or too specific)**. The condition `if bulk_return and on_conflict is None:` is too specific - it should also allow `on_conflict == OnConflict.UPDATE`.\n\n4. Where should the fix live?\n   Inside the _batched_insert function where the condition is checked, not at the call site. This protects all callers automatically.\n\n5. How many lines need to change?\n   Based on the PR diff in the hints, this should be a 1-line change to the condition, plus potentially adding the missing parameters to the _insert call.\n</think>\n\nLet me examine the code to understand the current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UApCFQCvHkUghzJXFntg1W",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/query.py",
+            "method_name": "_batched_insert"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UApCFQCvHkUghzJXFntg1W",
+          "content": "[exit_code=0]\n--- _batched_insert (lines 1821-1858) ---\n    def _batched_insert(\n        self,\n        objs,\n        fields,\n        batch_size,\n        on_conflict=None,\n        update_fields=None,\n        unique_fields=None,\n    ):\n        \"\"\"\n        Helper method for bulk_create() to insert objs one batch at a time.\n        \"\"\"\n        connection = connections[self.db]\n        ops = connection.ops\n        max_batch_size = max(ops.bulk_batch_size(fields, objs), 1)\n        batch_size = min(batch_size, max_batch_size) if batch_size else max_batch_size\n        inserted_rows = []\n        bulk_return = connection.features.can_return_rows_from_bulk_insert\n        for item in [objs[i : i + batch_size] for i in range(0, len(objs), batch_size)]:\n            if bulk_return and on_conflict is None:\n                inserted_rows.extend(\n                    self._insert(\n                        item,\n                        fields=fields,\n                        using=self.db,\n                        returning_fields=self.model._meta.db_returning_fields,\n                    )\n                )\n            else:\n                self._insert(\n                    item,\n                    fields=fields,\n                    using=self.db,\n                    on_conflict=on_conflict,\n                    update_fields=update_fields,\n                    unique_fields=unique_fields,\n                )\n        return inserted_rows"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check what OnConflict constants are available:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FwST9xgmWCqihKYwxEMWEf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "find /testbed -name \"*.py\" -exec grep -l \"OnConflict\" {} \\; | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FwST9xgmWCqihKYwxEMWEf",
+          "content": "[exit_code=0]\n/testbed/django/db/backends/mysql/operations.py\n/testbed/django/db/backends/postgresql/operations.py\n/testbed/django/db/backends/sqlite3/operations.py\n/testbed/django/db/models/constants.py\n/testbed/django/db/models/query.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_014BncjKSuxyYob1LsbHDHAR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -A 10 \"class OnConflict\" /testbed/django/db/models/constants.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014BncjKSuxyYob1LsbHDHAR",
+          "content": "[exit_code=0]\nclass OnConflict(Enum):\n    IGNORE = \"ignore\"\n    UPDATE = \"update\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me also check how the OnConflict is imported in the query.py file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SQkSq8T2vY4JphUVSKNNd5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"OnConflict\" /testbed/django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SQkSq8T2vY4JphUVSKNNd5",
+          "content": "[exit_code=0]\n24:from django.db.models.constants import LOOKUP_SEP, OnConflict\n685:            return OnConflict.IGNORE\n723:            return OnConflict.UPDATE"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now let me check the lines after the buggy line to understand the downstream contract:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HyZ7G1s3PJcGHv2MJu3CaG",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '1840,1850p' /testbed/django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HyZ7G1s3PJcGHv2MJu3CaG",
+          "content": "[exit_code=0]\nif bulk_return and on_conflict is None:\n                inserted_rows.extend(\n                    self._insert(\n                        item,\n                        fields=fields,\n                        using=self.db,\n                        returning_fields=self.model._meta.db_returning_fields,\n                    )\n                )\n            else:\n                self._insert("
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim:\n   `if bulk_return and on_conflict is None:`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\n   Lines after are:\n   ```\n                inserted_rows.extend(\n                    self._insert(\n                        item,\n                        fields=fields,\n                        using=self.db,\n                        returning_fields=self.model._meta.db_returning_fields,\n                    )\n   ```\n   \n   My fix will make this branch execute when `on_conflict == OnConflict.UPDATE` as well. However, I notice the `_insert` call in this branch doesn't pass `on_conflict`, `update_fields`, or `unique_fields` parameters, but the else branch does. This means I need to also add those parameters to make the fix complete.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\n   Yes, this is PD - the condition boundary is wrong. It's too specific, excluding the valid UPDATE case. I need to change the condition to also include `on_conflict == OnConflict.UPDATE` and add the missing parameters.\n\n4. Count the lines your fix changes.\n   Based on the PR diff in hints: 1 line changed (the condition), and 3 lines added (the missing parameters). That's 4 lines total, which is reasonable.\n</think>\n\nBased on my analysis, here's the fix proposal:\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet._batched_insert, line 1840\",\n      \"change\": \"REPLACE line 1840:\\n            if bulk_return and on_conflict is None:\\nWITH:\\n            if bulk_return and (on_conflict is None or on_conflict == OnConflict.UPDATE):\",\n      \"rationale\": \"The current condition is too restrictive, preventing ID return when update_conflicts=True. OnConflict.UPDATE should also allow returning IDs since databases support RETURNING clauses with ON CONFLICT DO UPDATE.\"\n    },\n    {\n      \"file\": \"/testbed/django/db/models/query.py\",\n      \"location\": \"QuerySet._batched_insert, line 1846\",\n      \"change\": \"INSERT after line 1846:\\n                        on_conflict=on_conflict,\\n                        update_fields=update_fields,\\n                        unique_fields=unique_fields,\",\n      \"rationale\": \"When on_conflict=UPDATE, the _insert call needs the conflict handling parameters that were previously only passed in the else branch.\"\n    }\n  ],\n  \"fix_strategy\": \"PD \u2014 Condition boundary wrong: Change the condition from checking only `on_conflict is None` to also allow `on_conflict == OnConflict.UPDATE`, and add the missing conflict parameters to the _insert call. This allows bulk_create to return primary keys when using update_conflicts=True, matching the documented behavior and database capabilities.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T09:30:16Z"
+}

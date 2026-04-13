@@ -1,0 +1,150 @@
+{
+  "instance_id": "django__django-14787",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/utils/decorators.py b/django/utils/decorators.py\nindex 5c9a5d01c7..8b9da17e31 100644\n--- a/django/utils/decorators.py\n+++ b/django/utils/decorators.py\n@@ -38,6 +38,7 @@ def _multi_decorate(decorators, method):\n         # 'func'. Also, wrap method.__get__() in a function because new\n         # attributes can't be set on bound method objects, only on functions.\n         bound_method = partial(method.__get__(self, type(self)))\n+        update_wrapper(bound_method, method)\n         for dec in decorators:\n             bound_method = dec(bound_method)\n         return bound_method(*args, **kwargs)",
+  "implementation_notes": "Added `update_wrapper(bound_method, method)` after creating the partial object in `_multi_decorate()` to copy function attributes like `__name__`, `__module__`, etc. from the method to the partial object, making it compatible with decorators that expect these attributes.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-14787</instance_id>\n\n<problem_statement>\nmethod_decorator() should preserve wrapper assignments\nDescription\n\t\nthe function that is passed to the decorator is a partial object and does not have any of the attributes expected from a function i.e. __name__, __module__ etc...\nconsider the following case\ndef logger(func):\n\t@wraps(func)\n\tdef inner(*args, **kwargs):\n\t\ttry:\n\t\t\tresult = func(*args, **kwargs)\n\t\texcept Exception as e:\n\t\t\tresult = str(e)\n\t\tfinally:\n\t\t\tlogger.debug(f\"{func.__name__} called with args: {args} and kwargs: {kwargs} resulting: {result}\")\n\treturn inner\nclass Test:\n\t@method_decorator(logger)\n\tdef hello_world(self):\n\t\treturn \"hello\"\nTest().test_method()\nThis results in the following exception\nAttributeError: 'functools.partial' object has no attribute '__name__'\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _multi_decorate function creates a bound_method using functools.partial(method.__get__(self, type(self))), which returns a partial object. When decorators are applied to this partial object in the loop 'for dec in decorators: bound_method = dec(bound_method)', decorators that access function attributes like __name__, __module__, etc. fail because partial objects don't have these attributes. This causes AttributeError when decorators try to access func.__name__ on the partial object.\nExploration notes: The issue occurs in the _multi_decorate function around line 39 where bound_method = partial(method.__get__(self, type(self))) creates a partial object, then decorators are applied to it without ensuring it has the expected function attributes. The method_decorator function calls _multi_decorate, and tests in /testbed/tests/decorators/tests.py verify that method_decorator should preserve attributes like __name__ and __doc__. The _update_method_wrapper function exists to handle wrapper attribute copying but is not used for the bound_method before decorators are applied.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PE \u2014 Missing type conversion wrapping an expression: Add update_wrapper call to copy function attributes from method to the partial object, making it decorator-compatible. This is minimal and safe as it only adds missing attributes without changing behavior.\n\nFiles to modify: [\n  \"/testbed/django/utils/decorators.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/utils/decorators.py\n  Location: _multi_decorate._wrapper, line 40\n  Change  : INSERT after line 40:\n        update_wrapper(bound_method, method)\n  Rationale: The partial object created by `partial(method.__get__(self, type(self)))` lacks function attributes like __name__, __module__, etc. that decorators expect. Adding `update_wrapper(bound_method, method)` copies these attributes from the original method to the partial object, making it compatible with decorators that access these attributes.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01A6LkiKChnPBEJLj7kfUK7h",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/utils/decorators.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A6LkiKChnPBEJLj7kfUK7h",
+          "content": "[exit_code=0]\n\"Functions that help with dynamically creating decorators for views.\"\n\nfrom functools import partial, update_wrapper, wraps\n\n\nclass classonlymethod(classmethod):\n    def __get__(self, instance, cls=None):\n        if instance is not None:\n            raise AttributeError(\"This method is available only on the class, not on instances.\")\n        return super().__get__(instance, cls)\n\n\ndef _update_method_wrapper(_wrapper, decorator):\n    # _multi_decorate()'s bound_method isn't available in this scope. Cheat by\n    # using it on a dummy function.\n    @decorator\n    def dummy(*args, **kwargs):\n        pass\n    update_wrapper(_wrapper, dummy)\n\n\ndef _multi_decorate(decorators, method):\n    \"\"\"\n    Decorate `method` with one or more function decorators. `decorators` can be\n    a single decorator or an iterable of decorators.\n    \"\"\"\n    if hasattr(decorators, '__iter__'):\n        # Apply a list/tuple of decorators if 'decorators' is one. Decorator\n        # functions are applied so that the call order is the same as the\n        # order in which they appear in the iterable.\n        decorators = decorators[::-1]\n    else:\n        decorators = [decorators]\n\n    def _wrapper(self, *args, **kwargs):\n        # bound_method has the signature that 'decorator' expects i.e. no\n        # 'self' argument, but it's a closure over self so it can call\n        # 'func'. Also, wrap method.__get__() in a function because new\n        # attributes can't be set on bound method objects, only on functions.\n        bound_method = partial(method.__get__(self, type(self)))\n        for dec in decorators:\n            bound_method = dec(bound_method)\n        return bound_method(*args, **kwargs)\n\n    # Copy any attributes that a decorator adds to the function it decorates.\n    for dec in decorators:\n        _update_method_wrapper(_wrapper, dec)\n    # Preserve any existing attributes of 'method', including the name.\n    update_wrapper(_wrapper, method)\n    return _wrapper\n\n\ndef method_decorator(decorator, name=''):\n    \"\"\"\n    Convert a function decorator into a method decorator\n    \"\"\"\n    # 'obj' can be a class or a function. If 'obj' is a function at the time it\n    # is passed to _dec,  it will eventually be a method of the class it is\n    # defined on. If 'obj' is a class, the 'name' is required to be the name\n    # of the method that will be decorated.\n    def _dec(obj):\n        if not isinstance(obj, type):\n            return _multi_decorate(decorator, obj)\n        if not (name and hasattr(obj, name)):\n            raise ValueError(\n                \"The keyword argument `name` must be the name of a method \"\n                \"of the decorated class: %s. Got '%s' instead.\" % (obj, name)\n            )\n        method = getattr(obj, name)\n        if not callable(method):\n            raise TypeError(\n                \"Cannot decorate '%s' as it isn't a callable attribute of \"\n                \"%s (%s).\" % (name, obj, method)\n            )\n        _wrapper = _multi_decorate(decorator, method)\n        setattr(obj, name, _wrapper)\n        return obj\n\n    # Don't worry about making _dec look similar to a list/tuple as it's rather\n    # meaningless.\n    if not hasattr(decorator, '__iter__'):\n        update_wrapper(_dec, decorator)\n    # Change the name to aid debugging.\n    obj = decorator if hasattr(decorator, '__name__') else decorator.__class__\n    _dec.__name__ = 'method_decorator(%s)' % obj.__name__\n    return _dec\n\n\ndef decorator_from_middleware_with_args(middleware_class):\n    \"\"\"\n    Like decorator_from_middleware, but return a function\n    that accepts the arguments to be passed to the middleware_class.\n    Use like::\n\n         cache_page = decorator_from_middleware_with_args(CacheMiddleware)\n         # ...\n\n         @cache_page(3600)\n         def my_view(request):\n             # ...\n    \"\"\"\n    return make_middleware_decorator(middleware_class)\n\n\ndef decorator_from_middleware(middleware_class):\n    \"\"\"\n    Given a middleware class (not an instance), return a view decorator. This\n    lets you use middleware functionality on a per-view basis. The middleware\n    is created with no params passed.\n    \"\"\"\n    return make_middleware_decorator(middleware_class)()\n\n\ndef make_middleware_decorator(middleware_class):\n    def _make_decorator(*m_args, **m_kwargs):\n        def _decorator(view_func):\n            middleware = middleware_class(view_func, *m_args, **m_kwargs)\n\n            @wraps(view_func)\n            def _wrapped_view(request, *args, **kwargs):\n                if hasattr(middleware, 'process_request'):\n                    result = middleware.process_request(request)\n                    if result is not None:\n                        return result\n                if hasattr(middleware, 'process_view'):\n                    result = middleware.process_view(request, view_func, args, kwargs)\n                    if result is not None:\n                        return result\n                try:\n                    response = view_func(request, *args, **kwargs)\n                except Exception as e:\n                    if hasattr(middleware, 'process_exception'):\n                        result = middleware.process_exception(request, e)\n                        if result is not None:\n                            return result\n                    raise\n                if hasattr(response, 'render') and callable(response.render):\n                    if hasattr(middleware, 'process_template_response'):\n                        response = middleware.process_template_response(request, response)\n                    # Defer running of process_response until after the template\n                    # has been rendered:\n                    if hasattr(middleware, 'process_response'):\n                        def callback(response):\n                            return middleware.process_response(request, response)\n                        response.add_post_render_callback(callback)\n                else:\n                    if hasattr(middleware, 'process_response'):\n                        return middleware.process_response(request, response)\n                return response\n            return _wrapped_view\n        return _decorator\n    return _make_decorator\n\n\ndef sync_and_async_middleware(func):\n    \"\"\"\n    Mark a middleware factory as returning a hybrid middleware supporting both\n    types of request.\n    \"\"\"\n    func.sync_capable = True\n    func.async_capable = True\n    return func\n\n\ndef sync_only_middleware(func):\n    \"\"\"\n    Mark a middleware factory as returning a sync middleware.\n    This is the default.\n    \"\"\"\n    func.sync_capable = True\n    func.async_capable = False\n    return func\n\n\ndef async_only_middleware(func):\n    \"\"\"Mark a middleware factory as returning an async middleware.\"\"\"\n    func.sync_capable = False\n    func.async_capable = True\n    return func"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I understand the issue. Looking at the `_multi_decorate` function, specifically at line 40 where `bound_method = partial(method.__get__(self, type(self)))` is created. This partial object doesn't have function attributes like `__name__`, `__module__`, etc., which causes decorators that use `@wraps(func)` to fail.\n\nAccording to the solution proposal, I need to add `update_wrapper(bound_method, method)` after creating the bound_method to copy these attributes. Let me apply this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01VUbfM8AxtNiCjkA5ryVGJX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/utils/decorators.py', 'r') as f:\n    content = f.read()\n\n# Find the line to modify - after \"bound_method = partial(method.__get__(self, type(self)))\"\n# and add \"update_wrapper(bound_method, method)\" after it\n\nlines = content.split('\\n')\nnew_lines = []\n\nfor i, line in enumerate(lines):\n    new_lines.append(line)\n    # Look for the line with \"bound_method = partial(method.__get__(self, type(self)))\"\n    if 'bound_method = partial(method.__get__(self, type(self)))' in line:\n        # Add the update_wrapper call after this line\n        # Get the indentation from the current line\n        indent = len(line) - len(line.lstrip())\n        new_lines.append(' ' * indent + 'update_wrapper(bound_method, method)')\n\n# Write back\nwith open('django/utils/decorators.py', 'w') as f:\n    f.write('\\n'.join(new_lines))\n\nprint(\"File modified successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VUbfM8AxtNiCjkA5ryVGJX",
+          "content": "[exit_code=0]\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RpMUND3hC87oJfbtN6GxE2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/utils/decorators.py | head -50"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RpMUND3hC87oJfbtN6GxE2",
+          "content": "[exit_code=0]\n\"Functions that help with dynamically creating decorators for views.\"\n\nfrom functools import partial, update_wrapper, wraps\n\n\nclass classonlymethod(classmethod):\n    def __get__(self, instance, cls=None):\n        if instance is not None:\n            raise AttributeError(\"This method is available only on the class, not on instances.\")\n        return super().__get__(instance, cls)\n\n\ndef _update_method_wrapper(_wrapper, decorator):\n    # _multi_decorate()'s bound_method isn't available in this scope. Cheat by\n    # using it on a dummy function.\n    @decorator\n    def dummy(*args, **kwargs):\n        pass\n    update_wrapper(_wrapper, dummy)\n\n\ndef _multi_decorate(decorators, method):\n    \"\"\"\n    Decorate `method` with one or more function decorators. `decorators` can be\n    a single decorator or an iterable of decorators.\n    \"\"\"\n    if hasattr(decorators, '__iter__'):\n        # Apply a list/tuple of decorators if 'decorators' is one. Decorator\n        # functions are applied so that the call order is the same as the\n        # order in which they appear in the iterable.\n        decorators = decorators[::-1]\n    else:\n        decorators = [decorators]\n\n    def _wrapper(self, *args, **kwargs):\n        # bound_method has the signature that 'decorator' expects i.e. no\n        # 'self' argument, but it's a closure over self so it can call\n        # 'func'. Also, wrap method.__get__() in a function because new\n        # attributes can't be set on bound method objects, only on functions.\n        bound_method = partial(method.__get__(self, type(self)))\n        update_wrapper(bound_method, method)\n        for dec in decorators:\n            bound_method = dec(bound_method)\n        return bound_method(*args, **kwargs)\n\n    # Copy any attributes that a decorator adds to the function it decorates.\n    for dec in decorators:\n        _update_method_wrapper(_wrapper, dec)\n    # Preserve any existing attributes of 'method', including the name.\n    update_wrapper(_wrapper, method)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. The `update_wrapper(bound_method, method)` line has been added after the `bound_method = partial(method.__get__(self, type(self)))` line at the correct indentation level. This will ensure that the partial object has the necessary function attributes like `__name__`, `__module__`, etc. before decorators are applied to it.\n\nNow let me run git diff to verify the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JwQKQBqvGR4ZgCWw5oNs2c",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JwQKQBqvGR4ZgCWw5oNs2c",
+          "content": "[exit_code=0]\ndiff --git a/django/utils/decorators.py b/django/utils/decorators.py\nindex 5c9a5d01c7..8b9da17e31 100644\n--- a/django/utils/decorators.py\n+++ b/django/utils/decorators.py\n@@ -38,6 +38,7 @@ def _multi_decorate(decorators, method):\n         # 'func'. Also, wrap method.__get__() in a function because new\n         # attributes can't be set on bound method objects, only on functions.\n         bound_method = partial(method.__get__(self, type(self)))\n+        update_wrapper(bound_method, method)\n         for dec in decorators:\n             bound_method = dec(bound_method)\n         return bound_method(*args, **kwargs)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly the change that was proposed:\n- Line 41 (after the bound_method creation) now has `update_wrapper(bound_method, method)` \n- This ensures the partial object has the function attributes needed by decorators\n\nThe change is minimal, targeted, and correct. It addresses the problem by copying function attributes from the method to the partial object before any decorators are applied to it.\n\n```json\n{\n  \"patch\": \"diff --git a/django/utils/decorators.py b/django/utils/decorators.py\\nindex 5c9a5d01c7..8b9da17e31 100644\\n--- a/django/utils/decorators.py\\n+++ b/django/utils/decorators.py\\n@@ -38,6 +38,7 @@ def _multi_decorate(decorators, method):\\n         # 'func'. Also, wrap method.__get__() in a function because new\\n         # attributes can't be set on bound method objects, only on functions.\\n         bound_method = partial(method.__get__(self, type(self)))\\n+        update_wrapper(bound_method, method)\\n         for dec in decorators:\\n             bound_method = dec(bound_method)\\n         return bound_method(*args, **kwargs)\",\n  \"implementation_notes\": \"Added `update_wrapper(bound_method, method)` after creating the partial object in `_multi_decorate()` to copy function attributes like `__name__`, `__module__`, etc. from the method to the partial object, making it compatible with decorators that expect these attributes.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T10:09:33Z"
+}

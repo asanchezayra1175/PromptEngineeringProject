@@ -1,0 +1,402 @@
+{
+  "instance_id": "django__django-12908",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/query.py b/django/db/models/query.py\nindex e0eeccefa6..5c70229263 100644\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -1138,6 +1138,7 @@ class QuerySet:\n         \"\"\"\n         Return a new QuerySet instance that will select only distinct results.\n         \"\"\"\n+        self._not_support_combined_queries('distinct')\n         assert not self.query.is_sliced, \\\n             \"Cannot create distinct fields once a slice has been taken.\"\n         obj = self._chain()",
+  "implementation_notes": "Added the missing _not_support_combined_queries('distinct') guard at the beginning of the distinct() method to match the pattern used by other QuerySet methods, ensuring that distinct() raises NotSupportedError when called on a combined queryset (after union/intersection/difference operations).",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-12908</instance_id>\n\n<problem_statement>\nUnion queryset should raise on distinct().\nDescription\n\t \n\t\t(last modified by Sielc Technologies)\n\t \nAfter using\n.annotate() on 2 different querysets\nand then .union()\n.distinct() will not affect the queryset\n\tdef setUp(self) -> None:\n\t\tuser = self.get_or_create_admin_user()\n\t\tSample.h.create(user, name=\"Sam1\")\n\t\tSample.h.create(user, name=\"Sam2 acid\")\n\t\tSample.h.create(user, name=\"Sam3\")\n\t\tSample.h.create(user, name=\"Sam4 acid\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tSample.h.create(user, name=\"Dub\")\n\t\tself.user = user\n\tdef test_union_annotated_diff_distinct(self):\n\t\tqs = Sample.objects.filter(user=self.user)\n\t\tqs1 = qs.filter(name='Dub').annotate(rank=Value(0, IntegerField()))\n\t\tqs2 = qs.filter(name='Sam1').annotate(rank=Value(1, IntegerField()))\n\t\tqs = qs1.union(qs2)\n\t\tqs = qs.order_by('name').distinct('name') # THIS DISTINCT DOESN'T WORK\n\t\tself.assertEqual(qs.count(), 2)\nexpected to get wrapped union\n\tSELECT DISTINCT ON (siebox_sample.name) * FROM (SELECT ... UNION SELECT ...) AS siebox_sample\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The distinct() method in QuerySet does not call _not_support_combined_queries('distinct') at its beginning, unlike other QuerySet methods that are supposed to be unsupported after union operations. When distinct() is called on a union queryset, it proceeds normally instead of raising a NotSupportedError.\nExploration notes: The _not_support_combined_queries method checks if self.query.combinator is set and raises NotSupportedError if an operation is called after union/intersection/difference. Methods like filter, exclude, annotate, select_related, prefetch_related, defer, only, extra, update, delete all call self._not_support_combined_queries() but distinct does not. The test test_unsupported_operations_on_combined_qs validates that various operations raise NotSupportedError but distinct is not included in the tested operations list.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA: Add the missing guard call at the very beginning of distinct() method to match the pattern used by all other QuerySet methods that should be unsupported after union operations. This protects all callers automatically by raising NotSupportedError when distinct() is called on a combined queryset.\n\nFiles to modify: [\n  \"/testbed/django/db/models/query.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/query.py\n  Location: QuerySet.distinct, line 1137\n  Change  : INSERT after line 1137:\n        self._not_support_combined_queries('distinct')\n  Rationale: The distinct() method is missing the _not_support_combined_queries guard that all other unsupported operations have after union/intersection/difference. This causes distinct() to silently fail instead of raising NotSupportedError as documented.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation of the `distinct()` method.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RKPPdjgT7KQphrnwi3vb9L",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -1200 django/db/models/query.py | tail -100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RKPPdjgT7KQphrnwi3vb9L",
+          "content": "[exit_code=0]\nclone = self._chain()\n        names = self._fields\n        if names is None:\n            names = set(chain.from_iterable(\n                (field.name, field.attname) if hasattr(field, 'attname') else (field.name,)\n                for field in self.model._meta.get_fields()\n            ))\n\n        for alias, annotation in annotations.items():\n            if alias in names:\n                raise ValueError(\"The annotation '%s' conflicts with a field on \"\n                                 \"the model.\" % alias)\n            if isinstance(annotation, FilteredRelation):\n                clone.query.add_filtered_relation(annotation, alias)\n            else:\n                clone.query.add_annotation(annotation, alias, is_summary=False)\n\n        for alias, annotation in clone.query.annotations.items():\n            if alias in annotations and annotation.contains_aggregate:\n                if clone._fields is None:\n                    clone.query.group_by = True\n                else:\n                    clone.query.set_group_by()\n                break\n\n        return clone\n\n    def order_by(self, *field_names):\n        \"\"\"Return a new QuerySet instance with the ordering changed.\"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot reorder a query once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.clear_ordering(force_empty=False)\n        obj.query.add_ordering(*field_names)\n        return obj\n\n    def distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj\n\n    def extra(self, select=None, where=None, params=None, tables=None,\n              order_by=None, select_params=None):\n        \"\"\"Add extra SQL fragments to the query.\"\"\"\n        self._not_support_combined_queries('extra')\n        assert not self.query.is_sliced, \\\n            \"Cannot change a query once a slice has been taken\"\n        clone = self._chain()\n        clone.query.add_extra(select, select_params, where, params, tables, order_by)\n        return clone\n\n    def reverse(self):\n        \"\"\"Reverse the ordering of the QuerySet.\"\"\"\n        if self.query.is_sliced:\n            raise TypeError('Cannot reverse a query once a slice has been taken.')\n        clone = self._chain()\n        clone.query.standard_ordering = not clone.query.standard_ordering\n        return clone\n\n    def defer(self, *fields):\n        \"\"\"\n        Defer the loading of data for certain fields until they are accessed.\n        Add the set of deferred fields to any existing set of deferred fields.\n        The only exception to this is if None is passed in as the only\n        parameter, in which case removal all deferrals.\n        \"\"\"\n        self._not_support_combined_queries('defer')\n        if self._fields is not None:\n            raise TypeError(\"Cannot call defer() after .values() or .values_list()\")\n        clone = self._chain()\n        if fields == (None,):\n            clone.query.clear_deferred_loading()\n        else:\n            clone.query.add_deferred_loading(fields)\n        return clone\n\n    def only(self, *fields):\n        \"\"\"\n        Essentially, the opposite of defer(). Only the fields passed into this\n        method and that are not already specified as deferred are loaded\n        immediately when the queryset is evaluated.\n        \"\"\"\n        self._not_support_combined_queries('only')\n        if self._fields is not None:\n            raise TypeError(\"Cannot call only() after .values() or .values_list()\")\n        if fields == (None,):\n            # Can only pass None to defer(), not only(), as the rest option.\n            # That won't stop people trying to do this, so let's be explicit.\n            raise TypeError(\"Cannot pass None as an argument to only().\")\n        for field in fields:\n            field = field.split(LOOKUP_SEP, 1)[0]\n            if field in self.query._filtered_relations:\n                raise ValueError('only() is not supported with FilteredRelation.')\n        clone = self._chain()\n        clone.query.add_immediate_loading(fields)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me look at the exact line numbers around the `distinct()` method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01T6DGB8FjsWGZgqiSGsQPdj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"def distinct\" django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01T6DGB8FjsWGZgqiSGsQPdj",
+          "content": "[exit_code=0]\n1137:    def distinct(self, *field_names):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me view the complete `distinct()` method and surrounding context:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BKVfonptqw35yEqSK6hBE4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1137,1145p' django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BKVfonptqw35yEqSK6hBE4",
+          "content": "[exit_code=0]\ndef distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me look at other methods that have the `_not_support_combined_queries()` guard to understand the pattern:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_017B11JY8YZNWxqDcz1JVvSN",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -A 3 \"def extra\" django/db/models/query.py | head -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017B11JY8YZNWxqDcz1JVvSN",
+          "content": "[exit_code=0]\ndef extra(self, select=None, where=None, params=None, tables=None,\n              order_by=None, select_params=None):\n        \"\"\"Add extra SQL fragments to the query.\"\"\"\n        self._not_support_combined_queries('extra')"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the pattern. The `_not_support_combined_queries()` call is placed right at the beginning of the method, before any other logic. Now let me implement the fix by adding this guard to the `distinct()` method.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01PRzSZbXhc1sjsdiY5c9EWY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/db/models/query.py | sed -n '1137,1145p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PRzSZbXhc1sjsdiY5c9EWY",
+          "content": "[exit_code=0]\ndef distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I'll modify the file to add the `_not_support_combined_queries('distinct')` call right after the docstring. I'll use Python to make this change precisely:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FBDvBpZaUB1WD37UH9VV99",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/db/models/query.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the distinct method and insert the guard\nfor i, line in enumerate(lines):\n    if i > 1130 and i < 1150:  # Around line 1137\n        if 'def distinct(self' in line:\n            # Found the method definition\n            # Find the end of the docstring\n            j = i + 1\n            while j < len(lines) and '\"\"\"' not in lines[j]:\n                j += 1\n            # j now points to the closing \"\"\"\n            # The next line after docstring should be the assert\n            # We need to insert our guard after the docstring\n            insert_pos = j + 1\n            \n            # Insert the guard call\n            indent = '        '  # 8 spaces based on the method indentation\n            lines.insert(insert_pos, indent + \"self._not_support_combined_queries('distinct')\\n\")\n            break\n\n# Write the file back\nwith open('django/db/models/query.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"File modified successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FBDvBpZaUB1WD37UH9VV99",
+          "content": "[exit_code=0]\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01TEp6mGo1oYxpwJh72jg3MX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1137,1148p' django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TEp6mGo1oYxpwJh72jg3MX",
+          "content": "[exit_code=0]\ndef distinct(self, *field_names):\n        \"\"\"\n        self._not_support_combined_queries('distinct')\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj\n\n    def extra(self, select=None, where=None, params=None, tables=None,"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Oops! The insertion was placed inside the docstring. Let me fix this more carefully:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QfZ8qfGXRarwCQpEUaDZ6V",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git checkout django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QfZ8qfGXRarwCQpEUaDZ6V",
+          "content": "[exit_code=0]\nUpdated 1 path from the index"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the current state:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XQWcPUXWth2UJG2nr3XibF",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1137,1145p' django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XQWcPUXWth2UJG2nr3XibF",
+          "content": "[exit_code=0]\ndef distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good, now let me apply the change more carefully. The guard should go after the docstring (after line 1140) and before the assert:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012XUyYS997gGD3WmWcWkDAU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/db/models/query.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the distinct method\nold_distinct = '''    def distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        assert not self.query.is_sliced, \\\\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj'''\n\nnew_distinct = '''    def distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        self._not_support_combined_queries('distinct')\n        assert not self.query.is_sliced, \\\\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj'''\n\nif old_distinct in content:\n    content = content.replace(old_distinct, new_distinct)\n    with open('django/db/models/query.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully replaced distinct method\")\nelse:\n    print(\"Could not find the exact distinct method - trying debug\")\n    # Print the actual content around line 1137\n    lines = content.split('\\n')\n    for i in range(1135, 1150):\n        print(f\"{i}: {lines[i]}\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012XUyYS997gGD3WmWcWkDAU",
+          "content": "[exit_code=0]\nSuccessfully replaced distinct method"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now let me verify the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01N6fPVQ5WVFEJCqgwQGQHPv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '1137,1147p' django/db/models/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01N6fPVQ5WVFEJCqgwQGQHPv",
+          "content": "[exit_code=0]\ndef distinct(self, *field_names):\n        \"\"\"\n        Return a new QuerySet instance that will select only distinct results.\n        \"\"\"\n        self._not_support_combined_queries('distinct')\n        assert not self.query.is_sliced, \\\n            \"Cannot create distinct fields once a slice has been taken.\"\n        obj = self._chain()\n        obj.query.add_distinct_fields(*field_names)\n        return obj"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The change has been applied correctly. Now let me run `git diff` to verify the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014PtwrjrSz4z9mNoR9Wwe7W",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014PtwrjrSz4z9mNoR9Wwe7W",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/query.py b/django/db/models/query.py\nindex e0eeccefa6..5c70229263 100644\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -1138,6 +1138,7 @@ class QuerySet:\n         \"\"\"\n         Return a new QuerySet instance that will select only distinct results.\n         \"\"\"\n+        self._not_support_combined_queries('distinct')\n         assert not self.query.is_sliced, \\\n             \"Cannot create distinct fields once a slice has been taken.\"\n         obj = self._chain()"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "IMPORTANT: You are running out of iterations. Stop exploring immediately. Based on everything you have found so far, write the reproduction test NOW and output the required JSON block. Do not make any more exploratory tool calls."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows the correct change has been applied. The `self._not_support_combined_queries('distinct')` line has been added right after the docstring and before the assert statement, which is exactly what was needed.\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/query.py b/django/db/models/query.py\\nindex e0eeccefa6..5c70229263 100644\\n--- a/django/db/models/query.py\\n+++ b/django/db/models/query.py\\n@@ -1138,6 +1138,7 @@ class QuerySet:\\n         \\\"\\\"\\\"\\n         Return a new QuerySet instance that will select only distinct results.\\n         \\\"\\\"\\\"\\n+        self._not_support_combined_queries('distinct')\\n         assert not self.query.is_sliced, \\\\\\n             \\\"Cannot create distinct fields once a slice has been taken.\\\"\\n         obj = self._chain()\",\n  \"implementation_notes\": \"Added the missing _not_support_combined_queries('distinct') guard at the beginning of the distinct() method to match the pattern used by other QuerySet methods, ensuring that distinct() raises NotSupportedError when called on a combined queryset (after union/intersection/difference operations).\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 13,
+  "timestamp": "2026-04-13T08:39:27Z"
+}

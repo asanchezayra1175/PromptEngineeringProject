@@ -1,0 +1,147 @@
+{
+  "instance_id": "django__django-14752",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "Extract Method refactoring \u2014 no PA-PH pattern match",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-14752</instance_id>\n\n<problem_statement>\nRefactor AutocompleteJsonView to support extra fields in autocomplete response\nDescription\n\t \n\t\t(last modified by mrts)\n\t \nAdding data attributes to items in ordinary non-autocomplete foreign key fields that use forms.widgets.Select-based widgets is relatively easy. This enables powerful and dynamic admin site customizations where fields from related models are updated immediately when users change the selected item.\nHowever, adding new attributes to autocomplete field results currently requires extending contrib.admin.views.autocomplete.AutocompleteJsonView and fully overriding the AutocompleteJsonView.get() method. Here's an example:\nclass MyModelAdmin(admin.ModelAdmin):\n\tdef get_urls(self):\n\t\treturn [\n\t\t\tpath('autocomplete/', CustomAutocompleteJsonView.as_view(admin_site=self.admin_site))\n\t\t\tif url.pattern.match('autocomplete/')\n\t\t\telse url for url in super().get_urls()\n\t\t]\nclass CustomAutocompleteJsonView(AutocompleteJsonView):\n\tdef get(self, request, *args, **kwargs):\n\t\tself.term, self.model_admin, self.source_field, to_field_name = self.process_request(request)\n\t\tif not self.has_perm(request):\n\t\t\traise PermissionDenied\n\t\tself.object_list = self.get_queryset()\n\t\tcontext = self.get_context_data()\n\t\treturn JsonResponse({\n\t\t\t'results': [\n\t\t\t\t{'id': str(getattr(obj, to_field_name)), 'text': str(obj), 'notes': obj.notes} # <-- customization here\n\t\t\t\tfor obj in context['object_list']\n\t\t\t],\n\t\t\t'pagination': {'more': context['page_obj'].has_next()},\n\t\t})\nThe problem with this is that as AutocompleteJsonView.get() keeps evolving, there's quite a lot of maintenance overhead required to catch up.\nThe solutions is simple, side-effect- and risk-free: adding a result customization extension point to get() by moving the lines that construct the results inside JsonResponse constructor to a separate method. So instead of\n\t\treturn JsonResponse({\n\t\t\t'results': [\n\t\t\t\t{'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\n\t\t\t\tfor obj in context['object_list']\n\t\t\t],\n\t\t\t'pagination': {'more': context['page_obj'].has_next()},\n\t\t})\nthere would be\n\t\treturn JsonResponse({\n\t\t\t'results': [\n\t\t\t\tself.serialize_result(obj, to_field_name) for obj in context['object_list']\n\t\t\t],\n\t\t\t'pagination': {'more': context['page_obj'].has_next()},\n\t\t})\nwhere serialize_result() contains the original object to dictionary conversion code that would be now easy to override:\ndef serialize_result(self, obj, to_field_name):\n\treturn {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\nThe example CustomAutocompleteJsonView from above would now become succinct and maintainable:\nclass CustomAutocompleteJsonView(AutocompleteJsonView):\n\tdef serialize_result(self, obj, to_field_name):\n\t\treturn super.serialize_result(obj, to_field_name) | {'notes': obj.notes}\nWhat do you think, is this acceptable? I'm more than happy to provide the patch.\n\n</problem_statement>\n\n<hints>\nMakes sense to me.\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/contrib/admin/views/autocomplete.py\"]\nBug analysis: The AutocompleteJsonView.get() method constructs result dictionaries inline within the JsonResponse return statement as list comprehension {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}. This prevents customization of autocomplete response fields without overriding the entire get() method, creating maintenance overhead when the method evolves.\nExploration notes: The problematic code is in the get() method around lines 26-28 where the results list is constructed. The dictionary construction {'id': str(getattr(obj, to_field_name)), 'text': str(obj)} needs to be extracted into a separate serialize_result(obj, to_field_name) method. The class inherits from BaseListView from django.views.generic.list. Test file is at /testbed/tests/admin_views/test_autocomplete_view.py with AutocompleteJsonViewTests class. Current tests verify the response format with results containing id and text fields.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: extract inline dictionary construction into separate method for better extensibility. This creates an extension point for customizing autocomplete responses without overriding the entire get() method, reducing maintenance overhead while preserving existing functionality.\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/contrib/admin/views/autocomplete.py\",\n    \"location\": \"AutocompleteJsonView.get, line 29\",\n    \"change\": \"REPLACE line 29:\\n                {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\\nWITH:\\n                self.serialize_result(obj, to_field_name)\",\n    \"rationale\": \"Extract inline dictionary construction into method call to enable easy customization of autocomplete response fields\"\n  },\n  {\n    \"file\": \"/testbed/django/contrib/admin/views/autocomplete.py\",\n    \"location\": \"AutocompleteJsonView, line 33\",\n    \"change\": \"INSERT after line 33:\\n\\n    def serialize_result(self, obj, to_field_name):\\n        \\\"\\\"\\\"Convert the provided model object to a dictionary.\\\"\\\"\\\"\\n        return {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\",\n    \"rationale\": \"Add new method containing the original dictionary construction logic, making it easy to override for custom fields\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/contrib/admin/views/autocomplete.py b/django/contrib/admin/views/autocomplete.py\nindex 3903e4c98c..2eafaff0ea 100644\n--- a/django/contrib/admin/views/autocomplete.py\n+++ b/django/contrib/admin/views/autocomplete.py\n@@ -26,12 +26,17 @@ class AutocompleteJsonView(BaseListView):\n         context = self.get_context_data()\n         return JsonResponse({\n             'results': [\n-                {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\n+                self.serialize_result(obj, to_field_name)\n                 for obj in context['object_list']\n             ],\n             'pagination': {'more': context['page_obj'].has_next()},\n         })\n \n+\n+    def serialize_result(self, obj, to_field_name):\n+        \"\"\"Convert the provided model object to a dictionary.\"\"\"\n+        return {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\n+\n     def get_paginator(self, *args, **kwargs):\n         \"\"\"Use the ModelAdmin's paginator.\"\"\"\n         return self.model_admin.get_paginator(self.request, *args, **kwargs)\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll review this patch systematically.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01ALxwH3AyRLGLf6wkb7hc32",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/contrib/admin/views/autocomplete.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ALxwH3AyRLGLf6wkb7hc32",
+          "content": "[exit_code=0]\nfrom django.apps import apps\nfrom django.core.exceptions import FieldDoesNotExist, PermissionDenied\nfrom django.http import Http404, JsonResponse\nfrom django.views.generic.list import BaseListView\n\n\nclass AutocompleteJsonView(BaseListView):\n    \"\"\"Handle AutocompleteWidget's AJAX requests for data.\"\"\"\n    paginate_by = 20\n    admin_site = None\n\n    def get(self, request, *args, **kwargs):\n        \"\"\"\n        Return a JsonResponse with search results of the form:\n        {\n            results: [{id: \"123\" text: \"foo\"}],\n            pagination: {more: true}\n        }\n        \"\"\"\n        self.term, self.model_admin, self.source_field, to_field_name = self.process_request(request)\n\n        if not self.has_perm(request):\n            raise PermissionDenied\n\n        self.object_list = self.get_queryset()\n        context = self.get_context_data()\n        return JsonResponse({\n            'results': [\n                self.serialize_result(obj, to_field_name)\n                for obj in context['object_list']\n            ],\n            'pagination': {'more': context['page_obj'].has_next()},\n        })\n\n\n    def serialize_result(self, obj, to_field_name):\n        \"\"\"Convert the provided model object to a dictionary.\"\"\"\n        return {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}\n\n    def get_paginator(self, *args, **kwargs):\n        \"\"\"Use the ModelAdmin's paginator.\"\"\"\n        return self.model_admin.get_paginator(self.request, *args, **kwargs)\n\n    def get_queryset(self):\n        \"\"\"Return queryset based on ModelAdmin.get_search_results().\"\"\"\n        qs = self.model_admin.get_queryset(self.request)\n        qs = qs.complex_filter(self.source_field.get_limit_choices_to())\n        qs, search_use_distinct = self.model_admin.get_search_results(self.request, qs, self.term)\n        if search_use_distinct:\n            qs = qs.distinct()\n        return qs\n\n    def process_request(self, request):\n        \"\"\"\n        Validate request integrity, extract and return request parameters.\n\n        Since the subsequent view permission check requires the target model\n        admin, which is determined here, raise PermissionDenied if the\n        requested app, model or field are malformed.\n\n        Raise Http404 if the target model admin is not configured properly with\n        search_fields.\n        \"\"\"\n        term = request.GET.get('term', '')\n        try:\n            app_label = request.GET['app_label']\n            model_name = request.GET['model_name']\n            field_name = request.GET['field_name']\n        except KeyError as e:\n            raise PermissionDenied from e\n\n        # Retrieve objects from parameters.\n        try:\n            source_model = apps.get_model(app_label, model_name)\n        except LookupError as e:\n            raise PermissionDenied from e\n\n        try:\n            source_field = source_model._meta.get_field(field_name)\n        except FieldDoesNotExist as e:\n            raise PermissionDenied from e\n        try:\n            remote_model = source_field.remote_field.model\n        except AttributeError as e:\n            raise PermissionDenied from e\n        try:\n            model_admin = self.admin_site._registry[remote_model]\n        except KeyError as e:\n            raise PermissionDenied from e\n\n        # Validate suitability of objects.\n        if not model_admin.get_search_fields(request):\n            raise Http404(\n                '%s must have search_fields for the autocomplete_view.' %\n                type(model_admin).__qualname__\n            )\n\n        to_field_name = getattr(source_field.remote_field, 'field_name', remote_model._meta.pk.attname)\n        to_field_name = remote_model._meta.get_field(to_field_name).attname\n        if not model_admin.to_field_allowed(request, to_field_name):\n            raise PermissionDenied\n\n        return term, model_admin, source_field, to_field_name\n\n    def has_perm(self, request, obj=None):\n        \"\"\"Check if user has permission to access the related model.\"\"\"\n        return self.model_admin.has_view_permission(request, obj=obj)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_016cyRaDjftktkfau3koHcqu",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"serialize_result\\|AutocompleteJsonView\\|get(\" /testbed/tests/admin_views/test_autocomplete_view.py | head -50"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016cyRaDjftktkfau3koHcqu",
+          "content": "[exit_code=0]\n6:from django.contrib.admin.views.autocomplete import AutocompleteJsonView\n21:PAGINATOR_SIZE = AutocompleteJsonView.paginate_by\n53:    org_admin = admin_site._registry.get(model)\n64:class AutocompleteJsonViewTests(AdminViewBasicTestCase):\n84:        request = self.factory.get(self.url, {'term': 'is', **self.opts})\n86:        response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n96:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'question_with_to_field'})\n98:        response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n108:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'question_with_to_field'})\n111:            AutocompleteJsonView.as_view(**self.as_view_args)(request)\n120:        request = self.factory.get(self.url, {'term': 'is', **opts})\n122:        response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n147:                request = self.factory.get(self.url, {'term': 'frida', **opts})\n149:                response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n165:        request = self.factory.get(self.url, {'term': 'anna', **opts})\n167:        response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n176:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'does_not_exist'})\n179:            AutocompleteJsonView.as_view(**self.as_view_args)(request)\n182:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'answer'})\n185:            AutocompleteJsonView.as_view(**self.as_view_args)(request)\n188:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'related_questions'})\n191:            AutocompleteJsonView.as_view(**self.as_view_args)(request)\n198:        request = self.factory.get(self.url, {'term': 'is', **self.opts, 'field_name': 'question_with_to_field'})\n200:        response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n209:        response = self.client.get(self.url, {'term': '', **self.opts})\n212:        response = self.client.get(self.url, {'term': '', **self.opts})\n220:        request = self.factory.get(self.url, {'term': 'is', **self.opts})\n223:            AutocompleteJsonView.as_view(**self.as_view_args)(request)\n227:                p = Permission.objects.get(\n232:                request.user = User.objects.get(pk=self.user.pk)\n233:                response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n246:        request = self.factory.get(self.url, {'term': 'question', **self.opts})\n253:            response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n265:                site.autocomplete_view(self.factory.get(self.url, {'term': '', **self.opts}))\n274:        request = self.factory.get(self.url, {'term': '', **self.opts})\n277:            response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n285:        request = self.factory.get(self.url, {'term': '', 'page': '2', **self.opts})\n288:            response = AutocompleteJsonView.as_view(**self.as_view_args)(request)\n325:        self.selenium.get(self.live_server_url + reverse('autocomplete_admin:admin_views_answer_add'))\n367:        self.selenium.get(self.live_server_url + reverse('autocomplete_admin:admin_views_question_add'))\n418:        self.selenium.get(self.live_server_url + reverse('autocomplete_admin:admin_views_book_add'))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_0192VdRcvB4RmaAmhiwxj2Ss",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"serialize_result\" /testbed/tests/admin_views/test_autocomplete_view.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0192VdRcvB4RmaAmhiwxj2Ss",
+          "content": "[exit_code=1]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The test file doesn't currently have tests for `serialize_result`. Let me check if there are any tests added specifically for this new method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016MzhRvjWNsg46PqErEz6Gh",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -rn \"serialize_result\" /testbed/"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016MzhRvjWNsg46PqErEz6Gh",
+          "content": "[exit_code=0]\n/testbed/django/contrib/admin/views/autocomplete.py:29:                self.serialize_result(obj, to_field_name)\n/testbed/django/contrib/admin/views/autocomplete.py:36:    def serialize_result(self, obj, to_field_name):\ngrep: /testbed/django/contrib/admin/views/__pycache__/autocomplete.cpython-38.pyc: binary file matches"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nLet me analyze the patch:\n\n1. **What the PR/hints say**: The hints simply say \"Makes sense to me\" without pointing to a specific regression PR. There's no PR URL in the hints.\n\n2. **Fix pattern**: This is a refactoring to extract inline dictionary construction into a separate method for extensibility. No specific PA-PH pattern applies - it's more of a general \"extract method\" refactoring.\n\n3. **Review of the patch**:\n   - The `get()` method now calls `self.serialize_result(obj, to_field_name)` instead of inline dict construction.\n   - A new `serialize_result()` method is added with the original logic.\n   - The method is correctly placed after the `get()` method.\n   - There's an extra blank line before `serialize_result` (two blank lines between `get` and `serialize_result`), which is PEP 8 standard for methods within a class (one blank line) - actually wait, PEP 8 says one blank line between methods in a class. Two blank lines appear here, but this is a minor style issue, not a correctness issue.\n\n4. **Correctness**: \n   - The patch correctly extracts the inline dict construction into a `serialize_result` method.\n   - The logic is identical to what was there before.\n   - The `to_field_name` variable is properly passed.\n   - The behavior is preserved.\n\n5. **Completeness**:\n   - The patch addresses the full request - creating an extension point.\n   - All existing functionality is preserved.\n   - The method signature `serialize_result(self, obj, to_field_name)` matches what the problem statement proposes.\n   - No edge cases are missed.\n\n6. **Alignment**:\n   - The solution matches the proposal exactly.\n   - The implementation matches what the Architect specified.\n\n7. **Safety**:\n   - The change is minimal - only extracts code into a new method.\n   - No behavioral changes for existing functionality.\n   - No regressions possible since the logic is identical.\n\nThe only minor issue is the double blank line before `serialize_result`, but PEP 8 actually recommends surrounding top-level function and class definitions with two blank lines, but methods in a class should be surrounded by a single blank line. That said, this is purely a style concern and doesn't affect functionality.\n\nThe patch is correct, complete, aligned with the proposal, and safe. I'll give it a pass.\n</think>\n\nThe hints contain no PR URL, so no regression PR check needed.\n\nLooking at the patched code:\n\n1. **Correctness**: The patch correctly extracts the inline dictionary construction `{'id': str(getattr(obj, to_field_name)), 'text': str(obj)}` into a new `serialize_result(self, obj, to_field_name)` method. The `get()` method now calls `self.serialize_result(obj, to_field_name)` in the list comprehension. The logic is identical to the original.\n\n2. **Completeness**: The new method has the right signature matching the problem statement's proposal. The `to_field_name` variable is properly passed as a parameter. The docstring is included. The original behavior is fully preserved.\n\n3. **Alignment**: The implementation exactly matches the Architect's proposal - both the replacement in `get()` and the new `serialize_result()` method are correctly implemented.\n\n4. **Safety**: Only the minimum necessary change was made. Existing callers get the same behavior. The new method can be overridden by subclasses to add extra fields without needing to override the entire `get()` method. There's a minor PEP 8 style issue (two blank lines before `serialize_result` inside a class, where PEP 8 recommends one), but this doesn't affect functionality.\n\nThe patch cleanly solves the stated problem with no regressions.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"Extract Method refactoring \u2014 no PA-PH pattern match\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T10:04:22Z"
+}

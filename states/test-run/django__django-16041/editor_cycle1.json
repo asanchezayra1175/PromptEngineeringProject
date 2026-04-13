@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-16041",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/forms/formsets.py b/django/forms/formsets.py\nindex 57676428ff..b73d1d742e 100644\n--- a/django/forms/formsets.py\n+++ b/django/forms/formsets.py\n@@ -257,14 +257,15 @@ class BaseFormSet(RenderableFormMixin):\n \n     @property\n     def empty_form(self):\n-        form = self.form(\n-            auto_id=self.auto_id,\n-            prefix=self.add_prefix(\"__prefix__\"),\n-            empty_permitted=True,\n-            use_required_attribute=False,\n+        form_kwargs = {\n             **self.get_form_kwargs(None),\n-            renderer=self.renderer,\n-        )\n+            \"auto_id\": self.auto_id,\n+            \"prefix\": self.add_prefix(\"__prefix__\"),\n+            \"use_required_attribute\": False,\n+            \"empty_permitted\": True,\n+            \"renderer\": self.renderer,\n+        }\n+        form = self.form(**form_kwargs)\n         self.add_fields(form, None)\n         return form",
+  "implementation_notes": "Modified BaseFormSet.empty_form property to merge all kwargs into a single dictionary instead of passing explicit parameters alongside **self.get_form_kwargs(None), which prevents TypeError when form_kwargs contains 'empty_permitted'. The fix ensures empty_permitted=True always takes precedence for empty_form.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-16041</instance_id>\n\n<problem_statement>\nRendering empty_form crashes when empty_permitted is passed to form_kwargs\nDescription\n\t\nIssue\nWhen explicitly setting form_kwargs = {'empty_permitted':True} or form_kwargs = {'empty_permitted':False} , a KeyError occurs when rendering a template that uses a formset's empty_form.\nExpected Behavior\nempty_permitted is ignored for formset.empty_form since empty_permitted is irrelevant for empty_form, as empty_form is not meant to be used to pass data and therefore does not need to be validated.\nSteps to Reproduce\n# views.py\nfrom django.shortcuts import render\nfrom .models import MyModel\ndef test_view(request):\n\tcontext = {}\n\tff = modelformset_factory(MyModel, fields = ['a_field'])\n\tcontext['formset'] = ff(\n\t\tqueryset = MyModel.objects.none(),\n\t\tform_kwargs = {'empty_permitted':True} # or form_kwargs = {'empty_permitted':False}\n\t)\n\treturn render(request, 'my_app/my_model_formset.html', context)\n# urls.py\nfrom django.urls import path, include\nfrom .views import test_view\nurlpatterns = [\n\tpath('test', test_view)\n]\n# my_model_formset.html\n{% extends \"my_app/base.html\" %}\n{% block content %}\n<form id=\"my-form\" method=\"post\">\n {% csrf_token %}\n {{ formset }}\n <input type=\"submit\" value=\"Save\">\n</form>\n{{ formset.empty_form }}\n{% endblock %}\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The empty_form property passes both an explicit empty_permitted=True parameter and **self.get_form_kwargs(None) to the form constructor. When form_kwargs contains 'empty_permitted', this creates a TypeError due to multiple values for the same keyword argument.\nExploration notes: BaseFormSet.empty_form property at line 259. BaseFormSet.get_form_kwargs method at line 210 returns self.form_kwargs.copy(). The form_kwargs attribute is set in BaseFormSet.__init__ at line 95. The empty_form property unpacks get_form_kwargs(None) which includes user-provided form_kwargs that may contain empty_permitted.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: merge kwargs into single dict to prevent duplicate keyword argument error, ensuring empty_permitted=True always takes precedence for empty_form\n\nFiles to modify: [\n  \"/testbed/django/forms/formsets.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/forms/formsets.py\n  Location: BaseFormSet.empty_form, line 260\n  Change  : REPLACE lines 260-267:\n        form = self.form(\n            auto_id=self.auto_id,\n            prefix=self.add_prefix(\"__prefix__\"),\n            empty_permitted=True,\n            use_required_attribute=False,\n            **self.get_form_kwargs(None),\n            renderer=self.renderer,\n        )\nWITH:\n        form_kwargs = {\n            **self.get_form_kwargs(None),\n            \"auto_id\": self.auto_id,\n            \"prefix\": self.add_prefix(\"__prefix__\"),\n            \"use_required_attribute\": False,\n            \"empty_permitted\": True,\n            \"renderer\": self.renderer,\n        }\n        form = self.form(**form_kwargs)\n  Rationale: The original code passes both explicit empty_permitted=True and **self.get_form_kwargs(None), causing TypeError when form_kwargs contains empty_permitted. The fix merges all kwargs into a single dict with empty_permitted=True taking precedence, as empty_form should always have empty_permitted=True regardless of user-provided form_kwargs.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal by modifying the source file as specified. Let me start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012CkAF2WmJ6tYdVEfv4ymqR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/forms/formsets.py | head -300"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012CkAF2WmJ6tYdVEfv4ymqR",
+          "content": "[exit_code=0]\nfrom django.core.exceptions import ValidationError\nfrom django.forms import Form\nfrom django.forms.fields import BooleanField, IntegerField\nfrom django.forms.renderers import get_default_renderer\nfrom django.forms.utils import ErrorList, RenderableFormMixin\nfrom django.forms.widgets import CheckboxInput, HiddenInput, NumberInput\nfrom django.utils.functional import cached_property\nfrom django.utils.translation import gettext_lazy as _\nfrom django.utils.translation import ngettext_lazy\n\n__all__ = (\"BaseFormSet\", \"formset_factory\", \"all_valid\")\n\n# special field names\nTOTAL_FORM_COUNT = \"TOTAL_FORMS\"\nINITIAL_FORM_COUNT = \"INITIAL_FORMS\"\nMIN_NUM_FORM_COUNT = \"MIN_NUM_FORMS\"\nMAX_NUM_FORM_COUNT = \"MAX_NUM_FORMS\"\nORDERING_FIELD_NAME = \"ORDER\"\nDELETION_FIELD_NAME = \"DELETE\"\n\n# default minimum number of forms in a formset\nDEFAULT_MIN_NUM = 0\n\n# default maximum number of forms in a formset, to prevent memory exhaustion\nDEFAULT_MAX_NUM = 1000\n\n\nclass ManagementForm(Form):\n    \"\"\"\n    Keep track of how many form instances are displayed on the page. If adding\n    new forms via JavaScript, you should increment the count field of this form\n    as well.\n    \"\"\"\n\n    template_name = \"django/forms/div.html\"  # RemovedInDjango50Warning.\n\n    TOTAL_FORMS = IntegerField(widget=HiddenInput)\n    INITIAL_FORMS = IntegerField(widget=HiddenInput)\n    # MIN_NUM_FORM_COUNT and MAX_NUM_FORM_COUNT are output with the rest of the\n    # management form, but only for the convenience of client-side code. The\n    # POST value of them returned from the client is not checked.\n    MIN_NUM_FORMS = IntegerField(required=False, widget=HiddenInput)\n    MAX_NUM_FORMS = IntegerField(required=False, widget=HiddenInput)\n\n    def clean(self):\n        cleaned_data = super().clean()\n        # When the management form is invalid, we don't know how many forms\n        # were submitted.\n        cleaned_data.setdefault(TOTAL_FORM_COUNT, 0)\n        cleaned_data.setdefault(INITIAL_FORM_COUNT, 0)\n        return cleaned_data\n\n\nclass BaseFormSet(RenderableFormMixin):\n    \"\"\"\n    A collection of instances of the same Form class.\n    \"\"\"\n\n    deletion_widget = CheckboxInput\n    ordering_widget = NumberInput\n    default_error_messages = {\n        \"missing_management_form\": _(\n            \"ManagementForm data is missing or has been tampered with. Missing fields: \"\n            \"%(field_names)s. You may need to file a bug report if the issue persists.\"\n        ),\n        \"too_many_forms\": ngettext_lazy(\n            \"Please submit at most %(num)d form.\",\n            \"Please submit at most %(num)d forms.\",\n            \"num\",\n        ),\n        \"too_few_forms\": ngettext_lazy(\n            \"Please submit at least %(num)d form.\",\n            \"Please submit at least %(num)d forms.\",\n            \"num\",\n        ),\n    }\n\n    template_name_div = \"django/forms/formsets/div.html\"\n    template_name_p = \"django/forms/formsets/p.html\"\n    template_name_table = \"django/forms/formsets/table.html\"\n    template_name_ul = \"django/forms/formsets/ul.html\"\n\n    def __init__(\n        self,\n        data=None,\n        files=None,\n        auto_id=\"id_%s\",\n        prefix=None,\n        initial=None,\n        error_class=ErrorList,\n        form_kwargs=None,\n        error_messages=None,\n    ):\n        self.is_bound = data is not None or files is not None\n        self.prefix = prefix or self.get_default_prefix()\n        self.auto_id = auto_id\n        self.data = data or {}\n        self.files = files or {}\n        self.initial = initial\n        self.form_kwargs = form_kwargs or {}\n        self.error_class = error_class\n        self._errors = None\n        self._non_form_errors = None\n\n        messages = {}\n        for cls in reversed(type(self).__mro__):\n            messages.update(getattr(cls, \"default_error_messages\", {}))\n        if error_messages is not None:\n            messages.update(error_messages)\n        self.error_messages = messages\n\n    def __iter__(self):\n        \"\"\"Yield the forms in the order they should be rendered.\"\"\"\n        return iter(self.forms)\n\n    def __getitem__(self, index):\n        \"\"\"Return the form at the given index, based on the rendering order.\"\"\"\n        return self.forms[index]\n\n    def __len__(self):\n        return len(self.forms)\n\n    def __bool__(self):\n        \"\"\"\n        Return True since all formsets have a management form which is not\n        included in the length.\n        \"\"\"\n        return True\n\n    def __repr__(self):\n        if self._errors is None:\n            is_valid = \"Unknown\"\n        else:\n            is_valid = (\n                self.is_bound\n                and not self._non_form_errors\n                and not any(form_errors for form_errors in self._errors)\n            )\n        return \"<%s: bound=%s valid=%s total_forms=%s>\" % (\n            self.__class__.__qualname__,\n            self.is_bound,\n            is_valid,\n            self.total_form_count(),\n        )\n\n    @cached_property\n    def management_form(self):\n        \"\"\"Return the ManagementFor\n...[truncated]...\n_fields(form, i)\n        return form\n\n    @property\n    def initial_forms(self):\n        \"\"\"Return a list of all the initial forms in this formset.\"\"\"\n        return self.forms[: self.initial_form_count()]\n\n    @property\n    def extra_forms(self):\n        \"\"\"Return a list of all the extra forms in this formset.\"\"\"\n        return self.forms[self.initial_form_count() :]\n\n    @property\n    def empty_form(self):\n        form = self.form(\n            auto_id=self.auto_id,\n            prefix=self.add_prefix(\"__prefix__\"),\n            empty_permitted=True,\n            use_required_attribute=False,\n            **self.get_form_kwargs(None),\n            renderer=self.renderer,\n        )\n        self.add_fields(form, None)\n        return form\n\n    @property\n    def cleaned_data(self):\n        \"\"\"\n        Return a list of form.cleaned_data dicts for every form in self.forms.\n        \"\"\"\n        if not self.is_valid():\n            raise AttributeError(\n                \"'%s' object has no attribute 'cleaned_data'\" % self.__class__.__name__\n            )\n        return [form.cleaned_data for form in self.forms]\n\n    @property\n    def deleted_forms(self):\n        \"\"\"Return a list of forms that have been marked for deletion.\"\"\"\n        if not self.is_valid() or not self.can_delete:\n            return []\n        # construct _deleted_form_indexes which is just a list of form indexes\n        # that have had their deletion widget set to True\n        if not hasattr(self, \"_deleted_form_indexes\"):\n            self._deleted_form_indexes = []\n            for i, form in enumerate(self.forms):\n                # if this is an extra form and hasn't changed, don't consider it\n                if i >= self.initial_form_count() and not form.has_changed():\n                    continue\n                if self._should_delete_form(form):\n                    self._deleted_form_indexes.append(i)\n        return [self.forms[i] for i in self._deleted_form_indexes]\n\n    @property\n    def ordered_forms(self):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see the `empty_form` property at around line 259. Let me look at more context around that area to see the exact current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EECBZFp6fj2sE9W9P1irky",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '250,275p' /testbed/django/forms/formsets.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EECBZFp6fj2sE9W9P1irky",
+          "content": "[exit_code=0]\n\"\"\"Return a list of all the initial forms in this formset.\"\"\"\n        return self.forms[: self.initial_form_count()]\n\n    @property\n    def extra_forms(self):\n        \"\"\"Return a list of all the extra forms in this formset.\"\"\"\n        return self.forms[self.initial_form_count() :]\n\n    @property\n    def empty_form(self):\n        form = self.form(\n            auto_id=self.auto_id,\n            prefix=self.add_prefix(\"__prefix__\"),\n            empty_permitted=True,\n            use_required_attribute=False,\n            **self.get_form_kwargs(None),\n            renderer=self.renderer,\n        )\n        self.add_fields(form, None)\n        return form\n\n    @property\n    def cleaned_data(self):\n        \"\"\"\n        Return a list of form.cleaned_data dicts for every form in self.forms.\n        \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the exact code. Now I'll apply the fix according to the proposal. The issue is that when `form_kwargs` contains `empty_permitted`, it creates a TypeError due to duplicate keyword arguments. The fix merges all kwargs into a single dictionary with explicit parameters taking precedence:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01AuzPqh9C6tid6mZfLubzrn",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/forms/formsets.py', 'r') as f:\n    lines = f.readlines()\n\n# Find and replace the empty_form property\n# The property starts at around line 259 and ends before cleaned_data\nnew_lines = []\ni = 0\nwhile i < len(lines):\n    if i > 0 and '@property' in lines[i] and i < len(lines) - 1 and 'def empty_form' in lines[i+1]:\n        # Found the start of empty_form property\n        # Keep the @property and def empty_form lines\n        new_lines.append(lines[i])  # @property\n        i += 1\n        new_lines.append(lines[i])  # def empty_form(self):\n        i += 1\n        \n        # Now we need to replace the form instantiation lines\n        # Skip any leading whitespace/indentation and find the form = self.form( line\n        # We need to consume the old form() call and replace it\n        \n        # Collect the old implementation until we find self.add_fields\n        old_impl_start = i\n        indent_count = 0\n        while i < len(lines):\n            if 'self.add_fields' in lines[i]:\n                # Found where we need to insert the new code\n                # Add the new implementation\n                new_code = '''        form_kwargs = {\n            **self.get_form_kwargs(None),\n            \"auto_id\": self.auto_id,\n            \"prefix\": self.add_prefix(\"__prefix__\"),\n            \"use_required_attribute\": False,\n            \"empty_permitted\": True,\n            \"renderer\": self.renderer,\n        }\n        form = self.form(**form_kwargs)\n'''\n                new_lines.append(new_code)\n                new_lines.append(lines[i])  # self.add_fields line\n                i += 1\n                break\n            i += 1\n        # Continue with the rest\n        if i < len(lines) and 'return form' in lines[i]:\n            new_lines.append(lines[i])\n            i += 1\n    else:\n        new_lines.append(lines[i])\n        i += 1\n\n# Write the file back\nwith open('/testbed/django/forms/formsets.py', 'w') as f:\n    f.writelines(new_lines)\n\nprint(\"File updated successfully\")\nEOF\npython /tmp/fix.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01AuzPqh9C6tid6mZfLubzrn",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Sj9BQxzkYVy7HJ2uGyNwb2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '255,280p' /testbed/django/forms/formsets.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Sj9BQxzkYVy7HJ2uGyNwb2",
+          "content": "[exit_code=0]\n\"\"\"Return a list of all the extra forms in this formset.\"\"\"\n        return self.forms[self.initial_form_count() :]\n\n    @property\n    def empty_form(self):\n        form_kwargs = {\n            **self.get_form_kwargs(None),\n            \"auto_id\": self.auto_id,\n            \"prefix\": self.add_prefix(\"__prefix__\"),\n            \"use_required_attribute\": False,\n            \"empty_permitted\": True,\n            \"renderer\": self.renderer,\n        }\n        form = self.form(**form_kwargs)\n        self.add_fields(form, None)\n        return form\n\n    @property\n    def cleaned_data(self):\n        \"\"\"\n        Return a list of form.cleaned_data dicts for every form in self.forms.\n        \"\"\"\n        if not self.is_valid():\n            raise AttributeError(\n                \"'%s' object has no attribute 'cleaned_data'\" % self.__class__.__name__\n            )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me verify the change with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QFTN6GypCWb1r5qQpbd2t3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QFTN6GypCWb1r5qQpbd2t3",
+          "content": "[exit_code=0]\ndiff --git a/django/forms/formsets.py b/django/forms/formsets.py\nindex 57676428ff..b73d1d742e 100644\n--- a/django/forms/formsets.py\n+++ b/django/forms/formsets.py\n@@ -257,14 +257,15 @@ class BaseFormSet(RenderableFormMixin):\n \n     @property\n     def empty_form(self):\n-        form = self.form(\n-            auto_id=self.auto_id,\n-            prefix=self.add_prefix(\"__prefix__\"),\n-            empty_permitted=True,\n-            use_required_attribute=False,\n+        form_kwargs = {\n             **self.get_form_kwargs(None),\n-            renderer=self.renderer,\n-        )\n+            \"auto_id\": self.auto_id,\n+            \"prefix\": self.add_prefix(\"__prefix__\"),\n+            \"use_required_attribute\": False,\n+            \"empty_permitted\": True,\n+            \"renderer\": self.renderer,\n+        }\n+        form = self.form(**form_kwargs)\n         self.add_fields(form, None)\n         return form"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff output shows exactly the changes we intended to make. The fix:\n\n1. Merges all kwargs into a single `form_kwargs` dictionary instead of passing them separately\n2. Uses the spread operator `**self.get_form_kwargs(None)` first, then overrides with explicit parameters\n3. Ensures `empty_permitted=True` always takes precedence (as it's last in the dict, so when there's a duplicate from `get_form_kwargs`, the explicit value wins)\n4. This prevents the \"TypeError: got multiple values for keyword argument\" error that occurs when `form_kwargs` already contains `empty_permitted`\n\n```json\n{\n  \"patch\": \"diff --git a/django/forms/formsets.py b/django/forms/formsets.py\\nindex 57676428ff..b73d1d742e 100644\\n--- a/django/forms/formsets.py\\n+++ b/django/forms/formsets.py\\n@@ -257,14 +257,15 @@ class BaseFormSet(RenderableFormMixin):\\n \\n     @property\\n     def empty_form(self):\\n-        form = self.form(\\n-            auto_id=self.auto_id,\\n-            prefix=self.add_prefix(\\\"__prefix__\\\"),\\n-            empty_permitted=True,\\n-            use_required_attribute=False,\\n+        form_kwargs = {\\n             **self.get_form_kwargs(None),\\n-            renderer=self.renderer,\\n-        )\\n+            \\\"auto_id\\\": self.auto_id,\\n+            \\\"prefix\\\": self.add_prefix(\\\"__prefix__\\\"),\\n+            \\\"use_required_attribute\\\": False,\\n+            \\\"empty_permitted\\\": True,\\n+            \\\"renderer\\\": self.renderer,\\n+        }\\n+        form = self.form(**form_kwargs)\\n         self.add_fields(form, None)\\n         return form\",\n  \"implementation_notes\": \"Modified BaseFormSet.empty_form property to merge all kwargs into a single dictionary instead of passing explicit parameters alongside **self.get_form_kwargs(None), which prevents TypeError when form_kwargs contains 'empty_permitted'. The fix ensures empty_permitted=True always takes precedence for empty_form.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T08:25:17Z"
+}

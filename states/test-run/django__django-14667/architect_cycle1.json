@@ -1,0 +1,164 @@
+{
+  "instance_id": "django__django-14667",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "files_to_modify": [
+    "/testbed/django/db/models/sql/query.py"
+  ],
+  "proposed_changes": [
+    {
+      "file": "/testbed/django/db/models/sql/query.py",
+      "location": "Query.add_deferred_loading, line 2088-2089",
+      "change": "REPLACE lines 2088-2089:\n        else:\n            # Remove names from the set of any existing \"immediate load\" names.\n            self.deferred_loading = existing.difference(field_names), False\nWITH:\n        else:\n            # Remove names from the set of any existing \"immediate load\" names.\n            new_existing = existing.difference(field_names)\n            if new_existing:\n                self.deferred_loading = new_existing, False\n            else:\n                # All existing immediate load fields are now deferred, clear and\n                # defer any additional fields beyond the existing set.\n                self.clear_deferred_loading()\n                additional_defers = set(field_names) - existing\n                if additional_defers:\n                    self.deferred_loading = additional_defers, True",
+      "rationale": "The bug occurs when existing.difference(field_names) results in an empty set, meaning all only() fields are being deferred. The current code sets an empty immediate loading set with defer=False, causing all fields to be loaded. The fix checks if new_existing is non-empty; if empty, it clears deferred loading and handles any additional fields beyond the original only() set by switching to defer mode."
+    }
+  ],
+  "fix_strategy": "no pattern match: When all only() fields are being deferred, clear the deferred loading state and switch to defer mode for any additional fields beyond the original only() set. This ensures only('name').defer('name') loads only pk fields, and only('name').defer('name','country') defers only 'country'.",
+  "full_response": "<think>\n1. Quote the exact buggy line(s) verbatim.\nThe buggy line is line 2089:\n`self.deferred_loading = existing.difference(field_names), False`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nThe 5 lines after line 2089 are:\n```python\n\n    def add_immediate_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        retrieve when the SQL is executed (\"immediate loading\" fields). The\n```\n\nMy fix won't change what these lines receive since they are part of a different method.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nThis is \"no pattern match\" - the issue is that when `existing.difference(field_names)` results in an empty set, we should clear the deferred loading and potentially switch to defer mode if there are additional fields to defer beyond what was in the only() set.\n\nBased on the hints, when we have `only(\"name\").defer(\"name\")`, the `existing.difference(field_names)` becomes `{\"name\"}.difference({\"name\"}) = {}` (empty set). This should clear the deferred loading.\n\nWhen we have `only(\"name\").defer(\"name\", \"country\")`, the `existing.difference(field_names)` becomes `{\"name\"}.difference({\"name\", \"country\"}) = {}` (empty set), but we also have \"country\" as an additional field to defer that wasn't in the original only set.\n\nThe fix should:\n1. When `existing.difference(field_names)` is empty, call `clear_deferred_loading()`\n2. If there are additional fields in `field_names` beyond what was in `existing`, add those as deferred fields\n\n4. Count the lines your fix changes. If more than 5, simplify.\nThis should be around 3-4 lines of changes.\n</think>\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/sql/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/sql/query.py\", \n      \"location\": \"Query.add_deferred_loading, line 2088-2089\",\n      \"change\": \"REPLACE lines 2088-2089:\\n        else:\\n            # Remove names from the set of any existing \\\"immediate load\\\" names.\\n            self.deferred_loading = existing.difference(field_names), False\\nWITH:\\n        else:\\n            # Remove names from the set of any existing \\\"immediate load\\\" names.\\n            new_existing = existing.difference(field_names)\\n            if new_existing:\\n                self.deferred_loading = new_existing, False\\n            else:\\n                # All existing immediate load fields are now deferred, clear and\\n                # defer any additional fields beyond the existing set.\\n                self.clear_deferred_loading()\\n                additional_defers = set(field_names) - existing\\n                if additional_defers:\\n                    self.deferred_loading = additional_defers, True\",\n      \"rationale\": \"The bug occurs when existing.difference(field_names) results in an empty set, meaning all only() fields are being deferred. The current code sets an empty immediate loading set with defer=False, causing all fields to be loaded. The fix checks if new_existing is non-empty; if empty, it clears deferred loading and handles any additional fields beyond the original only() set by switching to defer mode.\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: When all only() fields are being deferred, clear the deferred loading state and switch to defer mode for any additional fields beyond the original only() set. This ensures only('name').defer('name') loads only pk fields, and only('name').defer('name','country') defers only 'country'.\"\n}\n```",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Produce a solution proposal for the following bug.\n\n<instance_id>django__django-14667</instance_id>\n\n<problem_statement>\nQuerySet.defer() doesn't clear deferred field when chaining with only().\nDescription\n\t\nConsidering a simple Company model with four fields: id, name, trade_number and country. If we evaluate a queryset containing a .defer() following a .only(), the generated sql query selects unexpected fields. For example: \nCompany.objects.only(\"name\").defer(\"name\")\nloads all the fields with the following query:\nSELECT \"company\".\"id\", \"company\".\"name\", \"company\".\"trade_number\", \"company\".\"country\" FROM \"company\"\nand \nCompany.objects.only(\"name\").defer(\"name\").defer(\"country\")\nalso loads all the fields with the same query:\nSELECT \"company\".\"id\", \"company\".\"name\", \"company\".\"trade_number\", \"company\".\"country\" FROM \"company\"\nIn those two cases, i would expect the sql query to be:\nSELECT \"company\".\"id\" FROM \"company\"\nIn the following example, we get the expected behavior:\nCompany.objects.only(\"name\", \"country\").defer(\"name\")\nonly loads \"id\" and \"country\" fields with the following query:\nSELECT \"company\".\"id\", \"company\".\"country\" FROM \"company\"\n\n</problem_statement>\n\n<hints>\nReplying to Manuel Baclet: Considering a simple Company model with four fields: id, name, trade_number and country. If we evaluate a queryset containing a .defer() following a .only(), the generated sql query selects unexpected fields. For example: Company.objects.only(\"name\").defer(\"name\") loads all the fields with the following query: SELECT \"company\".\"id\", \"company\".\"name\", \"company\".\"trade_number\", \"company\".\"country\" FROM \"company\" This is an expected behavior, defer() removes fields from the list of fields specified by the only() method (i.e. list of fields that should not be deferred). In this example only() adds name to the list, defer() removes name from the list, so you have empty lists and all fields will be loaded. It is also \u200bdocumented: # Final result is that everything except \"headline\" is deferred. Entry.objects.only(\"headline\", \"body\").defer(\"body\") Company.objects.only(\"name\").defer(\"name\").defer(\"country\") also loads all the fields with the same query: SELECT \"company\".\"id\", \"company\".\"name\", \"company\".\"trade_number\", \"company\".\"country\" FROM \"company\" I agree you shouldn't get all field, but only pk, name, and trade_number: SELECT \"ticket_32704_company\".\"id\", \"ticket_32704_company\".\"name\", \"ticket_32704_company\".\"trade_number\" FROM \"ticket_32704_company\" this is due to the fact that defer() doesn't clear the list of deferred field when chaining with only(). I attached a proposed patch.\nDraft.\nAfter reading the documentation carefully, i cannot say that it is clearly stated that deferring all the fields used in a previous .only() call performs a reset of the deferred set. Moreover, in the .defer() \u200bsection, we have: You can make multiple calls to defer(). Each call adds new fields to the deferred set: and this seems to suggest that: calls to .defer() cannot remove items from the deferred set and evaluating qs.defer(\"some_field\") should never fetch the column \"some_field\" (since this should add \"some_field\" to the deferred set) the querysets qs.defer(\"field1\").defer(\"field2\") and qs.defer(\"field1\", \"field2\") should be equivalent IMHO, there is a mismatch between the doc and the actual implementation.\ncalls to .defer() cannot remove items from the deferred set and evaluating qs.defer(\"some_field\") should never fetch the column \"some_field\" (since this should add \"some_field\" to the deferred set) Feel-free to propose a docs clarification (see also #24048). the querysets qs.defer(\"field1\").defer(\"field2\") and qs.defer(\"field1\", \"field2\") should be equivalent That's why I accepted Company.objects.only(\"name\").defer(\"name\").defer(\"country\") as a bug.\nI think that what is described in the documentation is what users are expected and it is the implementation that should be fixed! With your patch proposal, i do not think that: Company.objects.only(\"name\").defer(\"name\").defer(\"country\") is equivalent to Company.objects.only(\"name\").defer(\"name\", \"country\")\nReplying to Manuel Baclet: I think that what is described in the documentation is what users are expected and it is the implementation that should be fixed! I don't agree, and there is no need to shout. As documented: \"The only() method is more or less the opposite of defer(). You call it with the fields that should not be deferred ...\", so .only('name').defer('name') should return all fields. You can start a discussion on DevelopersMailingList if you don't agree. With your patch proposal, i do not think that: Company.objects.only(\"name\").defer(\"name\").defer(\"country\") is equivalent to Company.objects.only(\"name\").defer(\"name\", \"country\") Did you check this? with proposed patch country is the only deferred fields in both cases. As far as I'm aware that's an intended behavior.\nWith the proposed patch, I think that: Company.objects.only(\"name\").defer(\"name\", \"country\") loads all fields whereas: Company.objects.only(\"name\").defer(\"name\").defer(\"country\") loads all fields except \"country\". Why is that? In the first case: existing.difference(field_names) == {\"name\"}.difference([\"name\", \"country\"]) == empty_set and we go into the if branch clearing all the deferred fields and we are done. In the second case: existing.difference(field_names) == {\"name\"}.difference([\"name\"]) == empty_set and we go into the if branch clearing all the deferred fields. Then we add \"country\" to the set of deferred fields.\nHey all, Replying to Mariusz Felisiak: Replying to Manuel Baclet: With your patch proposal, i do not think that: Company.objects.only(\"name\").defer(\"name\").defer(\"country\") is equivalent to Company.objects.only(\"name\").defer(\"name\", \"country\") Did you check this? with proposed patch country is the only deferred fields in both cases. As far as I'm aware that's an intended behavior. I believe Manuel is right. This happens because the set difference in one direction gives you the empty set that will clear out the deferred fields - but it is missing the fact that we might also be adding more defer fields than we had only fields in the first place, so that we actually switch from an .only() to a .defer() mode. See the corresponding PR that should fix this behaviour \u200bhttps://github.com/django/django/pull/14667\n</hints>\n\n<localization_report>\nRelevant files: [\n  \"/testbed/django/db/models/sql/query.py\"\n]\nRelevant symbols: [\n  \"Query.add_deferred_loading\"\n]\nBug analysis: The add_deferred_loading method incorrectly handles the case when deferring fields that were previously specified in an only() call. When existing.difference(field_names) results in an empty set, the method sets an empty immediate loading set with defer=False, causing all fields to be loaded instead of transitioning to defer mode or clearing the deferred loading entirely.\nExploration notes: The defer() method in QuerySet calls query.add_deferred_loading(fields). The only() method calls query.add_immediate_loading(fields). The deferred_loading attribute is a tuple (field_set, defer_flag) where defer_flag indicates whether the field_set contains deferred fields (True) or only fields (False). The PR #14667 shows the fix: when existing.difference(field_names) is empty, the method should clear_deferred_loading() and if there are additional fields to defer beyond the existing only set, switch to defer mode with those additional fields. Before fix: `self.deferred_loading = existing.difference(field_names), False`. After fix: check if new_existing := existing.difference(field_names) is non-empty, else clear_deferred_loading() and handle remaining defer fields.\n</localization_report>\n\nStart by reading the relevant files, then produce your solution proposal.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nMaintainer constraints: \n- \"That's why I accepted Company.objects.only(\"name\").defer(\"name\").defer(\"country\") as a bug.\"\n- \"with proposed patch country is the only deferred fields in both cases. As far as I'm aware that's an intended behavior.\"\n\nThe maintainer accepts that when you have `only(\"name\").defer(\"name\").defer(\"country\")`, it should behave like `only(\"name\").defer(\"name\", \"country\")` - both should defer only \"country\" and load everything else except \"country\".\n\n1. What is the function SUPPOSED to do in plain English?\nThe `add_deferred_loading` method should handle deferring fields properly when chaining with only(). When you call `only(\"name\").defer(\"name\")`, it should clear the deferred loading since you're deferring all the only fields. When you call `only(\"name\").defer(\"name\").defer(\"country\")`, it should defer \"country\" and load everything else except \"country\".\n\n2. What input triggers the failure and what error results?\nInput: `Company.objects.only(\"name\").defer(\"name\")` or `Company.objects.only(\"name\").defer(\"name\").defer(\"country\")`\nResult: All fields are loaded instead of the expected behavior (only id for first case, all except country for second case).\n\n3. Which fix pattern matches this bug?\nThis looks like **PD \u2014 Condition boundary wrong** - the condition `if existing.difference(field_names):` is checking if the difference is non-empty, but the logic in the else branch is wrong. However, it's more complex than a simple boundary fix.\n\nActually, looking closer, this seems like **no pattern match** because it's about the logic flow when transitioning between only() and defer() modes.\n\n4. Where should the fix live?\nInside the `add_deferred_loading` function that crashes/misbehaves, to protect all callers.\n\n5. How many lines need to change?\nBased on the hints and PR, this should be a small fix - probably 2-3 lines.\n</think>\n\nLet me start by examining the relevant method to understand the current implementation:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GRAkijF1N5Dd7N2WETn1us",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/sql/query.py",
+            "method_name": "add_deferred_loading"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GRAkijF1N5Dd7N2WETn1us",
+          "content": "[exit_code=0]\n--- add_deferred_loading (lines 2071-2089) ---\n    def add_deferred_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        exclude from loading from the database when automatic column selection\n        is done. Add the new field names to any existing field names that\n        are deferred (or removed from any existing field names that are marked\n        as the only ones for immediate loading).\n        \"\"\"\n        # Fields on related models are stored in the literal double-underscore\n        # format, so that we can use a set datastructure. We do the foo__bar\n        # splitting and handling when computing the SQL column names (as part of\n        # get_columns()).\n        existing, defer = self.deferred_loading\n        if defer:\n            # Add to existing deferred names.\n            self.deferred_loading = existing.union(field_names), True\n        else:\n            # Remove names from the set of any existing \"immediate load\" names.\n            self.deferred_loading = existing.difference(field_names), False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me check the `clear_deferred_loading` method to understand what it does:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011aq5Ma6pbhGXzQo22r2Kw3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/sql/query.py",
+            "method_name": "clear_deferred_loading"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011aq5Ma6pbhGXzQo22r2Kw3",
+          "content": "[exit_code=0]\n--- clear_deferred_loading (lines 2067-2069) ---\n    def clear_deferred_loading(self):\n        \"\"\"Remove any fields from the deferred loading set.\"\"\"\n        self.deferred_loading = (frozenset(), True)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me also check how `add_immediate_loading` works to understand the complete picture:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KmH13cCnCndiemcMBNP8AU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "file_path": "/testbed/django/db/models/sql/query.py",
+            "method_name": "add_immediate_loading"
+          },
+          "name": "extract_method",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KmH13cCnCndiemcMBNP8AU",
+          "content": "[exit_code=0]\n--- add_immediate_loading (lines 2091-2113) ---\n    def add_immediate_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        retrieve when the SQL is executed (\"immediate loading\" fields). The\n        field names replace any existing immediate loading field names. If\n        there are field names already specified for deferred loading, remove\n        those names from the new field_names before storing the new names\n        for immediate loading. (That is, immediate loading overrides any\n        existing immediate values, but respects existing deferrals.)\n        \"\"\"\n        existing, defer = self.deferred_loading\n        field_names = set(field_names)\n        if 'pk' in field_names:\n            field_names.remove('pk')\n            field_names.add(self.get_meta().pk.name)\n\n        if defer:\n            # Remove any existing deferred names from the current set before\n            # setting the new names.\n            self.deferred_loading = field_names.difference(existing), False\n        else:\n            # Replace any existing \"immediate load\" field names.\n            self.deferred_loading = frozenset(field_names), False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read a few more lines after the buggy method to understand the downstream impact:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EJHBrX42zhAiMA3jf8bkYA",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '2071,2095p' django/db/models/sql/query.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EJHBrX42zhAiMA3jf8bkYA",
+          "content": "[exit_code=0]\ndef add_deferred_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        exclude from loading from the database when automatic column selection\n        is done. Add the new field names to any existing field names that\n        are deferred (or removed from any existing field names that are marked\n        as the only ones for immediate loading).\n        \"\"\"\n        # Fields on related models are stored in the literal double-underscore\n        # format, so that we can use a set datastructure. We do the foo__bar\n        # splitting and handling when computing the SQL column names (as part of\n        # get_columns()).\n        existing, defer = self.deferred_loading\n        if defer:\n            # Add to existing deferred names.\n            self.deferred_loading = existing.union(field_names), True\n        else:\n            # Remove names from the set of any existing \"immediate load\" names.\n            self.deferred_loading = existing.difference(field_names), False\n\n    def add_immediate_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        retrieve when the SQL is executed (\"immediate loading\" fields). The\n        field names replace any existing immediate loading field names. If"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\n1. Quote the exact buggy line(s) verbatim.\nThe buggy line is line 2089:\n`self.deferred_loading = existing.difference(field_names), False`\n\n2. Quote the 5 lines immediately after. Does your fix change what they receive?\nThe 5 lines after line 2089 are:\n```python\n\n    def add_immediate_loading(self, field_names):\n        \"\"\"\n        Add the given list of model field names to the set of fields to\n        retrieve when the SQL is executed (\"immediate loading\" fields). The\n```\n\nMy fix won't change what these lines receive since they are part of a different method.\n\n3. Re-read your pattern choice from Step 1. Does your fix follow it exactly?\nThis is \"no pattern match\" - the issue is that when `existing.difference(field_names)` results in an empty set, we should clear the deferred loading and potentially switch to defer mode if there are additional fields to defer beyond what was in the only() set.\n\nBased on the hints, when we have `only(\"name\").defer(\"name\")`, the `existing.difference(field_names)` becomes `{\"name\"}.difference({\"name\"}) = {}` (empty set). This should clear the deferred loading.\n\nWhen we have `only(\"name\").defer(\"name\", \"country\")`, the `existing.difference(field_names)` becomes `{\"name\"}.difference({\"name\", \"country\"}) = {}` (empty set), but we also have \"country\" as an additional field to defer that wasn't in the original only set.\n\nThe fix should:\n1. When `existing.difference(field_names)` is empty, call `clear_deferred_loading()`\n2. If there are additional fields in `field_names` beyond what was in `existing`, add those as deferred fields\n\n4. Count the lines your fix changes. If more than 5, simplify.\nThis should be around 3-4 lines of changes.\n</think>\n\n```json\n{\n  \"files_to_modify\": [\"/testbed/django/db/models/sql/query.py\"],\n  \"proposed_changes\": [\n    {\n      \"file\": \"/testbed/django/db/models/sql/query.py\", \n      \"location\": \"Query.add_deferred_loading, line 2088-2089\",\n      \"change\": \"REPLACE lines 2088-2089:\\n        else:\\n            # Remove names from the set of any existing \\\"immediate load\\\" names.\\n            self.deferred_loading = existing.difference(field_names), False\\nWITH:\\n        else:\\n            # Remove names from the set of any existing \\\"immediate load\\\" names.\\n            new_existing = existing.difference(field_names)\\n            if new_existing:\\n                self.deferred_loading = new_existing, False\\n            else:\\n                # All existing immediate load fields are now deferred, clear and\\n                # defer any additional fields beyond the existing set.\\n                self.clear_deferred_loading()\\n                additional_defers = set(field_names) - existing\\n                if additional_defers:\\n                    self.deferred_loading = additional_defers, True\",\n      \"rationale\": \"The bug occurs when existing.difference(field_names) results in an empty set, meaning all only() fields are being deferred. The current code sets an empty immediate loading set with defer=False, causing all fields to be loaded. The fix checks if new_existing is non-empty; if empty, it clears deferred loading and handles any additional fields beyond the original only() set by switching to defer mode.\"\n    }\n  ],\n  \"fix_strategy\": \"no pattern match: When all only() fields are being deferred, clear the deferred loading state and switch to defer mode for any additional fields beyond the original only() set. This ensures only('name').defer('name') loads only pk fields, and only('name').defer('name','country') defers only 'country'.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T09:49:02Z"
+}

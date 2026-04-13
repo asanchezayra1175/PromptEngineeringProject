@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-12708",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py\nindex 61f88401ab..1f521cfc5c 100644\n--- a/django/db/backends/base/schema.py\n+++ b/django/db/backends/base/schema.py\n@@ -393,7 +393,7 @@ class BaseDatabaseSchemaEditor:\n         news = {tuple(fields) for fields in new_index_together}\n         # Deleted indexes\n         for fields in olds.difference(news):\n-            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\n+            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\n         # Created indexes\n         for field_names in news.difference(olds):\n             fields = [model._meta.get_field(field) for field in field_names]",
+  "implementation_notes": "Added 'unique': False to constraint_kwargs in alter_index_together method to exclude unique constraints when deleting composed indexes, preventing ValueError when both unique_together and index_together exist on the same fields.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-12708</instance_id>\n\n<problem_statement>\nMigration crashes deleting an index_together if there is a unique_together on the same fields\nDescription\n\t\nHappens with Django 1.11.10\nSteps to reproduce:\n1) Create models with 2 fields, add 2 same fields to unique_together and to index_together\n2) Delete index_together -> Fail\nIt will fail at django/db/backends/base/schema.py, line 378, in _delete_composed_index(), ValueError: Found wrong number (2) of constraints for as this one will find two constraints, the _uniq and the _idx one. No way to get out of this...\nThe worst in my case is that happened as I wanted to refactor my code to use the \"new\" (Dj 1.11) Options.indexes feature. I am actually not deleting the index, just the way it is declared in my code.\nI think there are 2 different points here:\n1) The deletion of index_together should be possible alone or made coherent (migrations side?) with unique_together\n2) Moving the declaration of an index should not result in an index re-creation\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _delete_composed_index method searches for constraints using _constraint_names with specific criteria like {'index': True}, but when both unique_together and index_together exist on the same fields, it finds 2 constraints since unique constraints also act as indexes. This causes a ValueError stating 'Found wrong number (2) of constraints' at line 408.\nExploration notes: _delete_composed_index is called from alter_index_together at line 396 with constraint_kwargs={'index': True}. The _constraint_names method at line 1142 filters constraints based on the introspection data where unique constraints also have index=True. The alter_index_together method at line 384 handles removing index_together fields, and alter_unique_together at line 370 handles unique_together operations.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD - Condition boundary wrong: The constraint search condition was too broad, finding both unique and index constraints. Adding unique=False narrows the search to only non-unique indexes, ensuring exactly one constraint is found when deleting index_together.\n\nFiles to modify: [\n  \"/testbed/django/db/backends/base/schema.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/backends/base/schema.py\n  Location: BaseDatabaseSchemaEditor.alter_index_together, line 396\n  Change  : REPLACE line 396:\n            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\nWITH:\n            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\n  Rationale: When searching for index constraints to delete, we need to exclude unique constraints since unique_together creates constraints that are both unique=True and index=True. By adding unique=False, we ensure only non-unique indexes are found, preventing the ValueError when both unique_together and index_together exist on the same fields.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll help you implement this solution. Let me start by reading the file to understand the current code.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XfepRXFqhsZFR56hs1DPkj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -n 450 django/db/backends/base/schema.py | tail -n 100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XfepRXFqhsZFR56hs1DPkj",
+          "content": "[exit_code=0]\n\"\"\"Add an index on a model.\"\"\"\n        self.execute(index.create_sql(model, self), params=None)\n\n    def remove_index(self, model, index):\n        \"\"\"Remove an index from a model.\"\"\"\n        self.execute(index.remove_sql(model, self))\n\n    def add_constraint(self, model, constraint):\n        \"\"\"Add a constraint to a model.\"\"\"\n        sql = constraint.create_sql(model, self)\n        if sql:\n            self.execute(sql)\n\n    def remove_constraint(self, model, constraint):\n        \"\"\"Remove a constraint from a model.\"\"\"\n        sql = constraint.remove_sql(model, self)\n        if sql:\n            self.execute(sql)\n\n    def alter_unique_together(self, model, old_unique_together, new_unique_together):\n        \"\"\"\n        Deal with a model changing its unique_together. The input\n        unique_togethers must be doubly-nested, not the single-nested\n        [\"foo\", \"bar\"] format.\n        \"\"\"\n        olds = {tuple(fields) for fields in old_unique_together}\n        news = {tuple(fields) for fields in new_unique_together}\n        # Deleted uniques\n        for fields in olds.difference(news):\n            self._delete_composed_index(model, fields, {'unique': True}, self.sql_delete_unique)\n        # Created uniques\n        for fields in news.difference(olds):\n            columns = [model._meta.get_field(field).column for field in fields]\n            self.execute(self._create_unique_sql(model, columns))\n\n    def alter_index_together(self, model, old_index_together, new_index_together):\n        \"\"\"\n        Deal with a model changing its index_together. The input\n        index_togethers must be doubly-nested, not the single-nested\n        [\"foo\", \"bar\"] format.\n        \"\"\"\n        olds = {tuple(fields) for fields in old_index_together}\n        news = {tuple(fields) for fields in new_index_together}\n        # Deleted indexes\n        for fields in olds.difference(news):\n            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\n        # Created indexes\n        for field_names in news.difference(olds):\n            fields = [model._meta.get_field(field) for field in field_names]\n            self.execute(self._create_index_sql(model, fields, suffix=\"_idx\"))\n\n    def _delete_composed_index(self, model, fields, constraint_kwargs, sql):\n        meta_constraint_names = {constraint.name for constraint in model._meta.constraints}\n        meta_index_names = {constraint.name for constraint in model._meta.indexes}\n        columns = [model._meta.get_field(field).column for field in fields]\n        constraint_names = self._constraint_names(\n            model, columns, exclude=meta_constraint_names | meta_index_names,\n            **constraint_kwargs\n        )\n        if len(constraint_names) != 1:\n            raise ValueError(\"Found wrong number (%s) of constraints for %s(%s)\" % (\n                len(constraint_names),\n                model._meta.db_table,\n                \", \".join(columns),\n            ))\n        self.execute(self._delete_constraint_sql(sql, model, constraint_names[0]))\n\n    def alter_db_table(self, model, old_db_table, new_db_table):\n        \"\"\"Rename the table a model points to.\"\"\"\n        if (old_db_table == new_db_table or\n            (self.connection.features.ignores_table_name_case and\n                old_db_table.lower() == new_db_table.lower())):\n            return\n        self.execute(self.sql_rename_table % {\n            \"old_table\": self.quote_name(old_db_table),\n            \"new_table\": self.quote_name(new_db_table),\n        })\n        # Rename all references to the old table name.\n        for sql in self.deferred_sql:\n            if isinstance(sql, Statement):\n                sql.rename_table_references(old_db_table, new_db_table)\n\n    def alter_db_tablespace(self, model, old_db_tablespace, new_db_tablespace):\n        \"\"\"Move a model's table between tablespaces.\"\"\"\n        self.execute(self.sql_retablespace_table % {\n            \"table\": self.quote_name(model._meta.db_table),\n            \"old_tablespace\": self.quote_name(old_db_tablespace),\n            \"new_tablespace\": self.quote_name(new_db_tablespace),\n        })\n\n    def add_field(self, model, field):\n        \"\"\"\n        Create a field on a model. Usually involves adding a column, but may\n        involve adding a table instead (for M2M fields).\n        \"\"\"\n        # Special-case implicit M2M tables\n        if field.many_to_many and field.remote_field.through._meta.auto_created:\n            return self.create_model(field.remote_field.through)\n        # Get the column's definition\n        definition, params = self.column_sql(model, field, include_default=True)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see the `alter_index_together` method at around line 384-396. Let me read the specific area around line 396 more carefully:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01PRuJmUbXwxh9auHdvqa2XU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '384,410p' django/db/backends/base/schema.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PRuJmUbXwxh9auHdvqa2XU",
+          "content": "[exit_code=0]\nself.execute(self._create_unique_sql(model, columns))\n\n    def alter_index_together(self, model, old_index_together, new_index_together):\n        \"\"\"\n        Deal with a model changing its index_together. The input\n        index_togethers must be doubly-nested, not the single-nested\n        [\"foo\", \"bar\"] format.\n        \"\"\"\n        olds = {tuple(fields) for fields in old_index_together}\n        news = {tuple(fields) for fields in new_index_together}\n        # Deleted indexes\n        for fields in olds.difference(news):\n            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\n        # Created indexes\n        for field_names in news.difference(olds):\n            fields = [model._meta.get_field(field) for field in field_names]\n            self.execute(self._create_index_sql(model, fields, suffix=\"_idx\"))\n\n    def _delete_composed_index(self, model, fields, constraint_kwargs, sql):\n        meta_constraint_names = {constraint.name for constraint in model._meta.constraints}\n        meta_index_names = {constraint.name for constraint in model._meta.indexes}\n        columns = [model._meta.get_field(field).column for field in fields]\n        constraint_names = self._constraint_names(\n            model, columns, exclude=meta_constraint_names | meta_index_names,\n            **constraint_kwargs\n        )\n        if len(constraint_names) != 1:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see line 396 which contains the problematic call:\n```python\nself._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\n```\n\nAccording to the solution proposal, I need to add `'unique': False` to the constraint_kwargs dictionary. Let me make this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WiaHzRZ9JSt4vdULupZree",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/db/backends/base/schema.py', 'r') as f:\n    content = f.read()\n\n# Replace the specific line\nold_line = \"            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\"\nnew_line = \"            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\"\n\nif old_line in content:\n    content = content.replace(old_line, new_line)\n    with open('/testbed/django/db/backends/base/schema.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully replaced the line\")\nelse:\n    print(\"ERROR: Could not find the line to replace\")\n    sys.exit(1)\nEOF\npython /tmp/fix.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WiaHzRZ9JSt4vdULupZree",
+          "content": "[exit_code=0]\nSuccessfully replaced the line"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CeAXDM2MvWzAs5rYFKMntY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '384,410p' django/db/backends/base/schema.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CeAXDM2MvWzAs5rYFKMntY",
+          "content": "[exit_code=0]\nself.execute(self._create_unique_sql(model, columns))\n\n    def alter_index_together(self, model, old_index_together, new_index_together):\n        \"\"\"\n        Deal with a model changing its index_together. The input\n        index_togethers must be doubly-nested, not the single-nested\n        [\"foo\", \"bar\"] format.\n        \"\"\"\n        olds = {tuple(fields) for fields in old_index_together}\n        news = {tuple(fields) for fields in new_index_together}\n        # Deleted indexes\n        for fields in olds.difference(news):\n            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\n        # Created indexes\n        for field_names in news.difference(olds):\n            fields = [model._meta.get_field(field) for field in field_names]\n            self.execute(self._create_index_sql(model, fields, suffix=\"_idx\"))\n\n    def _delete_composed_index(self, model, fields, constraint_kwargs, sql):\n        meta_constraint_names = {constraint.name for constraint in model._meta.constraints}\n        meta_index_names = {constraint.name for constraint in model._meta.indexes}\n        columns = [model._meta.get_field(field).column for field in fields]\n        constraint_names = self._constraint_names(\n            model, columns, exclude=meta_constraint_names | meta_index_names,\n            **constraint_kwargs\n        )\n        if len(constraint_names) != 1:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied. Now let me verify the changes with `git diff`:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016gA26jj3gcUnGwagpgnsLe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016gA26jj3gcUnGwagpgnsLe",
+          "content": "[exit_code=0]\ndiff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py\nindex 61f88401ab..1f521cfc5c 100644\n--- a/django/db/backends/base/schema.py\n+++ b/django/db/backends/base/schema.py\n@@ -393,7 +393,7 @@ class BaseDatabaseSchemaEditor:\n         news = {tuple(fields) for fields in new_index_together}\n         # Deleted indexes\n         for fields in olds.difference(news):\n-            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\n+            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\n         # Created indexes\n         for field_names in news.difference(olds):\n             fields = [model._meta.get_field(field) for field in field_names]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The change has been applied correctly. The git diff shows exactly what was needed:\n- Line 396 was modified to add `'unique': False` to the constraint_kwargs dictionary\n- This ensures that when deleting composed indexes, the search for constraint names will exclude unique constraints, preventing the ValueError when both unique_together and index_together exist on the same fields.\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py\\nindex 61f88401ab..1f521cfc5c 100644\\n--- a/django/db/backends/base/schema.py\\n+++ b/django/db/backends/base/schema.py\\n@@ -393,7 +393,7 @@ class BaseDatabaseSchemaEditor:\\n         news = {tuple(fields) for fields in new_index_together}\\n         # Deleted indexes\\n         for fields in olds.difference(news):\\n-            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)\\n+            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)\\n         # Created indexes\\n         for field_names in news.difference(olds):\\n             fields = [model._meta.get_field(field) for field in field_names]\",\n  \"implementation_notes\": \"Added 'unique': False to constraint_kwargs in alter_index_together method to exclude unique constraints when deleting composed indexes, preventing ValueError when both unique_together and index_together exist on the same fields.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T08:18:26Z"
+}

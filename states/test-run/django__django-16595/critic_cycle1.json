@@ -1,0 +1,173 @@
+{
+  "instance_id": "django__django-16595",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PA \u2014 missing case addition in reduce method",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-16595</instance_id>\n\n<problem_statement>\nMigration optimizer does not reduce multiple AlterField\nDescription\n\t\nLet's consider the following operations: \noperations = [\n\tmigrations.AddField(\n\t\tmodel_name=\"book\",\n\t\tname=\"title\",\n\t\tfield=models.CharField(max_length=256, null=True),\n\t),\n\tmigrations.AlterField(\n\t\tmodel_name=\"book\",\n\t\tname=\"title\",\n\t\tfield=models.CharField(max_length=128, null=True),\n\t),\n\tmigrations.AlterField(\n\t\tmodel_name=\"book\",\n\t\tname=\"title\",\n\t\tfield=models.CharField(max_length=128, null=True, help_text=\"help\"),\n\t),\n\tmigrations.AlterField(\n\t\tmodel_name=\"book\",\n\t\tname=\"title\",\n\t\tfield=models.CharField(max_length=128, null=True, help_text=\"help\", default=None),\n\t),\n]\nIf I run the optimizer, I get only the AddField, as we could expect. However, if the AddField model is separated from the AlterField (e.g. because of a non-elidable migration, or inside a non-squashed migration), none of the AlterField are reduced:\noptimizer.optimize(operations[1:], \"books\") \n[<AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,\n <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,\n <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>]\nIndeed, the AlterField.reduce does not consider the the case where operation is also an AlterField. \nIs this behaviour intended? If so, could it be documented? \nOtherwise, would it make sense to add something like\n\t\tif isinstance(operation, AlterField) and self.is_same_field_operation(\n\t\t\toperation\n\t\t):\n\t\t\treturn [operation]\n\n</problem_statement>\n\n<hints>\nYour analysis is correct Laurent, the reduction of multiple AlterField against the same model is simply not implemented today hence why you're running into this behaviour. Given you're already half way there \u200bI would encourage you to submit a PR that adds these changes and \u200ban optimizer regression test to cover them if you'd like to see this issue fixed in future versions of Django.\nThanks Simon, I submitted a PR.\n\u200bPR\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/db/migrations/operations/fields.py\"]\nBug analysis: The AlterField.reduce method only handles RemoveField and RenameField operations but does not handle when the operation parameter is also an AlterField targeting the same field. When multiple AlterField operations target the same field, the optimizer cannot reduce them to a single operation because the reduce method falls back to the parent class behavior which only checks field references but performs no actual reduction.\nExploration notes: The AlterField class is defined at line 198 in /testbed/django/db/migrations/operations/fields.py. Its reduce method is at lines 249-267. The method has cases for RemoveField and RenameField but missing a case for AlterField operations. The is_same_field_operation method at line 25 checks if two operations target the same model and field name. The migration optimizer in /testbed/django/db/migrations/optimizer.py calls operation.reduce(other, app_label) and expects a list to be returned when operations can be combined.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Add missing case in AlterField.reduce to handle multiple AlterField operations on same field, reducing them to the last operation only\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/db/migrations/operations/fields.py\",\n    \"location\": \"AlterField.reduce, line 252\",\n    \"change\": \"INSERT after line 252:\\n        elif isinstance(operation, AlterField) and self.is_same_field_operation(\\n            operation\\n        ):\\n            return [operation]\",\n    \"rationale\": \"The AlterField.reduce method was missing a case to handle when the operation parameter is also an AlterField targeting the same field. When multiple AlterField operations target the same field, they should reduce to just the last operation since only the final field state matters. This follows the same pattern as the existing RemoveField case.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py\nindex cd3aab43ad..4f3d4c7fcc 100644\n--- a/django/db/migrations/operations/fields.py\n+++ b/django/db/migrations/operations/fields.py\n@@ -251,6 +251,10 @@ class AlterField(FieldOperation):\n             operation\n         ):\n             return [operation]\n+        elif isinstance(operation, AlterField) and self.is_same_field_operation(\n+            operation\n+        ):\n+            return [operation]\n         elif (\n             isinstance(operation, RenameField)\n             and self.is_same_field_operation(operation)\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll review the patch by examining the modified file.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Ww8p4tMzA55REd5C4FMvtZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/db/migrations/operations/fields.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Ww8p4tMzA55REd5C4FMvtZ",
+          "content": "[exit_code=0]\nfrom django.db.migrations.utils import field_references\nfrom django.db.models import NOT_PROVIDED\nfrom django.utils.functional import cached_property\n\nfrom .base import Operation\n\n\nclass FieldOperation(Operation):\n    def __init__(self, model_name, name, field=None):\n        self.model_name = model_name\n        self.name = name\n        self.field = field\n\n    @cached_property\n    def model_name_lower(self):\n        return self.model_name.lower()\n\n    @cached_property\n    def name_lower(self):\n        return self.name.lower()\n\n    def is_same_model_operation(self, operation):\n        return self.model_name_lower == operation.model_name_lower\n\n    def is_same_field_operation(self, operation):\n        return (\n            self.is_same_model_operation(operation)\n            and self.name_lower == operation.name_lower\n        )\n\n    def references_model(self, name, app_label):\n        name_lower = name.lower()\n        if name_lower == self.model_name_lower:\n            return True\n        if self.field:\n            return bool(\n                field_references(\n                    (app_label, self.model_name_lower),\n                    self.field,\n                    (app_label, name_lower),\n                )\n            )\n        return False\n\n    def references_field(self, model_name, name, app_label):\n        model_name_lower = model_name.lower()\n        # Check if this operation locally references the field.\n        if model_name_lower == self.model_name_lower:\n            if name == self.name:\n                return True\n            elif (\n                self.field\n                and hasattr(self.field, \"from_fields\")\n                and name in self.field.from_fields\n            ):\n                return True\n        # Check if this operation remotely references the field.\n        if self.field is None:\n            return False\n        return bool(\n            field_references(\n                (app_label, self.model_name_lower),\n                self.field,\n                (app_label, model_name_lower),\n                name,\n            )\n        )\n\n    def reduce(self, operation, app_label):\n        return super().reduce(operation, app_label) or not operation.references_field(\n            self.model_name, self.name, app_label\n        )\n\n\nclass AddField(FieldOperation):\n    \"\"\"Add a field to a model.\"\"\"\n\n    def __init__(self, model_name, name, field, preserve_default=True):\n        self.preserve_default = preserve_default\n        super().__init__(model_name, name, field)\n\n    def deconstruct(self):\n        kwargs = {\n            \"model_name\": self.model_name,\n            \"name\": self.name,\n            \"field\": self.field,\n        }\n        if self.preserve_default is not True:\n            kwargs[\"preserve_default\"] = self.preserve_default\n        return (self.__class__.__name__, [], kwargs)\n\n    def state_forwards(self, app_label, state):\n        state.add_field(\n            app_label,\n            self.model_name_lower,\n            self.name,\n            self.field,\n            self.preserve_default,\n        )\n\n    def database_forwards(self, app_label, schema_editor, from_state, to_state):\n        to_model = to_state.apps.get_model(app_label, self.model_name)\n        if self.allow_migrate_model(schema_editor.connection.alias, to_model):\n            from_model = from_state.apps.get_model(app_label, self.model_name)\n            field = to_model._meta.get_field(self.name)\n            if not self.preserve_default:\n                field.default = self.field.default\n            schema_editor.add_field(\n                from_model,\n                field,\n            )\n            if not self.preserve_default:\n                field.default = NOT_PROVIDED\n\n    def database_backwards(self, app_label, schema_editor, from_state, to_state):\n        from_model = from_state.apps.get_model(app_label, self.model_name)\n        if self.allow_migrate_model(schema_editor.connection.alias, from_model):\n            schema_editor.remove_field(\n                from_model, from_model._meta.get_field(self.name)\n            )\n\n    def describe(self):\n        return \"Add field %s to %s\" % (self.name, self.model_name)\n\n    @property\n    def migration_name_fragment(self):\n        return \"%s_%s\" % (self.model_name_lower, self.name_lower)\n\n    def reduce(self, operation, app_label):\n        if isinstance(operation, FieldOperation) and self.is_same_field_operation(\n            operation\n        ):\n            if isinstance(operation, AlterField):\n                return [\n                    AddField(\n                        model_name=self.model_name,\n                        name=operation.name,\n                        field=operation.field,\n                    ),\n                ]\n            elif isinstance(operation, RemoveField):\n                return []\n            elif isinstance(operation, RenameField):\n                return [\n                    AddField(\n                        model_name=self.model_name,\n                     \n...[truncated]...\nold_name),\n                to_model._meta.get_field(self.new_name),\n            )\n\n    def database_backwards(self, app_label, schema_editor, from_state, to_state):\n        to_model = to_state.apps.get_model(app_label, self.model_name)\n        if self.allow_migrate_model(schema_editor.connection.alias, to_model):\n            from_model = from_state.apps.get_model(app_label, self.model_name)\n            schema_editor.alter_field(\n                from_model,\n                from_model._meta.get_field(self.new_name),\n                to_model._meta.get_field(self.old_name),\n            )\n\n    def describe(self):\n        return \"Rename field %s on %s to %s\" % (\n            self.old_name,\n            self.model_name,\n            self.new_name,\n        )\n\n    @property\n    def migration_name_fragment(self):\n        return \"rename_%s_%s_%s\" % (\n            self.old_name_lower,\n            self.model_name_lower,\n            self.new_name_lower,\n        )\n\n    def references_field(self, model_name, name, app_label):\n        return self.references_model(model_name, app_label) and (\n            name.lower() == self.old_name_lower or name.lower() == self.new_name_lower\n        )\n\n    def reduce(self, operation, app_label):\n        if (\n            isinstance(operation, RenameField)\n            and self.is_same_model_operation(operation)\n            and self.new_name_lower == operation.old_name_lower\n        ):\n            return [\n                RenameField(\n                    self.model_name,\n                    self.old_name,\n                    operation.new_name,\n                ),\n            ]\n        # Skip `FieldOperation.reduce` as we want to run `references_field`\n        # against self.old_name and self.new_name.\n        return super(FieldOperation, self).reduce(operation, app_label) or not (\n            operation.references_field(self.model_name, self.old_name, app_label)\n            or operation.references_field(self.model_name, self.new_name, app_label)\n        )"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01K1Ajo6thadPp2Xg9L8g4v3",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"class AlterField\\|def reduce\" /testbed/django/db/migrations/operations/fields.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01K1Ajo6thadPp2Xg9L8g4v3",
+          "content": "[exit_code=0]\n69:    def reduce(self, operation, app_label):\n129:    def reduce(self, operation, app_label):\n187:    def reduce(self, operation, app_label):\n198:class AlterField(FieldOperation):\n249:    def reduce(self, operation, app_label):\n343:    def reduce(self, operation, app_label):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01FVnDMMr22hhtvnqt6EtinU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '240,285n' /testbed/django/db/migrations/operations/fields.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FVnDMMr22hhtvnqt6EtinU",
+          "content": "[exit_code=0]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01WjpDpmeFqKVWpzZ59DPvAR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '245,285p' /testbed/django/db/migrations/operations/fields.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WjpDpmeFqKVWpzZ59DPvAR",
+          "content": "[exit_code=0]\n@property\n    def migration_name_fragment(self):\n        return \"alter_%s_%s\" % (self.model_name_lower, self.name_lower)\n\n    def reduce(self, operation, app_label):\n        if isinstance(operation, RemoveField) and self.is_same_field_operation(\n            operation\n        ):\n            return [operation]\n        elif isinstance(operation, AlterField) and self.is_same_field_operation(\n            operation\n        ):\n            return [operation]\n        elif (\n            isinstance(operation, RenameField)\n            and self.is_same_field_operation(operation)\n            and self.field.db_column is None\n        ):\n            return [\n                operation,\n                AlterField(\n                    model_name=self.model_name,\n                    name=operation.new_name,\n                    field=self.field,\n                ),\n            ]\n        return super().reduce(operation, app_label)\n\n\nclass RenameField(FieldOperation):\n    \"\"\"Rename a field on the model. Might affect db_column too.\"\"\"\n\n    def __init__(self, model_name, old_name, new_name):\n        self.old_name = old_name\n        self.new_name = new_name\n        super().__init__(model_name, old_name)\n\n    @cached_property\n    def old_name_lower(self):\n        return self.old_name.lower()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe patch adds a new `elif` branch in `AlterField.reduce` that handles the case where `operation` is also an `AlterField` targeting the same field. When this is the case, it returns `[operation]`, meaning the later `AlterField` replaces the earlier one.\n\nLet me check the fix:\n\n1. **Correctness**: The fix adds:\n```python\nelif isinstance(operation, AlterField) and self.is_same_field_operation(\n    operation\n):\n    return [operation]\n```\nThis correctly handles the case where two `AlterField` operations target the same field \u2014 the second (later) one should replace the first (earlier) one.\n\n2. **Completeness**: The fix appears complete for the problem described. When `self` is an `AlterField` and `operation` is also an `AlterField` targeting the same field, returning `[operation]` keeps only the most recent one.\n\n3. **Alignment**: The solution proposal says to insert this code after line 252, and indeed the patch inserts it after the existing `RemoveField` case and before the `RenameField` case. This matches the proposal exactly.\n\n4. **Safety**: The change only adds a new `elif` branch, so it can't break existing behavior. The existing `RemoveField` and `RenameField` cases remain unchanged.\n\nThe fix is minimal and correct. When two AlterField operations target the same model/field, they reduce to just the later operation (which has the final field state), which is the correct behavior.\n</think>\n\nThe patch looks correct. Let me verify it matches what was proposed:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QDSzKkRt248EzWKxJqhX6Z",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '249,275p' /testbed/django/db/migrations/operations/fields.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QDSzKkRt248EzWKxJqhX6Z",
+          "content": "[exit_code=0]\ndef reduce(self, operation, app_label):\n        if isinstance(operation, RemoveField) and self.is_same_field_operation(\n            operation\n        ):\n            return [operation]\n        elif isinstance(operation, AlterField) and self.is_same_field_operation(\n            operation\n        ):\n            return [operation]\n        elif (\n            isinstance(operation, RenameField)\n            and self.is_same_field_operation(operation)\n            and self.field.db_column is None\n        ):\n            return [\n                operation,\n                AlterField(\n                    model_name=self.model_name,\n                    name=operation.new_name,\n                    field=self.field,\n                ),\n            ]\n        return super().reduce(operation, app_label)\n\n\nclass RenameField(FieldOperation):\n    \"\"\"Rename a field on the model. Might affect db_column too.\"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The patch is clear and well-formed. Here's my evaluation:\n\n**Correctness**: The fix adds the missing case in `AlterField.reduce` to handle when `operation` is also an `AlterField` targeting the same model/field. Returning `[operation]` keeps only the later operation, which correctly represents the final field state. This directly addresses the root cause.\n\n**Completeness**: The fix covers all paths where two `AlterField` operations target the same field. No edge cases are missed \u2014 `is_same_field_operation` checks both model name (case-insensitive) and field name (case-insensitive). \n\n**Alignment**: The implementation exactly matches the proposed change in the solution proposal \u2014 inserting the `elif` branch for `AlterField` after the existing `RemoveField` case.\n\n**Safety**: The patch only adds a new `elif` branch. Existing behavior for `RemoveField` and `RenameField` cases is preserved. The existing `super().reduce()` fallback is also preserved.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PA \u2014 missing case addition in reduce method\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T09:06:56Z"
+}

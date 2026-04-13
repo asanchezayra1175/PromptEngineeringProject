@@ -1,0 +1,274 @@
+{
+  "instance_id": "django__django-12915",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/contrib/staticfiles/handlers.py b/django/contrib/staticfiles/handlers.py\nindex 711d8864ad..5ced932b32 100644\n--- a/django/contrib/staticfiles/handlers.py\n+++ b/django/contrib/staticfiles/handlers.py\n@@ -8,6 +8,7 @@ from django.core.handlers.asgi import ASGIHandler\n from django.core.handlers.exception import response_for_exception\n from django.core.handlers.wsgi import WSGIHandler, get_path_info\n from django.http import Http404\n+from asgiref.sync import sync_to_async\n \n \n class StaticFilesHandlerMixin:\n@@ -52,6 +53,11 @@ class StaticFilesHandlerMixin:\n         except Http404 as e:\n             return response_for_exception(request, e)\n \n+    async def get_response_async(self, request):\n+        try:\n+            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n+        except Http404 as e:\n+            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n \n class StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n     \"\"\"\n",
+  "implementation_notes": "Added missing get_response_async method to StaticFilesHandlerMixin class. The method wraps the synchronous serve() and response_for_exception() calls using sync_to_async with thread_sensitive=True to properly handle ASGI requests in ASGIStaticFilesHandler.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-12915</instance_id>\n\n<problem_statement>\nAdd get_response_async for ASGIStaticFilesHandler\nDescription\n\t\nIt looks like the StaticFilesHandlerMixin is missing the the async response function.\nWithout this, when trying to use the ASGIStaticFilesHandler, this is the traceback:\nException inside application: 'NoneType' object is not callable\nTraceback (most recent call last):\n File \".../lib/python3.7/site-packages/daphne/cli.py\", line 30, in asgi\n\tawait self.app(scope, receive, send)\n File \".../src/django/django/contrib/staticfiles/handlers.py\", line 86, in __call__\n\treturn await super().__call__(scope, receive, send)\n File \".../src/django/django/core/handlers/asgi.py\", line 161, in __call__\n\tresponse = await self.get_response_async(request)\n File \".../src/django/django/core/handlers/base.py\", line 148, in get_response_async\n\tresponse = await self._middleware_chain(request)\nTypeError: 'NoneType' object is not callable\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The StaticFilesHandlerMixin class has a get_response method for synchronous request handling but lacks the corresponding get_response_async method for asynchronous request handling. When ASGIStaticFilesHandler (which inherits from this mixin) processes ASGI requests, the system calls get_response_async which returns None, causing a TypeError when the ASGI handler tries to await the None value.\nExploration notes: The ASGIStaticFilesHandler class inherits from both StaticFilesHandlerMixin and ASGIHandler. The existing get_response method in StaticFilesHandlerMixin calls self.serve(request) and handles Http404 exceptions with response_for_exception. The serve method calls the staticfiles.views.serve function. The ASGI request processing path in django/core/handlers/asgi.py calls get_response_async at line 161, and the base implementation is in django/core/handlers/base.py.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: Add missing get_response_async method to StaticFilesHandlerMixin that mirrors the existing get_response method but wraps synchronous calls with sync_to_async for ASGI compatibility\n\nFiles to modify: [\n  \"/testbed/django/contrib/staticfiles/handlers.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/contrib/staticfiles/handlers.py\n  Location: import statements, line 10\n  Change  : INSERT after line 10:\nfrom asgiref.sync import sync_to_async\n  Rationale: Need to import sync_to_async to wrap the synchronous serve method for async use\n\nChange 2:\n  File    : /testbed/django/contrib/staticfiles/handlers.py\n  Location: StaticFilesHandlerMixin.get_response, line 53\n  Change  : INSERT after line 53:\n\n    async def get_response_async(self, request):\n        try:\n            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n        except Http404 as e:\n            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n  Rationale: Add missing async version of get_response method. Uses sync_to_async to wrap the synchronous serve method and response_for_exception function, matching the pattern used in Django's core ASGI handlers\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal by modifying the staticfiles handlers file. Let me start by reading the file to understand its current structure.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018jYxfeUJVTDZb28hMcdgJK",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/contrib/staticfiles/handlers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018jYxfeUJVTDZb28hMcdgJK",
+          "content": "[exit_code=0]\nfrom urllib.parse import urlparse\nfrom urllib.request import url2pathname\n\nfrom django.conf import settings\nfrom django.contrib.staticfiles import utils\nfrom django.contrib.staticfiles.views import serve\nfrom django.core.handlers.asgi import ASGIHandler\nfrom django.core.handlers.exception import response_for_exception\nfrom django.core.handlers.wsgi import WSGIHandler, get_path_info\nfrom django.http import Http404\n\n\nclass StaticFilesHandlerMixin:\n    \"\"\"\n    Common methods used by WSGI and ASGI handlers.\n    \"\"\"\n    # May be used to differentiate between handler types (e.g. in a\n    # request_finished signal)\n    handles_files = True\n\n    def load_middleware(self):\n        # Middleware are already loaded for self.application; no need to reload\n        # them for self.\n        pass\n\n    def get_base_url(self):\n        utils.check_settings()\n        return settings.STATIC_URL\n\n    def _should_handle(self, path):\n        \"\"\"\n        Check if the path should be handled. Ignore the path if:\n        * the host is provided as part of the base_url\n        * the request's path isn't under the media path (or equal)\n        \"\"\"\n        return path.startswith(self.base_url[2]) and not self.base_url[1]\n\n    def file_path(self, url):\n        \"\"\"\n        Return the relative path to the media file on disk for the given URL.\n        \"\"\"\n        relative_url = url[len(self.base_url[2]):]\n        return url2pathname(relative_url)\n\n    def serve(self, request):\n        \"\"\"Serve the request path.\"\"\"\n        return serve(request, self.file_path(request.path), insecure=True)\n\n    def get_response(self, request):\n        try:\n            return self.serve(request)\n        except Http404 as e:\n            return response_for_exception(request, e)\n\n\nclass StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n    \"\"\"\n    WSGI middleware that intercepts calls to the static files directory, as\n    defined by the STATIC_URL setting, and serves those files.\n    \"\"\"\n    def __init__(self, application):\n        self.application = application\n        self.base_url = urlparse(self.get_base_url())\n        super().__init__()\n\n    def __call__(self, environ, start_response):\n        if not self._should_handle(get_path_info(environ)):\n            return self.application(environ, start_response)\n        return super().__call__(environ, start_response)\n\n\nclass ASGIStaticFilesHandler(StaticFilesHandlerMixin, ASGIHandler):\n    \"\"\"\n    ASGI application which wraps another and intercepts requests for static\n    files, passing them off to Django's static file serving.\n    \"\"\"\n    def __init__(self, application):\n        self.application = application\n        self.base_url = urlparse(self.get_base_url())\n\n    async def __call__(self, scope, receive, send):\n        # Only even look at HTTP requests\n        if scope['type'] == 'http' and self._should_handle(scope['path']):\n            # Serve static content\n            # (the one thing super() doesn't do is __call__, apparently)\n            return await super().__call__(scope, receive, send)\n        # Hand off to the main app\n        return await self.application(scope, receive, send)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I'll apply the changes. First, I need to add the import statement for `sync_to_async` at line 10, and then add the `get_response_async` method after the `get_response` method.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011msy25ri4jtsWGiVxjjSqR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/contrib/staticfiles/handlers.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line with \"from django.http import Http404\" and add the import after it\nimport_line_idx = None\nfor i, line in enumerate(lines):\n    if 'from django.http import Http404' in line:\n        import_line_idx = i\n        break\n\nif import_line_idx is not None:\n    # Insert the new import after line 10 (the Http404 import line)\n    lines.insert(import_line_idx + 1, 'from asgiref.sync import sync_to_async\\n')\n\n# Find the get_response method and add get_response_async after it\nget_response_idx = None\nfor i, line in enumerate(lines):\n    if 'def get_response(self, request):' in line:\n        get_response_idx = i\n        break\n\nif get_response_idx is not None:\n    # Find the end of the get_response method (next def or class at same indentation)\n    end_idx = get_response_idx + 1\n    for i in range(get_response_idx + 1, len(lines)):\n        # Check if we've hit another method or end of class\n        if lines[i].strip() and not lines[i].startswith(' ' * 4):\n            end_idx = i\n            break\n        if (lines[i].startswith('    def ') or lines[i].startswith('class ')) and i > get_response_idx + 1:\n            end_idx = i\n            break\n    \n    # Find where get_response method ends (look for the next line that's not indented more)\n    for i in range(get_response_idx + 1, len(lines)):\n        current_line = lines[i]\n        if current_line.strip() == '':\n            continue\n        if current_line.startswith('    def ') or current_line.startswith('class '):\n            end_idx = i\n            break\n    \n    # Insert the new async method\n    async_method = '''\n    async def get_response_async(self, request):\n        try:\n            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n        except Http404 as e:\n            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n\n'''\n    lines.insert(end_idx, async_method)\n\n# Write the file back\nwith open('django/contrib/staticfiles/handlers.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"File modified successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011msy25ri4jtsWGiVxjjSqR",
+          "content": "[exit_code=0]\nFile modified successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the changes by reading the modified file:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RgdjUSSs9Gxkwh7UvK45Rb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/contrib/staticfiles/handlers.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RgdjUSSs9Gxkwh7UvK45Rb",
+          "content": "[exit_code=0]\nfrom urllib.parse import urlparse\nfrom urllib.request import url2pathname\n\nfrom django.conf import settings\nfrom django.contrib.staticfiles import utils\nfrom django.contrib.staticfiles.views import serve\nfrom django.core.handlers.asgi import ASGIHandler\nfrom django.core.handlers.exception import response_for_exception\nfrom django.core.handlers.wsgi import WSGIHandler, get_path_info\nfrom django.http import Http404\nfrom asgiref.sync import sync_to_async\n\n\nclass StaticFilesHandlerMixin:\n    \"\"\"\n    Common methods used by WSGI and ASGI handlers.\n    \"\"\"\n    # May be used to differentiate between handler types (e.g. in a\n    # request_finished signal)\n    handles_files = True\n\n    def load_middleware(self):\n        # Middleware are already loaded for self.application; no need to reload\n        # them for self.\n        pass\n\n    def get_base_url(self):\n        utils.check_settings()\n        return settings.STATIC_URL\n\n    def _should_handle(self, path):\n        \"\"\"\n        Check if the path should be handled. Ignore the path if:\n        * the host is provided as part of the base_url\n        * the request's path isn't under the media path (or equal)\n        \"\"\"\n        return path.startswith(self.base_url[2]) and not self.base_url[1]\n\n    def file_path(self, url):\n        \"\"\"\n        Return the relative path to the media file on disk for the given URL.\n        \"\"\"\n        relative_url = url[len(self.base_url[2]):]\n        return url2pathname(relative_url)\n\n    def serve(self, request):\n        \"\"\"Serve the request path.\"\"\"\n        return serve(request, self.file_path(request.path), insecure=True)\n\n    def get_response(self, request):\n        try:\n            return self.serve(request)\n        except Http404 as e:\n            return response_for_exception(request, e)\n\n\n\n    async def get_response_async(self, request):\n        try:\n            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n        except Http404 as e:\n            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n\nclass StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n    \"\"\"\n    WSGI middleware that intercepts calls to the static files directory, as\n    defined by the STATIC_URL setting, and serves those files.\n    \"\"\"\n    def __init__(self, application):\n        self.application = application\n        self.base_url = urlparse(self.get_base_url())\n        super().__init__()\n\n    def __call__(self, environ, start_response):\n        if not self._should_handle(get_path_info(environ)):\n            return self.application(environ, start_response)\n        return super().__call__(environ, start_response)\n\n\nclass ASGIStaticFilesHandler(StaticFilesHandlerMixin, ASGIHandler):\n    \"\"\"\n    ASGI application which wraps another and intercepts requests for static\n    files, passing them off to Django's static file serving.\n    \"\"\"\n    def __init__(self, application):\n        self.application = application\n        self.base_url = urlparse(self.get_base_url())\n\n    async def __call__(self, scope, receive, send):\n        # Only even look at HTTP requests\n        if scope['type'] == 'http' and self._should_handle(scope['path']):\n            # Serve static content\n            # (the one thing super() doesn't do is __call__, apparently)\n            return await super().__call__(scope, receive, send)\n        # Hand off to the main app\n        return await self.application(scope, receive, send)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes look good. Let me verify with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01E4CXtayM1qtEmw31vJFBiC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01E4CXtayM1qtEmw31vJFBiC",
+          "content": "[exit_code=0]\ndiff --git a/django/contrib/staticfiles/handlers.py b/django/contrib/staticfiles/handlers.py\nindex 711d8864ad..a6bd981111 100644\n--- a/django/contrib/staticfiles/handlers.py\n+++ b/django/contrib/staticfiles/handlers.py\n@@ -8,6 +8,7 @@ from django.core.handlers.asgi import ASGIHandler\n from django.core.handlers.exception import response_for_exception\n from django.core.handlers.wsgi import WSGIHandler, get_path_info\n from django.http import Http404\n+from asgiref.sync import sync_to_async\n \n \n class StaticFilesHandlerMixin:\n@@ -53,6 +54,13 @@ class StaticFilesHandlerMixin:\n             return response_for_exception(request, e)\n \n \n+\n+    async def get_response_async(self, request):\n+        try:\n+            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n+        except Http404 as e:\n+            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n+\n class StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n     \"\"\"\n     WSGI middleware that intercepts calls to the static files directory, as"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows the changes are correctly applied. Let me clean up the extra blank lines to match the code style better:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01WeVsBKZn7TbHFfxJbjunFo",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('django/contrib/staticfiles/handlers.py', 'r') as f:\n    content = f.read()\n\n# Replace the double blank line before async def with single blank line\ncontent = content.replace('        except Http404 as e:\\n            return response_for_exception(request, e)\\n\\n\\n\\n    async def', \n                          '        except Http404 as e:\\n            return response_for_exception(request, e)\\n\\n    async def')\n\n# Write back\nwith open('django/contrib/staticfiles/handlers.py', 'w') as f:\n    f.write(content)\n\nprint(\"Cleaned up formatting\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WeVsBKZn7TbHFfxJbjunFo",
+          "content": "[exit_code=0]\nCleaned up formatting"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the final version:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01HZKGnF9wRbV6QKDLxo9kkT",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01HZKGnF9wRbV6QKDLxo9kkT",
+          "content": "[exit_code=0]\ndiff --git a/django/contrib/staticfiles/handlers.py b/django/contrib/staticfiles/handlers.py\nindex 711d8864ad..5ced932b32 100644\n--- a/django/contrib/staticfiles/handlers.py\n+++ b/django/contrib/staticfiles/handlers.py\n@@ -8,6 +8,7 @@ from django.core.handlers.asgi import ASGIHandler\n from django.core.handlers.exception import response_for_exception\n from django.core.handlers.wsgi import WSGIHandler, get_path_info\n from django.http import Http404\n+from asgiref.sync import sync_to_async\n \n \n class StaticFilesHandlerMixin:\n@@ -52,6 +53,11 @@ class StaticFilesHandlerMixin:\n         except Http404 as e:\n             return response_for_exception(request, e)\n \n+    async def get_response_async(self, request):\n+        try:\n+            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n+        except Http404 as e:\n+            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n \n class StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n     \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes are now clean and properly formatted. Let me verify the final file looks correct:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BJfxyHxufRpgvkY9pwx7dx",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -70 django/contrib/staticfiles/handlers.py | tail -25"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BJfxyHxufRpgvkY9pwx7dx",
+          "content": "[exit_code=0]\ndef serve(self, request):\n        \"\"\"Serve the request path.\"\"\"\n        return serve(request, self.file_path(request.path), insecure=True)\n\n    def get_response(self, request):\n        try:\n            return self.serve(request)\n        except Http404 as e:\n            return response_for_exception(request, e)\n\n    async def get_response_async(self, request):\n        try:\n            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n        except Http404 as e:\n            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n\nclass StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n    \"\"\"\n    WSGI middleware that intercepts calls to the static files directory, as\n    defined by the STATIC_URL setting, and serves those files.\n    \"\"\"\n    def __init__(self, application):\n        self.application = application\n        self.base_url = urlparse(self.get_base_url())\n        super().__init__()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The implementation is complete and looks correct. Let me run git diff one final time to confirm:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XpBtohYbkYd1bK2pRWqmWw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XpBtohYbkYd1bK2pRWqmWw",
+          "content": "[exit_code=0]\ndiff --git a/django/contrib/staticfiles/handlers.py b/django/contrib/staticfiles/handlers.py\nindex 711d8864ad..5ced932b32 100644\n--- a/django/contrib/staticfiles/handlers.py\n+++ b/django/contrib/staticfiles/handlers.py\n@@ -8,6 +8,7 @@ from django.core.handlers.asgi import ASGIHandler\n from django.core.handlers.exception import response_for_exception\n from django.core.handlers.wsgi import WSGIHandler, get_path_info\n from django.http import Http404\n+from asgiref.sync import sync_to_async\n \n \n class StaticFilesHandlerMixin:\n@@ -52,6 +53,11 @@ class StaticFilesHandlerMixin:\n         except Http404 as e:\n             return response_for_exception(request, e)\n \n+    async def get_response_async(self, request):\n+        try:\n+            return await sync_to_async(self.serve, thread_sensitive=True)(request)\n+        except Http404 as e:\n+            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\n \n class StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\n     \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The implementation is complete and correct. The patch:\n\n1. Adds the required `from asgiref.sync import sync_to_async` import\n2. Adds the missing `get_response_async` method to the `StaticFilesHandlerMixin` class that mirrors the synchronous `get_response` method but uses `sync_to_async` to wrap the synchronous `serve` and `response_for_exception` calls for ASGI compatibility\n\nThis fixes the issue where `ASGIStaticFilesHandler` was missing the async response handler that ASGI requests require.\n\n```json\n{\n  \"patch\": \"diff --git a/django/contrib/staticfiles/handlers.py b/django/contrib/staticfiles/handlers.py\\nindex 711d8864ad..5ced932b32 100644\\n--- a/django/contrib/staticfiles/handlers.py\\n+++ b/django/contrib/staticfiles/handlers.py\\n@@ -8,6 +8,7 @@ from django.core.handlers.asgi import ASGIHandler\\n from django.core.handlers.exception import response_for_exception\\n from django.core.handlers.wsgi import WSGIHandler, get_path_info\\n from django.http import Http404\\n+from asgiref.sync import sync_to_async\\n \\n \\n class StaticFilesHandlerMixin:\\n@@ -52,6 +53,11 @@ class StaticFilesHandlerMixin:\\n         except Http404 as e:\\n             return response_for_exception(request, e)\\n \\n+    async def get_response_async(self, request):\\n+        try:\\n+            return await sync_to_async(self.serve, thread_sensitive=True)(request)\\n+        except Http404 as e:\\n+            return await sync_to_async(response_for_exception, thread_sensitive=True)(request, e)\\n \\n class StaticFilesHandler(StaticFilesHandlerMixin, WSGIHandler):\\n     \\\"\\\"\\\"\\n\",\n  \"implementation_notes\": \"Added missing get_response_async method to StaticFilesHandlerMixin class. The method wraps the synchronous serve() and response_for_exception() calls using sync_to_async with thread_sensitive=True to properly handle ASGI requests in ASGIStaticFilesHandler.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T08:43:03Z"
+}

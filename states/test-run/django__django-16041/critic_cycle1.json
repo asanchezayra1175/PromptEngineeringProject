@@ -1,0 +1,90 @@
+{
+  "instance_id": "django__django-16041",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PH \u2014 Wrong argument (merge kwargs into single dict to prevent duplicate keyword argument)",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-16041</instance_id>\n\n<problem_statement>\nRendering empty_form crashes when empty_permitted is passed to form_kwargs\nDescription\n\t\nIssue\nWhen explicitly setting form_kwargs = {'empty_permitted':True} or form_kwargs = {'empty_permitted':False} , a KeyError occurs when rendering a template that uses a formset's empty_form.\nExpected Behavior\nempty_permitted is ignored for formset.empty_form since empty_permitted is irrelevant for empty_form, as empty_form is not meant to be used to pass data and therefore does not need to be validated.\nSteps to Reproduce\n# views.py\nfrom django.shortcuts import render\nfrom .models import MyModel\ndef test_view(request):\n\tcontext = {}\n\tff = modelformset_factory(MyModel, fields = ['a_field'])\n\tcontext['formset'] = ff(\n\t\tqueryset = MyModel.objects.none(),\n\t\tform_kwargs = {'empty_permitted':True} # or form_kwargs = {'empty_permitted':False}\n\t)\n\treturn render(request, 'my_app/my_model_formset.html', context)\n# urls.py\nfrom django.urls import path, include\nfrom .views import test_view\nurlpatterns = [\n\tpath('test', test_view)\n]\n# my_model_formset.html\n{% extends \"my_app/base.html\" %}\n{% block content %}\n<form id=\"my-form\" method=\"post\">\n {% csrf_token %}\n {{ formset }}\n <input type=\"submit\" value=\"Save\">\n</form>\n{{ formset.empty_form }}\n{% endblock %}\n\n</problem_statement>\n\n<hints>\nThanks for the report. It should be enough to change form_kwargs for empty_form, e.g. django/forms/formsets.py diff --git a/django/forms/formsets.py b/django/forms/formsets.py index 57676428ff..b73d1d742e 100644 a b class BaseFormSet(RenderableFormMixin): 257257 258258 @property 259259 def empty_form(self): 260 form = self.form( 261 auto_id=self.auto_id, 262 prefix=self.add_prefix(\"__prefix__\"), 263 empty_permitted=True, 264 use_required_attribute=False, 260 form_kwargs = { 265261 **self.get_form_kwargs(None), 266 renderer=self.renderer, 267 ) 262 \"auto_id\": self.auto_id, 263 \"prefix\": self.add_prefix(\"__prefix__\"), 264 \"use_required_attribute\": False, 265 \"empty_permitted\": True, 266 \"renderer\": self.renderer, 267 } 268 form = self.form(**form_kwargs) 268269 self.add_fields(form, None) 269270 return form 270271 Would you like to prepare a patch? (a regression test is required)\nThe KeyError is confusing here. It's raised because we're in the context of rendering the template: >>> self.form(empty_permitted=True, **self.get_form_kwargs(None)) Traceback (most recent call last): File \"/Users/carlton/Projects/Django/django/django/template/base.py\", line 880, in _resolve_lookup current = current[bit] File \"/Users/carlton/Projects/Django/django/django/forms/formsets.py\", line 118, in __getitem__ return self.forms[index] TypeError: list indices must be integers or slices, not str During handling of the above exception, another exception occurred: Traceback (most recent call last): File \"<console>\", line 1, in <module> KeyError: 'empty_permitted' The real exception is better seen using the formset directly: >>> from ticket_33995.models import MyModel >>> from django.forms import modelformset_factory >>> ff = modelformset_factory(MyModel, fields=['name']) >>> formset = ff(queryset=MyModel.objects.none(), form_kwargs={'empty_permitted': True}) >>> formset.empty_form > /Users/carlton/Projects/Django/django/django/forms/formsets.py(262)empty_form() -> form_kwargs = self.get_form_kwargs(None) (Pdb) c Traceback (most recent call last): File \"<console>\", line 1, in <module> File \"/Users/carlton/Projects/Django/django/django/forms/formsets.py\", line 265, in empty_form form = self.form( TypeError: django.forms.widgets.MyModelForm() got multiple values for keyword argument 'empty_permitted' That's expected: >>> class Example: ... def __init__(self, a_kwarg=None): ... pass ... >>> Example(a_kwarg=True) <__main__.Example object at 0x102352950> >>> Example(a_kwarg=True, a_kwarg=False) File \"<stdin>\", line 1 SyntaxError: keyword argument repeated: a_kwarg >>> {\"a\":1, **{\"a\":2}} {'a': 2} >>> Example(a_kwarg=True, **{\"a_kwarg\": False}) Traceback (most recent call last): File \"<stdin>\", line 1, in <module> TypeError: __main__.Example() got multiple values for keyword argument 'a_kwarg' Resolving the kwargs before the constructor call, as per Mariusz' suggestion would resolve. #21501 was on a similar topic.\n</hints>\n\n<localization_report>\nRelevant files: [\"/testbed/django/forms/formsets.py\"]\nBug analysis: The empty_form property passes both an explicit empty_permitted=True parameter and **self.get_form_kwargs(None) to the form constructor. When form_kwargs contains 'empty_permitted', this creates a TypeError due to multiple values for the same keyword argument.\nExploration notes: BaseFormSet.empty_form property at line 259. BaseFormSet.get_form_kwargs method at line 210 returns self.form_kwargs.copy(). The form_kwargs attribute is set in BaseFormSet.__init__ at line 95. The empty_form property unpacks get_form_kwargs(None) which includes user-provided form_kwargs that may contain empty_permitted.\n</localization_report>\n\n<solution_proposal>\nFix strategy: no pattern match: merge kwargs into single dict to prevent duplicate keyword argument error, ensuring empty_permitted=True always takes precedence for empty_form\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/forms/formsets.py\",\n    \"location\": \"BaseFormSet.empty_form, line 260\",\n    \"change\": \"REPLACE lines 260-267:\\n        form = self.form(\\n            auto_id=self.auto_id,\\n            prefix=self.add_prefix(\\\"__prefix__\\\"),\\n            empty_permitted=True,\\n            use_required_attribute=False,\\n            **self.get_form_kwargs(None),\\n            renderer=self.renderer,\\n        )\\nWITH:\\n        form_kwargs = {\\n            **self.get_form_kwargs(None),\\n            \\\"auto_id\\\": self.auto_id,\\n            \\\"prefix\\\": self.add_prefix(\\\"__prefix__\\\"),\\n            \\\"use_required_attribute\\\": False,\\n            \\\"empty_permitted\\\": True,\\n            \\\"renderer\\\": self.renderer,\\n        }\\n        form = self.form(**form_kwargs)\",\n    \"rationale\": \"The original code passes both explicit empty_permitted=True and **self.get_form_kwargs(None), causing TypeError when form_kwargs contains empty_permitted. The fix merges all kwargs into a single dict with empty_permitted=True taking precedence, as empty_form should always have empty_permitted=True regardless of user-provided form_kwargs.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/forms/formsets.py b/django/forms/formsets.py\nindex 57676428ff..b73d1d742e 100644\n--- a/django/forms/formsets.py\n+++ b/django/forms/formsets.py\n@@ -257,14 +257,15 @@ class BaseFormSet(RenderableFormMixin):\n \n     @property\n     def empty_form(self):\n-        form = self.form(\n-            auto_id=self.auto_id,\n-            prefix=self.add_prefix(\"__prefix__\"),\n-            empty_permitted=True,\n-            use_required_attribute=False,\n+        form_kwargs = {\n             **self.get_form_kwargs(None),\n-            renderer=self.renderer,\n-        )\n+            \"auto_id\": self.auto_id,\n+            \"prefix\": self.add_prefix(\"__prefix__\"),\n+            \"use_required_attribute\": False,\n+            \"empty_permitted\": True,\n+            \"renderer\": self.renderer,\n+        }\n+        form = self.form(**form_kwargs)\n         self.add_fields(form, None)\n         return form\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll analyze the patch by examining the modified file and understanding the bug.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_019fZo7nnFQn3Xgzh2p39Kce",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '250,285p' django/forms/formsets.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019fZo7nnFQn3Xgzh2p39Kce",
+          "content": "[exit_code=0]\n\"\"\"Return a list of all the initial forms in this formset.\"\"\"\n        return self.forms[: self.initial_form_count()]\n\n    @property\n    def extra_forms(self):\n        \"\"\"Return a list of all the extra forms in this formset.\"\"\"\n        return self.forms[self.initial_form_count() :]\n\n    @property\n    def empty_form(self):\n        form_kwargs = {\n            **self.get_form_kwargs(None),\n            \"auto_id\": self.auto_id,\n            \"prefix\": self.add_prefix(\"__prefix__\"),\n            \"use_required_attribute\": False,\n            \"empty_permitted\": True,\n            \"renderer\": self.renderer,\n        }\n        form = self.form(**form_kwargs)\n        self.add_fields(form, None)\n        return form\n\n    @property\n    def cleaned_data(self):\n        \"\"\"\n        Return a list of form.cleaned_data dicts for every form in self.forms.\n        \"\"\"\n        if not self.is_valid():\n            raise AttributeError(\n                \"'%s' object has no attribute 'cleaned_data'\" % self.__class__.__name__\n            )\n        return [form.cleaned_data for form in self.forms]\n\n    @property\n    def deleted_forms(self):\n        \"\"\"Return a list of forms that have been marked for deletion.\"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Uy4zaHEoKTvxeeNm77E4EC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '205,230p' django/forms/formsets.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Uy4zaHEoKTvxeeNm77E4EC",
+          "content": "[exit_code=0]\nreturn [\n            self._construct_form(i, **self.get_form_kwargs(i))\n            for i in range(self.total_form_count())\n        ]\n\n    def get_form_kwargs(self, index):\n        \"\"\"\n        Return additional keyword arguments for each individual formset form.\n\n        index will be None if the form being constructed is a new empty\n        form.\n        \"\"\"\n        return self.form_kwargs.copy()\n\n    def _construct_form(self, i, **kwargs):\n        \"\"\"Instantiate and return the i-th form instance in a formset.\"\"\"\n        defaults = {\n            \"auto_id\": self.auto_id,\n            \"prefix\": self.add_prefix(i),\n            \"error_class\": self.error_class,\n            # Don't render the HTML 'required' attribute as it may cause\n            # incorrect validation for extra, optional, and deleted\n            # forms in the formset.\n            \"use_required_attribute\": False,\n            \"renderer\": self.renderer,\n        }"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nNow I have a clear picture of the fix:\n\n1. **The bug**: When `form_kwargs = {'empty_permitted': True}` (or `False`) is passed to a formset, the `empty_form` property would call `self.form(empty_permitted=True, **self.get_form_kwargs(None), ...)`. Since `get_form_kwargs(None)` returns `self.form_kwargs.copy()` which includes `empty_permitted`, this causes a `TypeError: got multiple values for keyword argument 'empty_permitted'`.\n\n2. **The fix**: Build a single `form_kwargs` dict where `**self.get_form_kwargs(None)` is expanded first, then the explicit keys (`auto_id`, `prefix`, `use_required_attribute`, `empty_permitted`, `renderer`) override any user-provided values. This ensures:\n   - `empty_permitted=True` always takes precedence (as desired for `empty_form`)\n   - No duplicate keyword arguments error\n   - All other user-provided kwargs are still passed through\n\n3. **Correctness**: The fix correctly addresses the root cause by merging kwargs into a single dict before the constructor call, with `empty_permitted=True` always winning due to its position after the `**self.get_form_kwargs(None)` unpacking.\n\n4. **Completeness**: The fix covers all paths - whether `empty_permitted` is True, False, or absent from form_kwargs, the result will always have `empty_permitted=True` for `empty_form`.\n\n5. **Alignment**: Matches exactly what the hints suggest and what the Architect proposed.\n\n6. **Safety**: Only modifies the `empty_form` property. The fix is minimal and correct. The behavior for `empty_form` is unchanged when `empty_permitted` is not in `form_kwargs` (still `True`), and correctly overrides when it is present.\n\nThe patch exactly matches the hint's suggested fix and the solution proposal. It's correct, complete, aligned, and safe.\n</think>\n\nThe patch has been applied. Let me review it:\n\n**What the bug is**: The `empty_form` property called `self.form(empty_permitted=True, **self.get_form_kwargs(None), renderer=self.renderer)`. When `form_kwargs` contains `empty_permitted`, `get_form_kwargs(None)` returns that value, causing `TypeError: got multiple values for keyword argument 'empty_permitted'`.\n\n**What the patch does**: It builds a single merged `form_kwargs` dict, first unpacking `self.get_form_kwargs(None)` and then adding explicit keys afterward. This ensures:\n- `empty_permitted=True` always wins (positioned after the unpack, overriding any user-provided value)\n- No duplicate keyword argument error\n- All other user-provided form_kwargs pass through correctly\n\n**Correctness**: \u2705 Directly addresses the root cause \u2014 merging into a single dict prevents the duplicate kwarg error.\n\n**Completeness**: \u2705 Covers all cases: `empty_permitted` absent, True, or False in form_kwargs. The `empty_form` always gets `empty_permitted=True` as intended.\n\n**Alignment**: \u2705 Matches exactly what the hints suggest and the Architect's proposal.\n\n**Safety**: \u2705 Only modifies `empty_form` property. Behavior unchanged when `empty_permitted` not in `form_kwargs`. The overriding order is correct \u2014 framework-required values (`empty_permitted=True`) take precedence over user-provided form_kwargs.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PH \u2014 Wrong argument (merge kwargs into single dict to prevent duplicate keyword argument)\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 3,
+  "timestamp": "2026-04-13T08:25:38Z"
+}

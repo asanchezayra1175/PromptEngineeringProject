@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-14016",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py\nindex c2623f099f..b04219ea05 100644\n--- a/django/db/models/query_utils.py\n+++ b/django/db/models/query_utils.py\n@@ -46,10 +46,18 @@ class Q(tree.Node):\n \n         # If the other Q() is empty, ignore it and just use `self`.\n         if not other:\n-            return copy.deepcopy(self)\n+            obj = type(self)()\n+            obj.connector = self.connector\n+            obj.negated = self.negated\n+            obj.children = self.children[:]\n+            return obj\n         # Or if this Q is empty, ignore it and just use `other`.\n         elif not self:\n-            return copy.deepcopy(other)\n+            obj = type(other)()\n+            obj.connector = other.connector\n+            obj.negated = other.negated\n+            obj.children = other.children[:]\n+            return obj\n \n         obj = type(self)()\n         obj.connector = conn",
+  "implementation_notes": "Replaced copy.deepcopy() calls in Q._combine method with manual object construction that copies connector, negated, and children attributes. This avoids pickling non-pickleable objects like dict_keys while still creating proper shallow copies of the Q objects.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-14016</instance_id>\n\n<problem_statement>\n\"TypeError: cannot pickle\" when applying | operator to a Q object\nDescription\n\t \n\t\t(last modified by Daniel Izquierdo)\n\t \nUsing a reference to a non-pickleable type of object such as dict_keys in a Q object makes the | operator fail:\n>>> from django.db.models import Q\n>>> Q(x__in={}.keys())\n<Q: (AND: ('x__in', dict_keys([])))>\n>>> Q() | Q(x__in={}.keys())\nTraceback (most recent call last):\n...\nTypeError: cannot pickle 'dict_keys' object\nEven though this particular example could be solved by doing Q() | Q(x__in={}) it still feels like using .keys() should work.\nI can work on a patch if there's agreement that this should not crash.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The Q._combine method uses copy.deepcopy() to return copies of Q objects when one operand is empty. When the Q object contains non-pickleable objects like dict_keys, copy.deepcopy() fails with 'TypeError: cannot pickle' because deepcopy attempts to pickle the object contents during the copying process.\nExploration notes: The Q class is imported from django.db.models.query_utils. The _combine method is called by __or__ and __and__ operators. The problematic lines are 'return copy.deepcopy(self)' and 'return copy.deepcopy(other)' added in commit bb0b6e526340e638522e093765e534df4e4393d2. The commit added these lines: before: (no early returns for empty Q objects), after: 'if not other: return copy.deepcopy(self)' and 'elif not self: return copy.deepcopy(other)'. The Q class inherits from tree.Node which implements __deepcopy__ method that calls copy.deepcopy(self.children, memodict). Test methods test_combine_or_empty and test_combine_and_empty in queries/test_q.py exercise this functionality.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PB: Replace copy.deepcopy() calls with manual object construction that works universally without requiring pickling, fixing the regression for non-pickleable Q object contents.\n\nFiles to modify: [\n  \"/testbed/django/db/models/query_utils.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/query_utils.py\n  Location: Q._combine, line 49\n  Change  : REPLACE line 49:\n            return copy.deepcopy(self)\nWITH:\n            obj = type(self)()\n            obj.connector = self.connector\n            obj.negated = self.negated\n            obj.children = self.children[:]\n            return obj\n  Rationale: copy.deepcopy fails on non-pickleable objects like dict_keys. Manual construction avoids pickling while creating proper copy.\n\nChange 2:\n  File    : /testbed/django/db/models/query_utils.py\n  Location: Q._combine, line 52\n  Change  : REPLACE line 52:\n            return copy.deepcopy(other)\nWITH:\n            obj = type(other)()\n            obj.connector = other.connector\n            obj.negated = other.negated\n            obj.children = other.children[:]\n            return obj\n  Rationale: copy.deepcopy fails on non-pickleable objects like dict_keys. Manual construction avoids pickling while creating proper copy.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013dB7A5kJvuQ4DJvT33grEX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -100 django/db/models/query_utils.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013dB7A5kJvuQ4DJvT33grEX",
+          "content": "[exit_code=0]\n\"\"\"\nVarious data structures used in query construction.\n\nFactored out from django.db.models.query to avoid making the main module very\nlarge and/or so that they can be used by other modules without getting into\ncircular import difficulties.\n\"\"\"\nimport copy\nimport functools\nimport inspect\nfrom collections import namedtuple\n\nfrom django.core.exceptions import FieldError\nfrom django.db.models.constants import LOOKUP_SEP\nfrom django.utils import tree\n\n# PathInfo is used when converting lookups (fk__somecol). The contents\n# describe the relation in Model terms (model Options and Fields for both\n# sides of the relation. The join_field is the field backing the relation.\nPathInfo = namedtuple('PathInfo', 'from_opts to_opts target_fields join_field m2m direct filtered_relation')\n\n\ndef subclasses(cls):\n    yield cls\n    for subclass in cls.__subclasses__():\n        yield from subclasses(subclass)\n\n\nclass Q(tree.Node):\n    \"\"\"\n    Encapsulate filters as objects that can then be combined logically (using\n    `&` and `|`).\n    \"\"\"\n    # Connection types\n    AND = 'AND'\n    OR = 'OR'\n    default = AND\n    conditional = True\n\n    def __init__(self, *args, _connector=None, _negated=False, **kwargs):\n        super().__init__(children=[*args, *sorted(kwargs.items())], connector=_connector, negated=_negated)\n\n    def _combine(self, other, conn):\n        if not isinstance(other, Q):\n            raise TypeError(other)\n\n        # If the other Q() is empty, ignore it and just use `self`.\n        if not other:\n            return copy.deepcopy(self)\n        # Or if this Q is empty, ignore it and just use `other`.\n        elif not self:\n            return copy.deepcopy(other)\n\n        obj = type(self)()\n        obj.connector = conn\n        obj.add(self, conn)\n        obj.add(other, conn)\n        return obj\n\n    def __or__(self, other):\n        return self._combine(other, self.OR)\n\n    def __and__(self, other):\n        return self._combine(other, self.AND)\n\n    def __invert__(self):\n        obj = type(self)()\n        obj.add(self, self.AND)\n        obj.negate()\n        return obj\n\n    def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):\n        # We must promote any new joins to left outer joins so that when Q is\n        # used as an expression, rows aren't filtered due to joins.\n        clause, joins = query._add_q(\n            self, reuse, allow_joins=allow_joins, split_subq=False,\n            check_filterable=False,\n        )\n        query.promote_joins(joins)\n        return clause\n\n    def deconstruct(self):\n        path = '%s.%s' % (self.__class__.__module__, self.__class__.__name__)\n        if path.startswith('django.db.models.query_utils'):\n            path = path.replace('django.db.models.query_utils', 'django.db.models')\n        args, kwargs = (), {}\n        if len(self.children) == 1 and not isinstance(self.children[0], Q):\n            child = self.children[0]\n            kwargs = {child[0]: child[1]}\n        else:\n            args = tuple(self.children)\n            if self.connector != self.default:\n                kwargs = {'_connector': self.connector}\n        if self.negated:\n            kwargs['_negated'] = True\n        return path, args, kwargs\n\n\nclass DeferredAttribute:\n    \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me see the _combine method more clearly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012RUC9N4BJ4btQq9D5feczS",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '44,56p' django/db/models/query_utils.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012RUC9N4BJ4btQq9D5feczS",
+          "content": "[exit_code=0]\nif not isinstance(other, Q):\n            raise TypeError(other)\n\n        # If the other Q() is empty, ignore it and just use `self`.\n        if not other:\n            return copy.deepcopy(self)\n        # Or if this Q is empty, ignore it and just use `other`.\n        elif not self:\n            return copy.deepcopy(other)\n\n        obj = type(self)()\n        obj.connector = conn\n        obj.add(self, conn)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the exact lines that need to be modified. Let me apply the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_016Whb3Hy9so7BUo3Fk3WWK2",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_q.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/django/db/models/query_utils.py', 'r') as f:\n    content = f.read()\n\n# Replace the first occurrence of copy.deepcopy(self)\nold_deepcopy_self = \"\"\"        # If the other Q() is empty, ignore it and just use `self`.\n        if not other:\n            return copy.deepcopy(self)\"\"\"\n\nnew_deepcopy_self = \"\"\"        # If the other Q() is empty, ignore it and just use `self`.\n        if not other:\n            obj = type(self)()\n            obj.connector = self.connector\n            obj.negated = self.negated\n            obj.children = self.children[:]\n            return obj\"\"\"\n\ncontent = content.replace(old_deepcopy_self, new_deepcopy_self)\n\n# Replace the second occurrence of copy.deepcopy(other)\nold_deepcopy_other = \"\"\"        # Or if this Q is empty, ignore it and just use `other`.\n        elif not self:\n            return copy.deepcopy(other)\"\"\"\n\nnew_deepcopy_other = \"\"\"        # Or if this Q is empty, ignore it and just use `other`.\n        elif not self:\n            obj = type(other)()\n            obj.connector = other.connector\n            obj.negated = other.negated\n            obj.children = other.children[:]\n            return obj\"\"\"\n\ncontent = content.replace(old_deepcopy_other, new_deepcopy_other)\n\n# Write the file back\nwith open('/testbed/django/db/models/query_utils.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\n\npython /tmp/fix_q.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016Whb3Hy9so7BUo3Fk3WWK2",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes were applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01NzVuGrKTi85zNczcYR4aAD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '44,65p' django/db/models/query_utils.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NzVuGrKTi85zNczcYR4aAD",
+          "content": "[exit_code=0]\nif not isinstance(other, Q):\n            raise TypeError(other)\n\n        # If the other Q() is empty, ignore it and just use `self`.\n        if not other:\n            obj = type(self)()\n            obj.connector = self.connector\n            obj.negated = self.negated\n            obj.children = self.children[:]\n            return obj\n        # Or if this Q is empty, ignore it and just use `other`.\n        elif not self:\n            obj = type(other)()\n            obj.connector = other.connector\n            obj.negated = other.negated\n            obj.children = other.children[:]\n            return obj\n\n        obj = type(self)()\n        obj.connector = conn\n        obj.add(self, conn)\n        obj.add(other, conn)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. Now let me run git diff to verify:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QzK9dcrtCBpwD3LCkK9bvB",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QzK9dcrtCBpwD3LCkK9bvB",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py\nindex c2623f099f..b04219ea05 100644\n--- a/django/db/models/query_utils.py\n+++ b/django/db/models/query_utils.py\n@@ -46,10 +46,18 @@ class Q(tree.Node):\n \n         # If the other Q() is empty, ignore it and just use `self`.\n         if not other:\n-            return copy.deepcopy(self)\n+            obj = type(self)()\n+            obj.connector = self.connector\n+            obj.negated = self.negated\n+            obj.children = self.children[:]\n+            return obj\n         # Or if this Q is empty, ignore it and just use `other`.\n         elif not self:\n-            return copy.deepcopy(other)\n+            obj = type(other)()\n+            obj.connector = other.connector\n+            obj.negated = other.negated\n+            obj.children = other.children[:]\n+            return obj\n \n         obj = type(self)()\n         obj.connector = conn"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly what was needed. The changes replace the problematic `copy.deepcopy()` calls with manual object construction that creates proper copies without requiring pickling. This fixes the issue with non-pickleable objects like `dict_keys`.\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py\\nindex c2623f099f..b04219ea05 100644\\n--- a/django/db/models/query_utils.py\\n+++ b/django/db/models/query_utils.py\\n@@ -46,10 +46,18 @@ class Q(tree.Node):\\n \\n         # If the other Q() is empty, ignore it and just use `self`.\\n         if not other:\\n-            return copy.deepcopy(self)\\n+            obj = type(self)()\\n+            obj.connector = self.connector\\n+            obj.negated = self.negated\\n+            obj.children = self.children[:]\\n+            return obj\\n         # Or if this Q is empty, ignore it and just use `other`.\\n         elif not self:\\n-            return copy.deepcopy(other)\\n+            obj = type(other)()\\n+            obj.connector = other.connector\\n+            obj.negated = other.negated\\n+            obj.children = other.children[:]\\n+            return obj\\n \\n         obj = type(self)()\\n         obj.connector = conn\",\n  \"implementation_notes\": \"Replaced copy.deepcopy() calls in Q._combine method with manual object construction that copies connector, negated, and children attributes. This avoids pickling non-pickleable objects like dict_keys while still creating proper shallow copies of the Q objects.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T09:06:50Z"
+}

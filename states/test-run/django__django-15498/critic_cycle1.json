@@ -1,0 +1,199 @@
+{
+  "instance_id": "django__django-15498",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "verdict": "pass",
+  "correctness": "pass",
+  "completeness": "pass",
+  "alignment": "pass",
+  "safety": "pass",
+  "fix_pattern": "PA \u2014 None/empty guard",
+  "issues": [],
+  "regressions": [],
+  "regression_report": "none",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the following patch and produce a verdict.\n\n<instance_id>django__django-15498</instance_id>\n\n<problem_statement>\nFix handling empty string for If-Modified-Since header\nDescription\n\t\nEmpty string used to be ignored for If-Modified-Since header, but now raises exception since d6aff369ad3.\nFix handling empty string for If-Modified-Since header\nDescription\n\t\nEmpty string used to be ignored for If-Modified-Since header, but now raises exception since d6aff369ad3.\n\n</problem_statement>\n\n<localization_report>\nRelevant files: [\"/testbed/django/views/static.py\"]\nBug analysis: The was_modified_since function uses regex matching to parse If-Modified-Since headers, then accesses matches[1] and matches[3]. When an empty string is passed as the header, the regex returns None, causing matches[1] to raise TypeError. The exception handler only catches AttributeError, ValueError, and OverflowError, but not TypeError.\nExploration notes: The bug was introduced in commit d6aff369ad3 which changed matches.group(1) to matches[1] for performance. Before: matches.group(1) raised AttributeError when matches was None (caught by handler). After: matches[1] raises TypeError when matches is None (not caught). The problematic code is at lines 132-133 in was_modified_since function. The function is called from the serve function at line 46 with request.META.get('HTTP_IF_MODIFIED_SINCE'). Test target: test_was_modified_since_empty_string in StaticUtilsTests class.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard: Add empty string check at top of function to prevent TypeError when regex returns None. This protects all callers and maintains backward compatibility by treating empty strings the same as None (ignored).\nProposed changes: [\n  {\n    \"file\": \"/testbed/django/views/static.py\",\n    \"location\": \"was_modified_since, line 128\",\n    \"change\": \"INSERT after line 128:\\n        if header == '':\\n            raise ValueError\",\n    \"rationale\": \"Empty strings cause regex to return None, leading to TypeError when accessing matches[1]. Adding this guard at the top (after None check) ensures empty strings are handled the same way as None - by returning True from the exception handler.\"\n  }\n]\n</solution_proposal>\n\n<patch>\ndiff --git a/django/views/static.py b/django/views/static.py\nindex 1c558a53ff..976458cacc 100644\n--- a/django/views/static.py\n+++ b/django/views/static.py\n@@ -128,6 +128,8 @@ def was_modified_since(header=None, mtime=0, size=0):\n     try:\n         if header is None:\n             raise ValueError\n+        if header == '':\n+            raise ValueError\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?\", header, re.IGNORECASE)\n         header_mtime = parse_http_date(matches[1])\n         header_len = matches[3]\n</patch>\n\nThe patch has been applied to /testbed. Check for a regression PR in the hints, read the modified files, evaluate correctness, completeness, alignment, and safety, then output your verdict.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_0132rBuUkYnNrPbL1n4981MD",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/views/static.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0132rBuUkYnNrPbL1n4981MD",
+          "content": "[exit_code=0]\n\"\"\"\nViews and functions for serving static files. These are only to be used\nduring development, and SHOULD NOT be used in a production setting.\n\"\"\"\nimport mimetypes\nimport posixpath\nimport re\nfrom pathlib import Path\n\nfrom django.http import FileResponse, Http404, HttpResponse, HttpResponseNotModified\nfrom django.template import Context, Engine, TemplateDoesNotExist, loader\nfrom django.utils._os import safe_join\nfrom django.utils.http import http_date, parse_http_date\nfrom django.utils.translation import gettext as _\nfrom django.utils.translation import gettext_lazy\n\n\ndef serve(request, path, document_root=None, show_indexes=False):\n    \"\"\"\n    Serve static files below a given point in the directory structure.\n\n    To use, put a URL pattern such as::\n\n        from django.views.static import serve\n\n        path('<path:path>', serve, {'document_root': '/path/to/my/files/'})\n\n    in your URLconf. You must provide the ``document_root`` param. You may\n    also set ``show_indexes`` to ``True`` if you'd like to serve a basic index\n    of the directory.  This index view will use the template hardcoded below,\n    but if you'd like to override it, you can create a template called\n    ``static/directory_index.html``.\n    \"\"\"\n    path = posixpath.normpath(path).lstrip(\"/\")\n    fullpath = Path(safe_join(document_root, path))\n    if fullpath.is_dir():\n        if show_indexes:\n            return directory_index(path, fullpath)\n        raise Http404(_(\"Directory indexes are not allowed here.\"))\n    if not fullpath.exists():\n        raise Http404(_(\"\u201c%(path)s\u201d does not exist\") % {\"path\": fullpath})\n    # Respect the If-Modified-Since header.\n    statobj = fullpath.stat()\n    if not was_modified_since(\n        request.META.get(\"HTTP_IF_MODIFIED_SINCE\"), statobj.st_mtime, statobj.st_size\n    ):\n        return HttpResponseNotModified()\n    content_type, encoding = mimetypes.guess_type(str(fullpath))\n    content_type = content_type or \"application/octet-stream\"\n    response = FileResponse(fullpath.open(\"rb\"), content_type=content_type)\n    response.headers[\"Last-Modified\"] = http_date(statobj.st_mtime)\n    if encoding:\n        response.headers[\"Content-Encoding\"] = encoding\n    return response\n\n\nDEFAULT_DIRECTORY_INDEX_TEMPLATE = \"\"\"\n{% load i18n %}\n<!DOCTYPE html>\n<html lang=\"en\">\n  <head>\n    <meta http-equiv=\"Content-type\" content=\"text/html; charset=utf-8\">\n    <meta http-equiv=\"Content-Language\" content=\"en-us\">\n    <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n    <title>{% blocktranslate %}Index of {{ directory }}{% endblocktranslate %}</title>\n  </head>\n  <body>\n    <h1>{% blocktranslate %}Index of {{ directory }}{% endblocktranslate %}</h1>\n    <ul>\n      {% if directory != \"/\" %}\n      <li><a href=\"../\">../</a></li>\n      {% endif %}\n      {% for f in file_list %}\n      <li><a href=\"{{ f|urlencode }}\">{{ f }}</a></li>\n      {% endfor %}\n    </ul>\n  </body>\n</html>\n\"\"\"\ntemplate_translatable = gettext_lazy(\"Index of %(directory)s\")\n\n\ndef directory_index(path, fullpath):\n    try:\n        t = loader.select_template(\n            [\n                \"static/directory_index.html\",\n                \"static/directory_index\",\n            ]\n        )\n    except TemplateDoesNotExist:\n        t = Engine(libraries={\"i18n\": \"django.templatetags.i18n\"}).from_string(\n            DEFAULT_DIRECTORY_INDEX_TEMPLATE\n        )\n        c = Context()\n    else:\n        c = {}\n    files = []\n    for f in fullpath.iterdir():\n        if not f.name.startswith(\".\"):\n            url = str(f.relative_to(fullpath))\n            if f.is_dir():\n                url += \"/\"\n            files.append(url)\n    c.update(\n        {\n            \"directory\": path + \"/\",\n            \"file_list\": files,\n        }\n    )\n    return HttpResponse(t.render(c))\n\n\ndef was_modified_since(header=None, mtime=0, size=0):\n    \"\"\"\n    Was something modified since the user last downloaded it?\n\n    header\n      This is the value of the If-Modified-Since header.  If this is None,\n      I'll just return True.\n\n    mtime\n      This is the modification time of the item we're talking about.\n\n    size\n      This is the size of the item we're talking about.\n    \"\"\"\n    try:\n        if header is None:\n            raise ValueError\n        if header == '':\n            raise ValueError\n        matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n        header_mtime = parse_http_date(matches[1])\n        header_len = matches[3]\n        if header_len and int(header_len) != size:\n            raise ValueError\n        if int(mtime) > header_mtime:\n            raise ValueError\n    except (AttributeError, ValueError, OverflowError):\n        return True\n    return False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nThe patch adds a guard for empty string at the top of the `was_modified_since` function, right after the `None` check. When `header == ''`, it raises `ValueError` which is caught by the except clause and returns `True` (meaning the resource is considered modified, so the full response is served).\n\nLet me evaluate the patch:\n\n1. **Correctness**: The bug is that when an empty string is passed as the header, `re.match()` returns `None` (since the pattern `^([^;]+)...` won't match an empty string), and then accessing `matches[1]` raises `TypeError` (not caught). The patch adds `if header == '': raise ValueError` which is caught by the except handler, returning `True`. This correctly fixes the root cause.\n\n2. **Completeness**: The fix covers the case where `header` is an empty string. The regex `r\"^([^;]+)(; length=([0-9]+))?$\"` requires at least one character before `;`, so it won't match empty strings. The guard is properly placed before the regex call.\n\n3. **Alignment**: The solution proposal says to insert `if header == '': raise ValueError` after line 128, which is exactly what the patch does.\n\n4. **Safety**: The change only adds a guard for empty strings, treating them the same as `None`. This restores backward compatibility (before the regression introduced by d6aff369ad3, `matches.group(1)` would raise `AttributeError` when matches was `None`, which was caught). The patch is minimal and doesn't affect other behavior.\n\nWait, I also notice the regex pattern in the patched code has `$` at the end: `r\"^([^;]+)(; length=([0-9]+))?$\"`. Let me check if this was in the original or added by the patch.\n\nLooking at the patch diff:\n```\n-        matches = re.match(r\"^([^;]+)(; length=([0-9]+))?\", header, re.IGNORECASE)\n+        matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n```\n\nWait, the patch diff only shows the addition of the `if header == '': raise ValueError` lines. The regex line in the full file shows `$` but the patch diff only shows:\n```\n+        if header == '':\n+            raise ValueError\n```\n\nLet me re-read the patch carefully. The patch only adds two lines (the `if header == '':` check). The regex in the full file has `$` at end, but the patch diff doesn't show changing it... \n\nActually wait, looking at the diff more carefully:\n```diff\n+        if header == '':\n+            raise ValueError\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?\", header, re.IGNORECASE)\n```\n\nThe patch shows the regex without `$`. But the actual file shows `$` at the end. Let me re-read the full file output...\n\nLooking at the actual file content:\n```python\n        matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n```\n\nAnd the patch shows:\n```\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?\", header, re.IGNORECASE)\n```\n\nSo the `$` is in the file but not in the patch diff. This means the `$` was already in the original file OR there's some discrepancy. Let me check with git to understand.\n\nActually, looking more carefully at the diff output in the patch, it shows context lines without `$`:\n```\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?\", header, re.IGNORECASE)\n```\n\nBut the actual file has `$`. This suggests someone may have modified the file beyond what the patch shows, or it could be a display issue. Let me check git log.\n</think>",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0149G6sv6cG2zvkJBUDEBoSa",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git log --oneline -10"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0149G6sv6cG2zvkJBUDEBoSa",
+          "content": "[exit_code=0]\n88b91d159c SWE-bench\nd90e34c61b Fixed #33561 -- Allowed synchronization of user attributes in RemoteUserBackend.\n67b5f506a6 Changed some words to use inline markup.\nb1005c0e40 Refs #33476 -- Prevented formatting of .py-tpl files with black by pre-commit.\nfa94898034 Refs #33476 -- Used black's force-exclude instead of extend-exclude.\n93803a1b5f Fixed #33567 -- Avoided setting default text/html content type on responses.\n3dbf46654c Removed unused and unnecessary words from docs/spelling_wordlist.\n71531cc32c Changed \"bolded\" to \"in bold\" in docs.\na45f28f0ec Rewrote strip_tags test file to lorem ipsum.\na8c15481f4 Rewrote some references to \"master\"."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Ah2EQ5VXyVtwkGYc6paR1h",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff HEAD~1 -- django/views/static.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Ah2EQ5VXyVtwkGYc6paR1h",
+          "content": "[exit_code=0]\ndiff --git a/django/views/static.py b/django/views/static.py\nindex 1c558a53ff..976458cacc 100644\n--- a/django/views/static.py\n+++ b/django/views/static.py\n@@ -128,6 +128,8 @@ def was_modified_since(header=None, mtime=0, size=0):\n     try:\n         if header is None:\n             raise ValueError\n+        if header == '':\n+            raise ValueError\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n         header_mtime = parse_http_date(matches[1])\n         header_len = matches[3]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "<think>\nAh, I see. The actual git diff shows that the original file already had `$` in the regex. The patch context in the problem statement didn't show `$` because it was showing the context from the original file before the patch was applied. But the real file in the repo already has `$` in the regex (it was probably added in a different commit), and the patch only adds the empty string check.\n\nWait, no - looking more carefully: `git diff HEAD~1 -- django/views/static.py` shows the patch that was applied (HEAD~1 is the pre-patch state, HEAD is post-patch). This confirms:\n- The regex already had `$` in the original (it appears in both the `-` and `+` context)\n- Wait, if the regex had `$` before the patch, it would appear as an unchanged context line in the diff\n\nActually the diff output shows:\n```\n         matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n```\n\nThis is a context line (no `+` or `-` prefix), meaning it was NOT changed by the patch. The `$` was already in the original file before the patch.\n\nSo the patch only added the two lines:\n```python\nif header == '':\n    raise ValueError\n```\n\nNow let me evaluate:\n\n1. **Correctness**: With the empty string check added, when `header == ''`, it raises `ValueError` which is caught by the except handler, returning `True`. This correctly handles the empty string case.\n\nBut wait - does the regex `r\"^([^;]+)(; length=([0-9]+))?$\"` match empty strings? No, it doesn't match empty strings because `[^;]+` requires at least one character. So `matches` would be `None`, and `matches[1]` would raise `TypeError`. The fix correctly guards against this by raising `ValueError` before the regex is called.\n\n2. **Completeness**: The fix handles all cases where `header` is an empty string. It's placed before the regex call, so it covers the only code path.\n\n3. **Alignment**: The proposal says to add `if header == '': raise ValueError` after line 128 (the `if header is None:` check). The patch does exactly that.\n\n4. **Safety**: The fix is minimal and only adds a guard for empty strings. It doesn't affect any other behavior.\n\nThe fix is correct, complete, aligned with the proposal, and safe. Verdict: PASS.\n</think>\n\nThe patch adds a guard for empty strings in the `was_modified_since` function, right after the `None` check. Let me verify the original state and the issue:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01XmFFFeLUipFX8Vde9w2omQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git show HEAD~1:django/views/static.py | sed -n '120,145p'"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01XmFFFeLUipFX8Vde9w2omQ",
+          "content": "[exit_code=0]\nI'll just return True.\n\n    mtime\n      This is the modification time of the item we're talking about.\n\n    size\n      This is the size of the item we're talking about.\n    \"\"\"\n    try:\n        if header is None:\n            raise ValueError\n        matches = re.match(r\"^([^;]+)(; length=([0-9]+))?$\", header, re.IGNORECASE)\n        header_mtime = parse_http_date(matches[1])\n        header_len = matches[3]\n        if header_len and int(header_len) != size:\n            raise ValueError\n        if int(mtime) > header_mtime:\n            raise ValueError\n    except (AttributeError, ValueError, OverflowError):\n        return True\n    return False"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01FttpbebLVnr6XEpdWTqz82",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"was_modified_since\\|TypeError\\|test_was_modified\" tests/view_tests/tests/test_static.py | head -30"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FttpbebLVnr6XEpdWTqz82",
+          "content": "[exit_code=0]\n11:from django.views.static import was_modified_since\n187:    def test_was_modified_since_fp(self):\n189:        A floating point mtime does not disturb was_modified_since (#18675).\n193:        self.assertFalse(was_modified_since(header, mtime))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01UugC7KTtqBSCYvBWUpMudX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"empty_string\\|empty string\\|was_modified\" tests/view_tests/tests/test_static.py | head -20"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UugC7KTtqBSCYvBWUpMudX",
+          "content": "[exit_code=0]\n11:from django.views.static import was_modified_since\n187:    def test_was_modified_since_fp(self):\n189:        A floating point mtime does not disturb was_modified_since (#18675).\n193:        self.assertFalse(was_modified_since(header, mtime))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "The analysis is clear. The original code before the patch:\n1. Had `if header is None: raise ValueError` (caught by except handler \u2192 returns `True`)\n2. Then called `re.match()` which returns `None` for empty string since `[^;]+` requires at least one character\n3. Then `matches[1]` raises `TypeError` (NOT caught by `except (AttributeError, ValueError, OverflowError)`)\n\nThe patch adds `if header == '': raise ValueError` directly after the `None` check, which:\n- Raises `ValueError` (caught by the existing handler)\n- Returns `True` (treating empty string same as `None` \u2014 resource considered modified)\n- Is placed before the `re.match()` call, preventing the `TypeError`\n\n**Correctness**: The fix directly addresses the root cause \u2014 empty string causes `re.match()` to return `None`, and subscripting `None` raises `TypeError`. The guard prevents reaching that code path.\n\n**Completeness**: The guard covers the only code path that could be reached with an empty string.\n\n**Alignment**: Exactly matches the solution proposal \u2014 insert `if header == '': raise ValueError` after the `None` check.\n\n**Safety**: Minimal, targeted change that only affects empty string input and restores the pre-regression behavior.\n\n```json\n{\n  \"verdict\": \"pass\",\n  \"correctness\": \"pass\",\n  \"completeness\": \"pass\",\n  \"alignment\": \"pass\",\n  \"safety\": \"pass\",\n  \"fix_pattern\": \"PA \u2014 None/empty guard\",\n  \"issues\": [],\n  \"full_test_output\": \"n/a\",\n  \"regressions\": [],\n  \"regression_report\": \"none\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T11:28:19Z"
+}

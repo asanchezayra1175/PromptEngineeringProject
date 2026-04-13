@@ -1,0 +1,305 @@
+{
+  "instance_id": "django__django-15252",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py\nindex 1a37c6b7d0..8097192c92 100644\n--- a/django/db/migrations/recorder.py\n+++ b/django/db/migrations/recorder.py\n@@ -1,5 +1,5 @@\n from django.apps.registry import Apps\n-from django.db import DatabaseError, models\n+from django.db import DatabaseError, models, router\n from django.utils.functional import classproperty\n from django.utils.timezone import now\n \n@@ -60,6 +60,9 @@ class MigrationRecorder:\n         \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n         # If the table's there, that's fine - we've never changed its schema\n         # in the codebase.\n+        # Check if migrations are allowed on this database\n+        if not router.allow_migrate(self.connection.alias, 'migrations'):\n+            return\n         if self.has_table():\n             return\n         # Make the table",
+  "implementation_notes": "Added router import and permission check to MigrationRecorder.ensure_schema() method to respect db_router.allow_migrate() rules before creating the django_migrations table. This prevents table creation on databases where migrations are not allowed.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-15252</instance_id>\n\n<problem_statement>\nMigrationRecorder does not obey db_router allow_migrate rules\nDescription\n\t\nHi,\nWe have a multi-db setup. We have one connection that is for the django project, and several connections that talk to other dbs for information (ie models with managed = False). Django should only create tables in the first connection, never in any of the other connections. We have a simple router that does the following: \nclass Router(object):\n\tdef allow_migrate(self, db, model):\n\t\tif db == 'default':\n\t\t\treturn True\n\t\treturn False\nCurrent Behaviour\nWe run our functional tests and the migrate command is called against each connection when the test databases are created (see django/test/runner.py, setup_databases, line 300-ish, which calls django/db/backends/creation.py, create_test_db, line 377-ish)\nWhen this migrate runs, it tries to apply our migrations, which tries to record that a migration has been applied (see django/db/migrations/executor.py, apply_migration, which has several calls to self.recorder.record_applied). \nThe first thing that record_applied does is a call to self.ensure_schema() (see django/db/migrations/recorder.py, record_applied, lien 66-ish). \nensure_schema checks to see if the Migration model is in the tables in the connection. If it does not find the table then it tries to create the table. \nI believe that this is incorrect behaviour when a db_router has been provided. If using the router above, my expectation would be that the table is not created on any connection other than the 'default' connection. Looking at the other methods on the MigrationRecorder, I would expect that there will be similar issues with applied_migrations and record_unapplied.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The MigrationRecorder.ensure_schema method creates the django_migrations table on any database connection without consulting the db_router's allow_migrate rules. When ensure_schema is called (via record_applied, record_unapplied, etc.), it unconditionally attempts to create the migrations table if it doesn't exist, ignoring router restrictions that should prevent migration operations on certain database connections.\nExploration notes: The ensure_schema method is called by record_applied (line 66), record_unapplied (line 71), and potentially affects applied_migrations behavior. Other migration operations in /testbed/django/db/migrations/operations/base.py and /testbed/django/db/migrations/operations/special.py import 'from django.db import router' and use router.allow_migrate() or router.allow_migrate_model() to check permissions before performing database operations. The pattern shows router.allow_migrate(connection.alias, app_label) being used in special operations, and router.allow_migrate_model(connection_alias, model) being used for model operations. The MigrationRecorder.Migration model uses app_label='migrations' in its Meta class.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard: Add router permission check at the top of ensure_schema method to prevent creating migrations table on databases where router forbids it. This protects all callers (record_applied, record_unapplied) automatically and follows the established pattern used throughout the migration system.\n\nFiles to modify: [\n  \"/testbed/django/db/migrations/recorder.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/migrations/recorder.py\n  Location: line 2, imports section\n  Change  : REPLACE line 2:\nfrom django.db import DatabaseError, models\nWITH:\nfrom django.db import DatabaseError, models, router\n  Rationale: Import the router to check allow_migrate permissions before creating the migrations table\n\nChange 2:\n  File    : /testbed/django/db/migrations/recorder.py\n  Location: MigrationRecorder.ensure_schema, line 64\n  Change  : INSERT after line 64:\n        # Check if migrations are allowed on this database\n        if not router.allow_migrate(self.connection.alias, 'migrations'):\n            return\n  Rationale: Add router check before creating the migrations table to respect database routing rules. This follows the same pattern used in other migration operations and prevents the table creation when the router forbids migrations on this database.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution proposal step by step. Let me start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SVMWKZH8MiDPpxTbbW26iX",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/db/migrations/recorder.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SVMWKZH8MiDPpxTbbW26iX",
+          "content": "[exit_code=0]\nfrom django.apps.registry import Apps\nfrom django.db import DatabaseError, models\nfrom django.utils.functional import classproperty\nfrom django.utils.timezone import now\n\nfrom .exceptions import MigrationSchemaMissing\n\n\nclass MigrationRecorder:\n    \"\"\"\n    Deal with storing migration records in the database.\n\n    Because this table is actually itself used for dealing with model\n    creation, it's the one thing we can't do normally via migrations.\n    We manually handle table creation/schema updating (using schema backend)\n    and then have a floating model to do queries with.\n\n    If a migration is unapplied its row is removed from the table. Having\n    a row in the table always means a migration is applied.\n    \"\"\"\n    _migration_class = None\n\n    @classproperty\n    def Migration(cls):\n        \"\"\"\n        Lazy load to avoid AppRegistryNotReady if installed apps import\n        MigrationRecorder.\n        \"\"\"\n        if cls._migration_class is None:\n            class Migration(models.Model):\n                app = models.CharField(max_length=255)\n                name = models.CharField(max_length=255)\n                applied = models.DateTimeField(default=now)\n\n                class Meta:\n                    apps = Apps()\n                    app_label = 'migrations'\n                    db_table = 'django_migrations'\n\n                def __str__(self):\n                    return 'Migration %s for %s' % (self.name, self.app)\n\n            cls._migration_class = Migration\n        return cls._migration_class\n\n    def __init__(self, connection):\n        self.connection = connection\n\n    @property\n    def migration_qs(self):\n        return self.Migration.objects.using(self.connection.alias)\n\n    def has_table(self):\n        \"\"\"Return True if the django_migrations table exists.\"\"\"\n        with self.connection.cursor() as cursor:\n            tables = self.connection.introspection.table_names(cursor)\n        return self.Migration._meta.db_table in tables\n\n    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        if self.has_table():\n            return\n        # Make the table\n        try:\n            with self.connection.schema_editor() as editor:\n                editor.create_model(self.Migration)\n        except DatabaseError as exc:\n            raise MigrationSchemaMissing(\"Unable to create the django_migrations table (%s)\" % exc)\n\n    def applied_migrations(self):\n        \"\"\"\n        Return a dict mapping (app_name, migration_name) to Migration instances\n        for all applied migrations.\n        \"\"\"\n        if self.has_table():\n            return {(migration.app, migration.name): migration for migration in self.migration_qs}\n        else:\n            # If the django_migrations table doesn't exist, then no migrations\n            # are applied.\n            return {}\n\n    def record_applied(self, app, name):\n        \"\"\"Record that a migration was applied.\"\"\"\n        self.ensure_schema()\n        self.migration_qs.create(app=app, name=name)\n\n    def record_unapplied(self, app, name):\n        \"\"\"Record that a migration was unapplied.\"\"\"\n        self.ensure_schema()\n        self.migration_qs.filter(app=app, name=name).delete()\n\n    def flush(self):\n        \"\"\"Delete all migration records. Useful for testing migrations.\"\"\"\n        self.migration_qs.all().delete()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now I can see the file content. Let me implement the changes:\n\n1. First, I'll add `router` to the imports on line 2\n2. Then, I'll add the router check in the `ensure_schema` method\n\nLet me apply these changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Xnsg6JeCFbSh4GdKdGL1RM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/db/migrations/recorder.py', 'r') as f:\n    lines = f.readlines()\n\n# Change 1: Update import on line 2 (index 1)\n# Line 2 currently is: from django.db import DatabaseError, models\nlines[1] = 'from django.db import DatabaseError, models, router\\n'\n\n# Change 2: Add router check after line 64 (after \"def ensure_schema(self):\" and comments)\n# Let's find the exact location\nfor i, line in enumerate(lines):\n    if 'def ensure_schema(self):' in line:\n        print(f\"Found ensure_schema at line {i+1}\")\n        # Find the first return statement or the code after comments\n        j = i + 1\n        while j < len(lines):\n            if 'if self.has_table():' in lines[j]:\n                print(f\"Found 'if self.has_table():' at line {j+1}\")\n                # We want to insert the router check BEFORE this line\n                # First, let's insert it at the beginning of the method body (after docstring)\n                break\n            j += 1\n        \n        # The docstring ends and then we have the comments, then the actual code\n        # We need to insert after the docstring ends\n        # Looking at the structure:\n        # Line i: \"    def ensure_schema(self):\"\n        # Lines i+1 to some line: docstring\n        # Then comments\n        # Then \"if self.has_table():\"\n        \n        # Find where docstring ends (after closing triple quotes)\n        docstring_end = i + 1\n        while docstring_end < len(lines):\n            if '\"\"\"' in lines[docstring_end]:\n                docstring_end += 1\n                break\n            docstring_end += 1\n        \n        print(f\"Docstring ends at line {docstring_end}\")\n        # Now find where actual code starts (after blank lines and comments)\n        code_start = docstring_end\n        while code_start < len(lines) and (lines[code_start].strip() == '' or lines[code_start].strip().startswith('#')):\n            code_start += 1\n        \n        print(f\"Code starts at line {code_start}: {lines[code_start]}\")\n        # Insert the router check before the actual code\n        insert_point = code_start\n        indent = '        '  # 8 spaces for method body\n        router_check = f'{indent}# Check if migrations are allowed on this database\\n'\n        router_check += f'{indent}if not router.allow_migrate(self.connection.alias, \\'migrations\\'):\\n'\n        router_check += f'{indent}    return\\n'\n        \n        lines.insert(insert_point, router_check)\n        break\n\n# Write back\nwith open('django/db/migrations/recorder.py', 'w') as f:\n    f.writelines(lines)\n\nprint(\"Changes applied successfully!\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Xnsg6JeCFbSh4GdKdGL1RM",
+          "content": "[exit_code=0]\nFound ensure_schema at line 59\nFound 'if self.has_table():' at line 63\nDocstring ends at line 60\nCode starts at line 62:         if self.has_table():\n\nChanges applied successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Wait, let me check if the insertion happened correctly. Let me read the file again to verify:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KmkigwZkdQ52HEhpMUqQsj",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -80 django/db/migrations/recorder.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KmkigwZkdQ52HEhpMUqQsj",
+          "content": "[exit_code=0]\nfrom django.apps.registry import Apps\nfrom django.db import DatabaseError, models, router\nfrom django.utils.functional import classproperty\nfrom django.utils.timezone import now\n\nfrom .exceptions import MigrationSchemaMissing\n\n\nclass MigrationRecorder:\n    \"\"\"\n    Deal with storing migration records in the database.\n\n    Because this table is actually itself used for dealing with model\n    creation, it's the one thing we can't do normally via migrations.\n    We manually handle table creation/schema updating (using schema backend)\n    and then have a floating model to do queries with.\n\n    If a migration is unapplied its row is removed from the table. Having\n    a row in the table always means a migration is applied.\n    \"\"\"\n    _migration_class = None\n\n    @classproperty\n    def Migration(cls):\n        \"\"\"\n        Lazy load to avoid AppRegistryNotReady if installed apps import\n        MigrationRecorder.\n        \"\"\"\n        if cls._migration_class is None:\n            class Migration(models.Model):\n                app = models.CharField(max_length=255)\n                name = models.CharField(max_length=255)\n                applied = models.DateTimeField(default=now)\n\n                class Meta:\n                    apps = Apps()\n                    app_label = 'migrations'\n                    db_table = 'django_migrations'\n\n                def __str__(self):\n                    return 'Migration %s for %s' % (self.name, self.app)\n\n            cls._migration_class = Migration\n        return cls._migration_class\n\n    def __init__(self, connection):\n        self.connection = connection\n\n    @property\n    def migration_qs(self):\n        return self.Migration.objects.using(self.connection.alias)\n\n    def has_table(self):\n        \"\"\"Return True if the django_migrations table exists.\"\"\"\n        with self.connection.cursor() as cursor:\n            tables = self.connection.introspection.table_names(cursor)\n        return self.Migration._meta.db_table in tables\n\n    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        # Check if migrations are allowed on this database\n        if not router.allow_migrate(self.connection.alias, 'migrations'):\n            return\n        if self.has_table():\n            return\n        # Make the table\n        try:\n            with self.connection.schema_editor() as editor:\n                editor.create_model(self.Migration)\n        except DatabaseError as exc:\n            raise MigrationSchemaMissing(\"Unable to create the django_migrations table (%s)\" % exc)\n\n    def applied_migrations(self):\n        \"\"\"\n        Return a dict mapping (app_name, migration_name) to Migration instances\n        for all applied migrations.\n        \"\"\"\n        if self.has_table():"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I see there's an issue - the first comment line got lost when I inserted. Let me fix this more carefully:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01VHaj3kAqVd64rtLRLuvs6K",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat django/db/migrations/recorder.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VHaj3kAqVd64rtLRLuvs6K",
+          "content": "[exit_code=0]\nfrom django.apps.registry import Apps\nfrom django.db import DatabaseError, models, router\nfrom django.utils.functional import classproperty\nfrom django.utils.timezone import now\n\nfrom .exceptions import MigrationSchemaMissing\n\n\nclass MigrationRecorder:\n    \"\"\"\n    Deal with storing migration records in the database.\n\n    Because this table is actually itself used for dealing with model\n    creation, it's the one thing we can't do normally via migrations.\n    We manually handle table creation/schema updating (using schema backend)\n    and then have a floating model to do queries with.\n\n    If a migration is unapplied its row is removed from the table. Having\n    a row in the table always means a migration is applied.\n    \"\"\"\n    _migration_class = None\n\n    @classproperty\n    def Migration(cls):\n        \"\"\"\n        Lazy load to avoid AppRegistryNotReady if installed apps import\n        MigrationRecorder.\n        \"\"\"\n        if cls._migration_class is None:\n            class Migration(models.Model):\n                app = models.CharField(max_length=255)\n                name = models.CharField(max_length=255)\n                applied = models.DateTimeField(default=now)\n\n                class Meta:\n                    apps = Apps()\n                    app_label = 'migrations'\n                    db_table = 'django_migrations'\n\n                def __str__(self):\n                    return 'Migration %s for %s' % (self.name, self.app)\n\n            cls._migration_class = Migration\n        return cls._migration_class\n\n    def __init__(self, connection):\n        self.connection = connection\n\n    @property\n    def migration_qs(self):\n        return self.Migration.objects.using(self.connection.alias)\n\n    def has_table(self):\n        \"\"\"Return True if the django_migrations table exists.\"\"\"\n        with self.connection.cursor() as cursor:\n            tables = self.connection.introspection.table_names(cursor)\n        return self.Migration._meta.db_table in tables\n\n    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        # Check if migrations are allowed on this database\n        if not router.allow_migrate(self.connection.alias, 'migrations'):\n            return\n        if self.has_table():\n            return\n        # Make the table\n        try:\n            with self.connection.schema_editor() as editor:\n                editor.create_model(self.Migration)\n        except DatabaseError as exc:\n            raise MigrationSchemaMissing(\"Unable to create the django_migrations table (%s)\" % exc)\n\n    def applied_migrations(self):\n        \"\"\"\n        Return a dict mapping (app_name, migration_name) to Migration instances\n        for all applied migrations.\n        \"\"\"\n        if self.has_table():\n            return {(migration.app, migration.name): migration for migration in self.migration_qs}\n        else:\n            # If the django_migrations table doesn't exist, then no migrations\n            # are applied.\n            return {}\n\n    def record_applied(self, app, name):\n        \"\"\"Record that a migration was applied.\"\"\"\n        self.ensure_schema()\n        self.migration_qs.create(app=app, name=name)\n\n    def record_unapplied(self, app, name):\n        \"\"\"Record that a migration was unapplied.\"\"\"\n        self.ensure_schema()\n        self.migration_qs.filter(app=app, name=name).delete()\n\n    def flush(self):\n        \"\"\"Delete all migration records. Useful for testing migrations.\"\"\"\n        self.migration_qs.all().delete()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I see the issue - when I inserted the router check, it inadvertently combined with the existing comments. Let me reset and apply the changes more carefully:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01BRke1RVank9kdHnXED22TC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git checkout django/db/migrations/recorder.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BRke1RVank9kdHnXED22TC",
+          "content": "[exit_code=0]\nUpdated 1 path from the index"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good. Now let me apply the changes more carefully by reading the file first and understanding its exact structure:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01CGzpGqqMgXW9s8AFUPsSah",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat -n django/db/migrations/recorder.py | head -75"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CGzpGqqMgXW9s8AFUPsSah",
+          "content": "[exit_code=0]\n1\tfrom django.apps.registry import Apps\n     2\tfrom django.db import DatabaseError, models\n     3\tfrom django.utils.functional import classproperty\n     4\tfrom django.utils.timezone import now\n     5\t\n     6\tfrom .exceptions import MigrationSchemaMissing\n     7\t\n     8\t\n     9\tclass MigrationRecorder:\n    10\t    \"\"\"\n    11\t    Deal with storing migration records in the database.\n    12\t\n    13\t    Because this table is actually itself used for dealing with model\n    14\t    creation, it's the one thing we can't do normally via migrations.\n    15\t    We manually handle table creation/schema updating (using schema backend)\n    16\t    and then have a floating model to do queries with.\n    17\t\n    18\t    If a migration is unapplied its row is removed from the table. Having\n    19\t    a row in the table always means a migration is applied.\n    20\t    \"\"\"\n    21\t    _migration_class = None\n    22\t\n    23\t    @classproperty\n    24\t    def Migration(cls):\n    25\t        \"\"\"\n    26\t        Lazy load to avoid AppRegistryNotReady if installed apps import\n    27\t        MigrationRecorder.\n    28\t        \"\"\"\n    29\t        if cls._migration_class is None:\n    30\t            class Migration(models.Model):\n    31\t                app = models.CharField(max_length=255)\n    32\t                name = models.CharField(max_length=255)\n    33\t                applied = models.DateTimeField(default=now)\n    34\t\n    35\t                class Meta:\n    36\t                    apps = Apps()\n    37\t                    app_label = 'migrations'\n    38\t                    db_table = 'django_migrations'\n    39\t\n    40\t                def __str__(self):\n    41\t                    return 'Migration %s for %s' % (self.name, self.app)\n    42\t\n    43\t            cls._migration_class = Migration\n    44\t        return cls._migration_class\n    45\t\n    46\t    def __init__(self, connection):\n    47\t        self.connection = connection\n    48\t\n    49\t    @property\n    50\t    def migration_qs(self):\n    51\t        return self.Migration.objects.using(self.connection.alias)\n    52\t\n    53\t    def has_table(self):\n    54\t        \"\"\"Return True if the django_migrations table exists.\"\"\"\n    55\t        with self.connection.cursor() as cursor:\n    56\t            tables = self.connection.introspection.table_names(cursor)\n    57\t        return self.Migration._meta.db_table in tables\n    58\t\n    59\t    def ensure_schema(self):\n    60\t        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n    61\t        # If the table's there, that's fine - we've never changed its schema\n    62\t        # in the codebase.\n    63\t        if self.has_table():\n    64\t            return\n    65\t        # Make the table\n    66\t        try:\n    67\t            with self.connection.schema_editor() as editor:\n    68\t                editor.create_model(self.Migration)\n    69\t        except DatabaseError as exc:\n    70\t            raise MigrationSchemaMissing(\"Unable to create the django_migrations table (%s)\" % exc)\n    71\t\n    72\t    def applied_migrations(self):\n    73\t        \"\"\"\n    74\t        Return a dict mapping (app_name, migration_name) to Migration instances\n    75\t        for all applied migrations."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect. Now I can see the exact structure. Let me apply the changes using a more precise approach:\n\n1. Line 2: Change `from django.db import DatabaseError, models` to `from django.db import DatabaseError, models, router`\n2. After line 62 (the comment), add the router check before the `if self.has_table():` check",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GXrgghFNULDf7fkx1RMjAf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/db/migrations/recorder.py', 'r') as f:\n    content = f.read()\n\n# Change 1: Update import on line 2\ncontent = content.replace(\n    'from django.db import DatabaseError, models',\n    'from django.db import DatabaseError, models, router',\n    1  # Only replace the first occurrence\n)\n\n# Change 2: Add router check in ensure_schema method\n# Find the ensure_schema method and add the check\nold_ensure_schema = '''    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        if self.has_table():'''\n\nnew_ensure_schema = '''    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        # Check if migrations are allowed on this database\n        if not router.allow_migrate(self.connection.alias, 'migrations'):\n            return\n        if self.has_table():'''\n\ncontent = content.replace(old_ensure_schema, new_ensure_schema)\n\n# Write back\nwith open('django/db/migrations/recorder.py', 'w') as f:\n    f.write(content)\n\nprint(\"Changes applied successfully!\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GXrgghFNULDf7fkx1RMjAf",
+          "content": "[exit_code=0]\nChanges applied successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the changes were applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01G6yxgz6yB2GscN55SnwvvW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -75 django/db/migrations/recorder.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01G6yxgz6yB2GscN55SnwvvW",
+          "content": "[exit_code=0]\nfrom django.apps.registry import Apps\nfrom django.db import DatabaseError, models, router\nfrom django.utils.functional import classproperty\nfrom django.utils.timezone import now\n\nfrom .exceptions import MigrationSchemaMissing\n\n\nclass MigrationRecorder:\n    \"\"\"\n    Deal with storing migration records in the database.\n\n    Because this table is actually itself used for dealing with model\n    creation, it's the one thing we can't do normally via migrations.\n    We manually handle table creation/schema updating (using schema backend)\n    and then have a floating model to do queries with.\n\n    If a migration is unapplied its row is removed from the table. Having\n    a row in the table always means a migration is applied.\n    \"\"\"\n    _migration_class = None\n\n    @classproperty\n    def Migration(cls):\n        \"\"\"\n        Lazy load to avoid AppRegistryNotReady if installed apps import\n        MigrationRecorder.\n        \"\"\"\n        if cls._migration_class is None:\n            class Migration(models.Model):\n                app = models.CharField(max_length=255)\n                name = models.CharField(max_length=255)\n                applied = models.DateTimeField(default=now)\n\n                class Meta:\n                    apps = Apps()\n                    app_label = 'migrations'\n                    db_table = 'django_migrations'\n\n                def __str__(self):\n                    return 'Migration %s for %s' % (self.name, self.app)\n\n            cls._migration_class = Migration\n        return cls._migration_class\n\n    def __init__(self, connection):\n        self.connection = connection\n\n    @property\n    def migration_qs(self):\n        return self.Migration.objects.using(self.connection.alias)\n\n    def has_table(self):\n        \"\"\"Return True if the django_migrations table exists.\"\"\"\n        with self.connection.cursor() as cursor:\n            tables = self.connection.introspection.table_names(cursor)\n        return self.Migration._meta.db_table in tables\n\n    def ensure_schema(self):\n        \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n        # If the table's there, that's fine - we've never changed its schema\n        # in the codebase.\n        # Check if migrations are allowed on this database\n        if not router.allow_migrate(self.connection.alias, 'migrations'):\n            return\n        if self.has_table():\n            return\n        # Make the table\n        try:\n            with self.connection.schema_editor() as editor:\n                editor.create_model(self.Migration)\n        except DatabaseError as exc:\n            raise MigrationSchemaMissing(\"Unable to create the django_migrations table (%s)\" % exc)\n\n    def applied_migrations(self):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. Now let me verify with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GkmKAw8CDTrwAjir1WQGab",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GkmKAw8CDTrwAjir1WQGab",
+          "content": "[exit_code=0]\ndiff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py\nindex 1a37c6b7d0..8097192c92 100644\n--- a/django/db/migrations/recorder.py\n+++ b/django/db/migrations/recorder.py\n@@ -1,5 +1,5 @@\n from django.apps.registry import Apps\n-from django.db import DatabaseError, models\n+from django.db import DatabaseError, models, router\n from django.utils.functional import classproperty\n from django.utils.timezone import now\n \n@@ -60,6 +60,9 @@ class MigrationRecorder:\n         \"\"\"Ensure the table exists and has the correct schema.\"\"\"\n         # If the table's there, that's fine - we've never changed its schema\n         # in the codebase.\n+        # Check if migrations are allowed on this database\n+        if not router.allow_migrate(self.connection.alias, 'migrations'):\n+            return\n         if self.has_table():\n             return\n         # Make the table"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff output shows exactly what was intended:\n\n1. Line 2: Added `router` to the imports\n2. Lines 63-65: Added the router permission check before attempting to create the migrations table\n\nThe changes are minimal and focused on solving the problem as specified in the proposal. The implementation:\n- Imports the `router` module\n- Adds a check at the beginning of `ensure_schema()` to respect `allow_migrate()` rules from the database router\n- Returns early if migrations are not allowed on the current database, preventing the creation of the django_migrations table on non-default connections\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py\\nindex 1a37c6b7d0..8097192c92 100644\\n--- a/django/db/migrations/recorder.py\\n+++ b/django/db/migrations/recorder.py\\n@@ -1,5 +1,5 @@\\n from django.apps.registry import Apps\\n-from django.db import DatabaseError, models\\n+from django.db import DatabaseError, models, router\\n from django.utils.functional import classproperty\\n from django.utils.timezone import now\\n \\n@@ -60,6 +60,9 @@ class MigrationRecorder:\\n         \\\"\\\"\\\"Ensure the table exists and has the correct schema.\\\"\\\"\\\"\\n         # If the table's there, that's fine - we've never changed its schema\\n         # in the codebase.\\n+        # Check if migrations are allowed on this database\\n+        if not router.allow_migrate(self.connection.alias, 'migrations'):\\n+            return\\n         if self.has_table():\\n             return\\n         # Make the table\",\n  \"implementation_notes\": \"Added router import and permission check to MigrationRecorder.ensure_schema() method to respect db_router.allow_migrate() rules before creating the django_migrations table. This prevents table creation on databases where migrations are not allowed.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 10,
+  "timestamp": "2026-04-13T11:05:34Z"
+}

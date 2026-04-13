@@ -1,0 +1,212 @@
+{
+  "instance_id": "django__django-13033",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex abbb1e37cb..a8f5b61fbe 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -727,7 +727,7 @@ class SQLCompiler:\n         # If we get to this point and the field is a relation to another model,\n         # append the default ordering for that model unless it is the pk\n         # shortcut or the attribute name of the field that is specified.\n-        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n+        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n             # Firstly, avoid infinite loops.\n             already_seen = already_seen or set()\n             join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)",
+  "implementation_notes": "Fixed the find_ordering_name method in SQLCompiler to correctly compare field.attname against pieces[-1] instead of the full lookup path 'name'. This prevents incorrect application of default model ordering for self-referencing foreign keys with _id field lookups like 'record__root_id'.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-13033</instance_id>\n\n<problem_statement>\nSelf referencing foreign key doesn't correctly order by a relation \"_id\" field.\nDescription\n\t\nInitially discovered on 2.2.10 but verified still happens on 3.0.6. Given the following models:\nclass OneModel(models.Model):\n\tclass Meta:\n\t\tordering = (\"-id\",)\n\tid = models.BigAutoField(primary_key=True)\n\troot = models.ForeignKey(\"OneModel\", on_delete=models.CASCADE, null=True)\n\toneval = models.BigIntegerField(null=True)\nclass TwoModel(models.Model):\n\tid = models.BigAutoField(primary_key=True)\n\trecord = models.ForeignKey(OneModel, on_delete=models.CASCADE)\n\ttwoval = models.BigIntegerField(null=True)\nThe following queryset gives unexpected results and appears to be an incorrect SQL query:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"record__root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") LEFT OUTER JOIN \"orion_onemodel\" T3 ON (\"orion_onemodel\".\"root_id\" = T3.\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY T3.\"id\" DESC\nThe query has an unexpected DESCENDING sort. That appears to come from the default sort order on the OneModel class, but I would expect the order_by() to take prececence. The the query has two JOINS, which is unnecessary. It appears that, since OneModel.root is a foreign key to itself, that is causing it to do the unnecessary extra join. In fact, testing a model where root is a foreign key to a third model doesn't show the problem behavior.\nNote also that the queryset with order_by(\"record__root\") gives the exact same SQL.\nThis queryset gives correct results and what looks like a pretty optimal SQL:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"record__root__id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY \"orion_onemodel\".\"root_id\" ASC\nSo is this a potential bug or a misunderstanding on my part?\nAnother queryset that works around the issue and gives a reasonable SQL query and expected results:\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.annotate(root_id=F(\"record__root_id\"))\nqs = qs.order_by(\"root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY \"orion_onemodel\".\"zero_id\" ASC\nASCENDING sort, and a single INNER JOIN, as I'd expect. That actually works for my use because I need that output column anyway.\nOne final oddity; with the original queryset but the inverted sort order_by():\nqs = TwoModel.objects.filter(record__oneval__in=[1,2,3])\nqs = qs.order_by(\"-record__root_id\")\nprint(qs.query)\nSELECT \"orion_twomodel\".\"id\", \"orion_twomodel\".\"record_id\", \"orion_twomodel\".\"twoval\" FROM \"orion_twomodel\" INNER JOIN \"orion_onemodel\" ON (\"orion_twomodel\".\"record_id\" = \"orion_onemodel\".\"id\") LEFT OUTER JOIN \"orion_onemodel\" T3 ON (\"orion_onemodel\".\"root_id\" = T3.\"id\") WHERE \"orion_onemodel\".\"oneval\" IN (1, 2, 3) ORDER BY T3.\"id\" ASC\nOne gets the query with the two JOINs but an ASCENDING sort order. I was not under the impression that sort orders are somehow relative to the class level sort order, eg: does specifing order_by(\"-record__root_id\") invert the class sort order? Testing that on a simple case doesn't show that behavior at all.\nThanks for any assistance and clarification.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The find_ordering_name method incorrectly compares the field's attname against the full lookup path when determining whether to apply default model ordering. For self-referencing foreign keys with _id field lookups like 'record__root_id', it compares 'root_id' (field.attname) against 'record__root_id' (name), incorrectly triggering default ordering logic and causing unnecessary joins with wrong sort direction.\nExploration notes: The problematic code is at line 730: `if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':`. The condition `getattr(field, 'attname', None) != name` should compare against `pieces[-1]` instead of `name`. The `pieces` variable contains the split lookup path, where `pieces[-1]` is the final field component. The method belongs to the SQLCompiler class and handles ordering for ORM queries.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: Change the comparator from 'name' to 'pieces[-1]' to compare against the final field component instead of the full lookup path, preventing incorrect application of default model ordering for _id field access.\n\nFiles to modify: [\n  \"/testbed/django/db/models/sql/compiler.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/db/models/sql/compiler.py\n  Location: SQLCompiler.find_ordering_name, line 730\n  Change  : REPLACE line 730:\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\nWITH:\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n  Rationale: The condition incorrectly compares field.attname against the full lookup path 'name' instead of just the final field component 'pieces[-1]'. For 'record__root_id', this causes the condition to incorrectly trigger default ordering logic because 'root_id' != 'record__root_id' when it should compare 'root_id' != 'root_id'.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll implement the solution by first reading the file to understand the context, then making the specified change.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012xvn4EhFj8s3Doxw6rTZ86",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && find . -type f -name \"compiler.py\" | grep -E \"models/sql\" | head -1"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012xvn4EhFj8s3Doxw6rTZ86",
+          "content": "[exit_code=0]\n./django/db/models/sql/compiler.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me read the file to see the context around line 730:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014ubYPTgmCdiQbyA8gkbFyo",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '720,750p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014ubYPTgmCdiQbyA8gkbFyo",
+          "content": "[exit_code=0]\nThe 'name' is of the form 'field1__field2__...__fieldN'.\n        \"\"\"\n        name, order = get_order_dir(name, default_order)\n        descending = order == 'DESC'\n        pieces = name.split(LOOKUP_SEP)\n        field, targets, alias, joins, path, opts, transform_function = self._setup_joins(pieces, opts, alias)\n\n        # If we get to this point and the field is a relation to another model,\n        # append the default ordering for that model unless it is the pk\n        # shortcut or the attribute name of the field that is specified.\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n            # Firstly, avoid infinite loops.\n            already_seen = already_seen or set()\n            join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\n            if join_tuple in already_seen:\n                raise FieldError('Infinite loop caused by ordering.')\n            already_seen.add(join_tuple)\n\n            results = []\n            for item in opts.ordering:\n                if hasattr(item, 'resolve_expression') and not isinstance(item, OrderBy):\n                    item = item.desc() if descending else item.asc()\n                if isinstance(item, OrderBy):\n                    results.append((item, False))\n                    continue\n                results.extend(self.find_ordering_name(item, opts, alias,\n                                                       order, already_seen))\n            return results\n        targets, alias, _ = self.query.trim_joins(targets, joins, path)\n        return [(OrderBy(transform_function(t, alias), descending=descending), False) for t in targets]"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the problematic line 730. Let me read more context to understand the full method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01PpDDbkBozyM5M6a86nsaB1",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '715,755p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PpDDbkBozyM5M6a86nsaB1",
+          "content": "[exit_code=0]\ndef find_ordering_name(self, name, opts, alias=None, default_order='ASC',\n                           already_seen=None):\n        \"\"\"\n        Return the table alias (the name might be ambiguous, the alias will\n        not be) and column name for ordering by the given 'name' parameter.\n        The 'name' is of the form 'field1__field2__...__fieldN'.\n        \"\"\"\n        name, order = get_order_dir(name, default_order)\n        descending = order == 'DESC'\n        pieces = name.split(LOOKUP_SEP)\n        field, targets, alias, joins, path, opts, transform_function = self._setup_joins(pieces, opts, alias)\n\n        # If we get to this point and the field is a relation to another model,\n        # append the default ordering for that model unless it is the pk\n        # shortcut or the attribute name of the field that is specified.\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n            # Firstly, avoid infinite loops.\n            already_seen = already_seen or set()\n            join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\n            if join_tuple in already_seen:\n                raise FieldError('Infinite loop caused by ordering.')\n            already_seen.add(join_tuple)\n\n            results = []\n            for item in opts.ordering:\n                if hasattr(item, 'resolve_expression') and not isinstance(item, OrderBy):\n                    item = item.desc() if descending else item.asc()\n                if isinstance(item, OrderBy):\n                    results.append((item, False))\n                    continue\n                results.extend(self.find_ordering_name(item, opts, alias,\n                                                       order, already_seen))\n            return results\n        targets, alias, _ = self.query.trim_joins(targets, joins, path)\n        return [(OrderBy(transform_function(t, alias), descending=descending), False) for t in targets]\n\n    def _setup_joins(self, pieces, opts, alias):\n        \"\"\"\n        Helper method for get_order_by() and get_distinct().\n\n        get_ordering() and get_distinct() must produce same target columns on"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now I can see the complete context. The issue is on line 730 where the condition checks:\n```\nif field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n```\n\nAccording to the solution proposal, it should compare `getattr(field, 'attname', None)` against `pieces[-1]` instead of `name`. This is because:\n- `name` is the full lookup path (e.g., 'record__root_id')\n- `pieces[-1]` is just the final component (e.g., 'root_id')\n- `field.attname` for a ForeignKey is the attribute name like 'root_id'\n\nSo the comparison should be `pieces[-1]` not `name`.\n\nLet me make this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Ry95pTGDgqpz6iYLHdsXmQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\n# Read the file\nwith open('django/db/models/sql/compiler.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the specific line\nold_line = \"        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\"\nnew_line = \"        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\"\n\nif old_line in content:\n    content = content.replace(old_line, new_line)\n    with open('django/db/models/sql/compiler.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully replaced the line\")\nelse:\n    print(\"ERROR: Could not find the exact line to replace\")\n    print(\"Looking for:\", repr(old_line))\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Ry95pTGDgqpz6iYLHdsXmQ",
+          "content": "[exit_code=0]\nSuccessfully replaced the line"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was made correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018k4NWZ5iiJu1rFJh7rGPTY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '725,735p' django/db/models/sql/compiler.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018k4NWZ5iiJu1rFJh7rGPTY",
+          "content": "[exit_code=0]\nfield, targets, alias, joins, path, opts, transform_function = self._setup_joins(pieces, opts, alias)\n\n        # If we get to this point and the field is a relation to another model,\n        # append the default ordering for that model unless it is the pk\n        # shortcut or the attribute name of the field that is specified.\n        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n            # Firstly, avoid infinite loops.\n            already_seen = already_seen or set()\n            join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\n            if join_tuple in already_seen:\n                raise FieldError('Infinite loop caused by ordering.')"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Line 730 now reads:\n```python\nif field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n```\n\nNow let me run git diff to verify the change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0124mvd6aoxd839MEAfs8n8J",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0124mvd6aoxd839MEAfs8n8J",
+          "content": "[exit_code=0]\ndiff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex abbb1e37cb..a8f5b61fbe 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -727,7 +727,7 @@ class SQLCompiler:\n         # If we get to this point and the field is a relation to another model,\n         # append the default ordering for that model unless it is the pk\n         # shortcut or the attribute name of the field that is specified.\n-        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\n+        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\n             # Firstly, avoid infinite loops.\n             already_seen = already_seen or set()\n             join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the change that was proposed. The modification is minimal and correct:\n- Changed line 730 from comparing against `name` (the full lookup path) to comparing against `pieces[-1]` (the final field component)\n- This fixes the issue where self-referencing foreign keys with `_id` field lookups were incorrectly triggering default model ordering\n\n```json\n{\n  \"patch\": \"diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\\nindex abbb1e37cb..a8f5b61fbe 100644\\n--- a/django/db/models/sql/compiler.py\\n+++ b/django/db/models/sql/compiler.py\\n@@ -727,7 +727,7 @@ class SQLCompiler:\\n         # If we get to this point and the field is a relation to another model,\\n         # append the default ordering for that model unless it is the pk\\n         # shortcut or the attribute name of the field that is specified.\\n-        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':\\n+        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':\\n             # Firstly, avoid infinite loops.\\n             already_seen = already_seen or set()\\n             join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)\",\n  \"implementation_notes\": \"Fixed the find_ordering_name method in SQLCompiler to correctly compare field.attname against pieces[-1] instead of the full lookup path 'name'. This prevents incorrect application of default model ordering for self-referencing foreign keys with _id field lookups like 'record__root_id'.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 7,
+  "timestamp": "2026-04-13T08:54:13Z"
+}

@@ -1,0 +1,181 @@
+{
+  "instance_id": "django__django-14382",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/django/core/management/templates.py b/django/core/management/templates.py\nindex 8dc6068286..f248ab1b71 100644\n--- a/django/core/management/templates.py\n+++ b/django/core/management/templates.py\n@@ -74,7 +74,7 @@ class TemplateCommand(BaseCommand):\n                 raise CommandError(e)\n         else:\n             if app_or_project == 'app':\n-                self.validate_name(os.path.basename(target), 'directory')\n+                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\n             top_dir = os.path.abspath(os.path.expanduser(target))\n             if not os.path.exists(top_dir):\n                 raise CommandError(\"Destination directory '%s' does not \"",
+  "implementation_notes": "Fixed the handling of trailing slashes in directory paths for django-admin startapp command. When a target directory with a trailing slash (e.g., 'directory/') is provided, os.path.basename() now gets called on a version without trailing separators using .rstrip(os.sep), ensuring the directory name is properly validated instead of returning an empty string.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>django__django-14382</instance_id>\n\n<problem_statement>\ndjango-admin startapp with trailing slash in directory name results in error\nDescription\n\t\nBash tab-completion appends trailing slashes to directory names. django-admin startapp name directory/ results in the error:\nCommandError: '' is not a valid app directory. Please make sure the directory is a valid identifier.\nThe error is caused by \u200bline 77 of django/core/management/templates.py by calling basename() on the path with no consideration for a trailing slash:\nself.validate_name(os.path.basename(target), 'directory')\nRemoving potential trailing slashes would solve the problem:\nself.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The handle method calls os.path.basename(target) on line 77 without handling trailing slashes. When target ends with a slash (e.g., 'directory/'), os.path.basename returns an empty string, which fails the validate_name check because empty strings are not valid identifiers.\nExploration notes: The bug is in TemplateCommand.handle method around line 77 where 'if app_or_project == 'app': self.validate_name(os.path.basename(target), 'directory')' is called. PR #11270 added this validation with the following change: before: no validation, after: added 'if app_or_project == 'app': self.validate_name(os.path.basename(target), 'directory')'. The validation logic is in validate_name method which checks name.isidentifier(). The issue occurs when target has trailing slash because os.path.basename('path/') returns empty string.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PE - Missing type conversion: wrap target with .rstrip(os.sep) before passing to os.path.basename() to handle trailing slashes that cause basename to return empty string\n\nFiles to modify: [\n  \"/testbed/django/core/management/templates.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/django/core/management/templates.py\n  Location: TemplateCommand.handle, line 77\n  Change  : REPLACE line 77:\n                self.validate_name(os.path.basename(target), 'directory')\nWITH:\n                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\n  Rationale: When target ends with trailing slash (e.g. 'directory/'), os.path.basename() returns empty string which fails validation. Stripping trailing separators before calling basename ensures we get the actual directory name for validation.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FGavvaV4Y1pLonqTEPLJCv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/django/core/management/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FGavvaV4Y1pLonqTEPLJCv",
+          "content": "[exit_code=0]\nimport cgi\nimport mimetypes\nimport os\nimport posixpath\nimport shutil\nimport stat\nimport tempfile\nfrom importlib import import_module\nfrom urllib.request import urlretrieve\n\nimport django\nfrom django.conf import settings\nfrom django.core.management.base import BaseCommand, CommandError\nfrom django.core.management.utils import handle_extensions\nfrom django.template import Context, Engine\nfrom django.utils import archive\nfrom django.utils.version import get_docs_version\n\n\nclass TemplateCommand(BaseCommand):\n    \"\"\"\n    Copy either a Django application layout template or a Django project\n    layout template into the specified directory.\n\n    :param style: A color style object (see django.core.management.color).\n    :param app_or_project: The string 'app' or 'project'.\n    :param name: The name of the application or project.\n    :param directory: The directory to which the template should be copied.\n    :param options: The additional variables passed to project or app templates\n    \"\"\"\n    requires_system_checks = []\n    # The supported URL schemes\n    url_schemes = ['http', 'https', 'ftp']\n    # Rewrite the following suffixes when determining the target filename.\n    rewrite_template_suffixes = (\n        # Allow shipping invalid .py files without byte-compilation.\n        ('.py-tpl', '.py'),\n    )\n\n    def add_arguments(self, parser):\n        parser.add_argument('name', help='Name of the application or project.')\n        parser.add_argument('directory', nargs='?', help='Optional destination directory')\n        parser.add_argument('--template', help='The path or URL to load the template from.')\n        parser.add_argument(\n            '--extension', '-e', dest='extensions',\n            action='append', default=['py'],\n            help='The file extension(s) to render (default: \"py\"). '\n                 'Separate multiple extensions with commas, or use '\n                 '-e multiple times.'\n        )\n        parser.add_argument(\n            '--name', '-n', dest='files',\n            action='append', default=[],\n            help='The file name(s) to render. Separate multiple file names '\n                 'with commas, or use -n multiple times.'\n        )\n\n    def handle(self, app_or_project, name, target=None, **options):\n        self.app_or_project = app_or_project\n        self.a_or_an = 'an' if app_or_project == 'app' else 'a'\n        self.paths_to_remove = []\n        self.verbosity = options['verbosity']\n\n        self.validate_name(name)\n\n        # if some directory is given, make sure it's nicely expanded\n        if target is None:\n            top_dir = os.path.join(os.getcwd(), name)\n            try:\n                os.makedirs(top_dir)\n            except FileExistsError:\n                raise CommandError(\"'%s' already exists\" % top_dir)\n            except OSError as e:\n                raise CommandError(e)\n        else:\n            if app_or_project == 'app':\n                self.validate_name(os.path.basename(target), 'directory')\n            top_dir = os.path.abspath(os.path.expanduser(target))\n            if not os.path.exists(top_dir):\n                raise CommandError(\"Destination directory '%s' does not \"\n                                   \"exist, please create it first.\" % top_dir)\n\n        extensions = tuple(handle_extensions(options['extensions']))\n        extra_files = []\n        for file in options['files']:\n            extra_files.extend(map(lambda x: x.strip(), file.split(',')))\n        if self.verbosity >= 2:\n            self.stdout.write(\n                'Rendering %s template files with extensions: %s'\n                % (app_or_project, ', '.join(extensions))\n            )\n            self.stdout.write(\n                'Rendering %s template files with filenames: %s'\n                % (app_or_project, ', '.join(extra_files))\n            )\n        base_name = '%s_name' % app_or_project\n        base_subdir = '%s_template' % app_or_project\n        base_directory = '%s_directory' % app_or_project\n        camel_case_name = 'camel_case_%s_name' % app_or_project\n        camel_case_value = ''.join(x for x in name.title() if x != '_')\n\n        context = Context({\n            **options,\n            base_name: name,\n            base_directory: top_dir,\n            camel_case_name: camel_case_value,\n            'docs_version': get_docs_version(),\n            'django_version': django.__version__,\n        }, autoescape=False)\n\n        # Setup a stub settings environment for template rendering\n        if not settings.configured:\n            settings.configure()\n            django.setup()\n\n        template_dir = self.handle_template(options['template'],\n                                            base_subdir)\n        prefix_length = len(template_dir) + 1\n\n        for root, dirs, files in os.walk(template_dir):\n\n            path_rest = root[prefix_length:]\n            relative_dir = path_rest.replace(base_name, name)\n            if relative_dir:\n                target_dir = os.path.join(top_dir, relative_di\n...[truncated]...\n              guessed_filename += ext\n\n        # Move the temporary file to a filename that has better\n        # chances of being recognized by the archive utils\n        if used_name != guessed_filename:\n            guessed_path = os.path.join(tempdir, guessed_filename)\n            shutil.move(the_path, guessed_path)\n            return guessed_path\n\n        # Giving up\n        return the_path\n\n    def splitext(self, the_path):\n        \"\"\"\n        Like os.path.splitext, but takes off .tar, too\n        \"\"\"\n        base, ext = posixpath.splitext(the_path)\n        if base.lower().endswith('.tar'):\n            ext = base[-4:] + ext\n            base = base[:-4]\n        return base, ext\n\n    def extract(self, filename):\n        \"\"\"\n        Extract the given file to a temporary directory and return\n        the path of the directory with the extracted content.\n        \"\"\"\n        prefix = 'django_%s_template_' % self.app_or_project\n        tempdir = tempfile.mkdtemp(prefix=prefix, suffix='_extract')\n        self.paths_to_remove.append(tempdir)\n        if self.verbosity >= 2:\n            self.stdout.write('Extracting %s' % filename)\n        try:\n            archive.extract(filename, tempdir)\n            return tempdir\n        except (archive.ArchiveException, OSError) as e:\n            raise CommandError(\"couldn't extract file %s to %s: %s\" %\n                               (filename, tempdir, e))\n\n    def is_url(self, template):\n        \"\"\"Return True if the name looks like a URL.\"\"\"\n        if ':' not in template:\n            return False\n        scheme = template.split(':', 1)[0].lower()\n        return scheme in self.url_schemes\n\n    def make_writeable(self, filename):\n        \"\"\"\n        Make sure that the file is writeable.\n        Useful if our source is read-only.\n        \"\"\"\n        if not os.access(filename, os.W_OK):\n            st = os.stat(filename)\n            new_permissions = stat.S_IMODE(st.st_mode) | stat.S_IWUSR\n            os.chmod(filename, new_permissions)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the specific line that needs to be changed. Let me see the complete handle method more clearly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01JBATdwmHCvJ2jgTKGgYRdo",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '56,82p' /testbed/django/core/management/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JBATdwmHCvJ2jgTKGgYRdo",
+          "content": "[exit_code=0]\n)\n\n    def handle(self, app_or_project, name, target=None, **options):\n        self.app_or_project = app_or_project\n        self.a_or_an = 'an' if app_or_project == 'app' else 'a'\n        self.paths_to_remove = []\n        self.verbosity = options['verbosity']\n\n        self.validate_name(name)\n\n        # if some directory is given, make sure it's nicely expanded\n        if target is None:\n            top_dir = os.path.join(os.getcwd(), name)\n            try:\n                os.makedirs(top_dir)\n            except FileExistsError:\n                raise CommandError(\"'%s' already exists\" % top_dir)\n            except OSError as e:\n                raise CommandError(e)\n        else:\n            if app_or_project == 'app':\n                self.validate_name(os.path.basename(target), 'directory')\n            top_dir = os.path.abspath(os.path.expanduser(target))\n            if not os.path.exists(top_dir):\n                raise CommandError(\"Destination directory '%s' does not \"\n                                   \"exist, please create it first.\" % top_dir)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see line 77 which needs to be modified. Now I'll apply the fix by using sed to replace that line:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GUHPv5f5s1jTj8FFMfS4vw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -i \"77s/.*/                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')/\" django/core/management/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GUHPv5f5s1jTj8FFMfS4vw",
+          "content": "[exit_code=0]\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01LJiBEQggrKKjSDxgXrqfXY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '56,82p' /testbed/django/core/management/templates.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LJiBEQggrKKjSDxgXrqfXY",
+          "content": "[exit_code=0]\n)\n\n    def handle(self, app_or_project, name, target=None, **options):\n        self.app_or_project = app_or_project\n        self.a_or_an = 'an' if app_or_project == 'app' else 'a'\n        self.paths_to_remove = []\n        self.verbosity = options['verbosity']\n\n        self.validate_name(name)\n\n        # if some directory is given, make sure it's nicely expanded\n        if target is None:\n            top_dir = os.path.join(os.getcwd(), name)\n            try:\n                os.makedirs(top_dir)\n            except FileExistsError:\n                raise CommandError(\"'%s' already exists\" % top_dir)\n            except OSError as e:\n                raise CommandError(e)\n        else:\n            if app_or_project == 'app':\n                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\n            top_dir = os.path.abspath(os.path.expanduser(target))\n            if not os.path.exists(top_dir):\n                raise CommandError(\"Destination directory '%s' does not \"\n                                   \"exist, please create it first.\" % top_dir)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied. Now let me verify with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01P1sTAj6K4QLZ5oHP5PKoBu",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01P1sTAj6K4QLZ5oHP5PKoBu",
+          "content": "[exit_code=0]\ndiff --git a/django/core/management/templates.py b/django/core/management/templates.py\nindex 8dc6068286..f248ab1b71 100644\n--- a/django/core/management/templates.py\n+++ b/django/core/management/templates.py\n@@ -74,7 +74,7 @@ class TemplateCommand(BaseCommand):\n                 raise CommandError(e)\n         else:\n             if app_or_project == 'app':\n-                self.validate_name(os.path.basename(target), 'directory')\n+                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\n             top_dir = os.path.abspath(os.path.expanduser(target))\n             if not os.path.exists(top_dir):\n                 raise CommandError(\"Destination directory '%s' does not \""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly what was needed - the change has been successfully applied to line 77. The fix wraps the `target` parameter with `.rstrip(os.sep)` before passing it to `os.path.basename()`, which will remove any trailing slashes and prevent the basename function from returning an empty string.\n\n```json\n{\n  \"patch\": \"diff --git a/django/core/management/templates.py b/django/core/management/templates.py\\nindex 8dc6068286..f248ab1b71 100644\\n--- a/django/core/management/templates.py\\n+++ b/django/core/management/templates.py\\n@@ -74,7 +74,7 @@ class TemplateCommand(BaseCommand):\\n                 raise CommandError(e)\\n         else:\\n             if app_or_project == 'app':\\n-                self.validate_name(os.path.basename(target), 'directory')\\n+                self.validate_name(os.path.basename(target.rstrip(os.sep)), 'directory')\\n             top_dir = os.path.abspath(os.path.expanduser(target))\\n             if not os.path.exists(top_dir):\\n                 raise CommandError(\\\"Destination directory '%s' does not \\\"\",\n  \"implementation_notes\": \"Fixed the handling of trailing slashes in directory paths for django-admin startapp command. When a target directory with a trailing slash (e.g., 'directory/') is provided, os.path.basename() now gets called on a version without trailing separators using .rstrip(os.sep), ensuring the directory name is properly validated instead of returning an empty string.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-13T09:27:24Z"
+}
