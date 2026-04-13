@@ -1,0 +1,274 @@
+{
+  "instance_id": "sympy__sympy-13915",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sympy/core/mul.py b/sympy/core/mul.py\nindex 4f01eeedb..3c10ec52e 100644\n--- a/sympy/core/mul.py\n+++ b/sympy/core/mul.py\n@@ -423,6 +423,9 @@ def _gather(c_powers):\n             changed = False\n             for b, e in c_powers:\n                 if e.is_zero:\n+                    # Check if base contains infinity before treating expr^0 as 1\n+                    if b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity):\n+                        return [S.NaN], [], None\n                     continue\n                 if e is S.One:\n                     if b.is_Number:",
+  "implementation_notes": "Added infinity detection guard before treating expr^0 as 1 in the Mul.flatten method. When a base expression contains any form of infinity (ComplexInfinity, Infinity, or NegativeInfinity) and the exponent is zero, the function returns NaN instead of skipping the term, preventing incorrect cancellation of undefined expressions like (zoo+a)/(zoo+a).",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sympy__sympy-13915</instance_id>\n\n<problem_statement>\nIssue with a substitution that leads to an undefined expression\n```\r\nPython 3.6.4 |Anaconda custom (64-bit)| (default, Dec 21 2017, 15:39:08) \r\nType 'copyright', 'credits' or 'license' for more information\r\nIPython 6.2.1 -- An enhanced Interactive Python. Type '?' for help.\r\n\r\nIn [1]: from sympy import *\r\n\r\nIn [2]: a,b = symbols('a,b')\r\n\r\nIn [3]: r = (1/(a+b) + 1/(a-b))/(1/(a+b) - 1/(a-b))\r\n\r\nIn [4]: r.subs(b,a)\r\nOut[4]: 1\r\n\r\nIn [6]: import sympy\r\n\r\nIn [7]: sympy.__version__\r\nOut[7]: '1.1.1'\r\n```\r\n\r\nIf b is substituted by a, r is undefined. It is possible to calculate the limit\r\n`r.limit(b,a) # -1`\r\n\r\nBut whenever a subexpression of r is undefined, r itself is undefined.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _gather helper function in Mul._from_args combines exponents of identical bases without checking if the base contains infinity. When expressions like (z+zoo)/(z+zoo) are processed, the exponents 1 and -1 are combined to 0, and the code 'if e.is_zero: continue' unconditionally skips any term with zero exponent, treating expr^0 as 1 even when expr contains ComplexInfinity, which should produce NaN.\nExploration notes: The bug is in the _from_args method of the Mul class around line 425. The _gather function at line 379 combines powers of the same base. The problematic logic is 'if e.is_zero: continue' which skips expressions raised to power 0, effectively returning 1. For expressions containing infinity like (z+zoo), this should return NaN instead of being skipped. The _gather function is called at line 394 for c_powers and line 397 for num_exp.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard placed at wrong level: Add infinity detection guard before treating expr^0 as 1. This prevents undefined cancellation of infinity-containing expressions and returns NaN as mathematically correct, protecting all callers automatically.\n\nFiles to modify: [\n  \"/testbed/sympy/core/mul.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sympy/core/mul.py\n  Location: Mul.flatten, line 425\n  Change  : INSERT after line 424:\n                # Check if base contains infinity before treating expr^0 as 1\n                if e.is_zero and (b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity)):\n                    return [S.NaN], [], None\n  Rationale: When expressions containing infinity are raised to power 0 during multiplication cancellation (like (zoo+a)/(zoo+a)), they should return NaN instead of 1. The current code treats all expr^0 as 1 via 'continue', but infinity^0 is undefined. This guard prevents the problematic cancellation by returning NaN when the base contains any form of infinity.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current code structure.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SX22wjxfMi4Pxj2TeQZcqo",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && head -500 sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SX22wjxfMi4Pxj2TeQZcqo",
+          "content": "[exit_code=0]\nfrom __future__ import print_function, division\n\nfrom collections import defaultdict\nfrom functools import cmp_to_key\nimport operator\n\nfrom .sympify import sympify\nfrom .basic import Basic\nfrom .singleton import S\nfrom .operations import AssocOp\nfrom .cache import cacheit\nfrom .logic import fuzzy_not, _fuzzy_group\nfrom .compatibility import reduce, range\nfrom .expr import Expr\nfrom .evaluate import global_distribute\n\n# internal marker to indicate:\n#   \"there are still non-commutative objects -- don't forget to process them\"\n\n\nclass NC_Marker:\n    is_Order = False\n    is_Mul = False\n    is_Number = False\n    is_Poly = False\n\n    is_commutative = False\n\n\n# Key for sorting commutative args in canonical order\n_args_sortkey = cmp_to_key(Basic.compare)\ndef _mulsort(args):\n    # in-place sorting of args\n    args.sort(key=_args_sortkey)\n\n\ndef _unevaluated_Mul(*args):\n    \"\"\"Return a well-formed unevaluated Mul: Numbers are collected and\n    put in slot 0, any arguments that are Muls will be flattened, and args\n    are sorted. Use this when args have changed but you still want to return\n    an unevaluated Mul.\n\n    Examples\n    ========\n\n    >>> from sympy.core.mul import _unevaluated_Mul as uMul\n    >>> from sympy import S, sqrt, Mul\n    >>> from sympy.abc import x\n    >>> a = uMul(*[S(3.0), x, S(2)])\n    >>> a.args[0]\n    6.00000000000000\n    >>> a.args[1]\n    x\n\n    Two unevaluated Muls with the same arguments will\n    always compare as equal during testing:\n\n    >>> m = uMul(sqrt(2), sqrt(3))\n    >>> m == uMul(sqrt(3), sqrt(2))\n    True\n    >>> u = Mul(sqrt(3), sqrt(2), evaluate=False)\n    >>> m == uMul(u)\n    True\n    >>> m == Mul(*m.args)\n    False\n\n    \"\"\"\n    args = list(args)\n    newargs = []\n    ncargs = []\n    co = S.One\n    while args:\n        a = args.pop()\n        if a.is_Mul:\n            c, nc = a.args_cnc()\n            args.extend(c)\n            if nc:\n                ncargs.append(Mul._from_args(nc))\n        elif a.is_Number:\n            co *= a\n        else:\n            newargs.append(a)\n    _mulsort(newargs)\n    if co is not S.One:\n        newargs.insert(0, co)\n    if ncargs:\n        newargs.append(Mul._from_args(ncargs))\n    return Mul._from_args(newargs)\n\n\nclass Mul(Expr, AssocOp):\n\n    __slots__ = []\n\n    is_Mul = True\n\n    @classmethod\n    def flatten(cls, seq):\n        \"\"\"Return commutative, noncommutative and order arguments by\n        combining related terms.\n\n        Notes\n        =====\n            * In an expression like ``a*b*c``, python process this through sympy\n              as ``Mul(Mul(a, b), c)``. This can have undesirable consequences.\n\n              -  Sometimes terms are not combined as one would like:\n                 {c.f. https://github.com/sympy/sympy/issues/4596}\n\n                >>> from sympy import Mul, sqrt\n                >>> from sympy.abc import x, y, z\n                >>> 2*(x + 1) # this is the 2-arg Mul behavior\n                2*x + 2\n                >>> y*(x + 1)*2\n                2*y*(x + 1)\n                >>> 2*(x + 1)*y # 2-arg result will be obtained first\n                y*(2*x + 2)\n                >>> Mul(2, x + 1, y) # all 3 args simultaneously processed\n                2*y*(x + 1)\n                >>> 2*((x + 1)*y) # parentheses can control this behavior\n                2*y*(x + 1)\n\n                Powers with compound bases may not find a single base to\n                combine with unless all arguments are processed at once.\n                Post-processing may be necessary in such cases.\n                {c.f. https://github.com/sympy/sympy/issues/5728}\n\n                >>> a = sqrt(x*sqrt(y))\n                >>> a**3\n                (x*sqrt(y))**(3/2)\n                >>> Mul(a,a,a)\n                (x*sqrt(y))**(3/2)\n                >>> a*a*a\n                x*sqrt(y)*sqrt(x*sqrt(y))\n                >>> _.subs(a.base, z).subs(z, a.base)\n                (x*sqrt(y))**(3/2)\n\n              -  If more than two terms are being multiplied then all the\n                 previous terms will be re-processed for each new argument.\n                 So if each of ``a``, ``b`` and ``c`` were :class:`Mul`\n                 expression, then ``a*b*c`` (or building up the product\n                 with ``*=``) will process all the arguments of ``a`` and\n                 ``b`` twice: once when ``a*b`` is computed and again when\n                 ``c`` is multiplied.\n\n                 Using ``Mul(a, b, c)`` will process all arguments once.\n\n            * The results of Mul are cached according to arguments, so flatten\n              will only be called once for ``Mul(a, b, c)``. If you can\n              structure a calculation so the arguments are most likely to be\n              repeats then this can save time in computing the answer. For\n              example, say you had a Mul, M, that you wished to divide by ``d[i]``\n              and multiply by ``n[i]`` and you suspect there are many repeats\n              in ``n``. It would be better to compute ``M*n[i]/d[i]`` rather\n      \n...[truncated]...\n        b for b, e in new_c_powers)) != len(new_c_powers):\n                # start over again\n                c_part = []\n                c_powers = _gather(new_c_powers)\n            else:\n                break\n\n        #  x    x     x\n        # 2  * 3  -> 6\n        inv_exp_dict = {}   # exp:Mul(num-bases)     x    x\n                            # e.g.  x:6  for  ... * 2  * 3  * ...\n        for b, e in num_exp:\n            inv_exp_dict.setdefault(e, []).append(b)\n        for e, b in inv_exp_dict.items():\n            inv_exp_dict[e] = cls(*b)\n        c_part.extend([Pow(b, e) for e, b in inv_exp_dict.items() if e])\n\n        # b, e -> e' = sum(e), b\n        # {(1/5, [1/3]), (1/2, [1/12, 1/4]} -> {(1/3, [1/5, 1/2])}\n        comb_e = {}\n        for b, e in pnum_rat.items():\n            comb_e.setdefault(Add(*e), []).append(b)\n        del pnum_rat\n        # process them, reducing exponents to values less than 1\n        # and updating coeff if necessary else adding them to\n        # num_rat for further processing\n        num_rat = []\n        for e, b in comb_e.items():\n            b = cls(*b)\n            if e.q == 1:\n                coeff *= Pow(b, e)\n                continue\n            if e.p > e.q:\n                e_i, ep = divmod(e.p, e.q)\n                coeff *= Pow(b, e_i)\n                e = Rational(ep, e.q)\n            num_rat.append((b, e))\n        del comb_e\n\n        # extract gcd of bases in num_rat\n        # 2**(1/3)*6**(1/4) -> 2**(1/3+1/4)*3**(1/4)\n        pnew = defaultdict(list)\n        i = 0  # steps through num_rat which may grow\n        while i < len(num_rat):\n            bi, ei = num_rat[i]\n            grow = []\n            for j in range(i + 1, len(num_rat)):\n                bj, ej = num_rat[j]\n                g = bi.gcd(bj)\n                if g is not S.One:\n                    # 4**r1*6**r2 -> 2**(r1+r2)  *  2**r1 *  3**r2\n                    # this might have a gcd with something else\n                    e = ei + ej\n                    if e.q == 1:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read more of the file to locate the exact area mentioned in the proposal:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Sd31CRUK7EFfQcmqCkRESe",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '370:450p' sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Sd31CRUK7EFfQcmqCkRESe",
+          "content": "[exit_code=1]\nsed: -e expression #1, char 4: : doesn't want any addresses"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me fix that command:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01EbTbPK8BsqeFHP8Dqq2GTc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '370,450p' sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EbTbPK8BsqeFHP8Dqq2GTc",
+          "content": "[exit_code=0]\n# as_coeff_Mul.\n        #\n        # Unfortunately, this isn't smart enough to consider combining into\n        # exponents that might already be adds, so things like:\n        #  z - y    y\n        # x      * x  will be left alone.  This is because checking every possible\n        # combination can slow things down.\n\n        # gather exponents of common bases...\n        def _gather(c_powers):\n            common_b = {}  # b:e\n            for b, e in c_powers:\n                co = e.as_coeff_Mul()\n                common_b.setdefault(b, {}).setdefault(\n                    co[1], []).append(co[0])\n            for b, d in common_b.items():\n                for di, li in d.items():\n                    d[di] = Add(*li)\n            new_c_powers = []\n            for b, e in common_b.items():\n                new_c_powers.extend([(b, c*t) for t, c in e.items()])\n            return new_c_powers\n\n        # in c_powers\n        c_powers = _gather(c_powers)\n\n        # and in num_exp\n        num_exp = _gather(num_exp)\n\n        # --- PART 2 ---\n        #\n        # o process collected powers  (x**0 -> 1; x**1 -> x; otherwise Pow)\n        # o combine collected powers  (2**x * 3**x -> 6**x)\n        #   with numeric base\n\n        # ................................\n        # now we have:\n        # - coeff:\n        # - c_powers:    (b, e)\n        # - num_exp:     (2, e)\n        # - pnum_rat:    {(1/3, [1/3, 2/3, 1/4])}\n\n        #  0             1\n        # x  -> 1       x  -> x\n\n        # this should only need to run twice; if it fails because\n        # it needs to be run more times, perhaps this should be\n        # changed to a \"while True\" loop -- the only reason it\n        # isn't such now is to allow a less-than-perfect result to\n        # be obtained rather than raising an error or entering an\n        # infinite loop\n        for i in range(2):\n            new_c_powers = []\n            changed = False\n            for b, e in c_powers:\n                if e.is_zero:\n                    continue\n                if e is S.One:\n                    if b.is_Number:\n                        coeff *= b\n                        continue\n                    p = b\n                if e is not S.One:\n                    p = Pow(b, e)\n                    # check to make sure that the base doesn't change\n                    # after exponentiation; to allow for unevaluated\n                    # Pow, we only do so if b is not already a Pow\n                    if p.is_Pow and not b.is_Pow:\n                        bi = b\n                        b, e = p.as_base_exp()\n                        if b != bi:\n                            changed = True\n                c_part.append(p)\n                new_c_powers.append((b, e))\n            # there might have been a change, but unless the base\n            # matches some other base, there is nothing to do\n            if changed and len(set(\n                    b for b, e in new_c_powers)) != len(new_c_powers):\n                # start over again\n                c_part = []\n                c_powers = _gather(new_c_powers)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the exact area around line 425:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013wPbfU5RnNK5Lm2nrap3iM",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '410,445p' sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013wPbfU5RnNK5Lm2nrap3iM",
+          "content": "[exit_code=0]\n# - pnum_rat:    {(1/3, [1/3, 2/3, 1/4])}\n\n        #  0             1\n        # x  -> 1       x  -> x\n\n        # this should only need to run twice; if it fails because\n        # it needs to be run more times, perhaps this should be\n        # changed to a \"while True\" loop -- the only reason it\n        # isn't such now is to allow a less-than-perfect result to\n        # be obtained rather than raising an error or entering an\n        # infinite loop\n        for i in range(2):\n            new_c_powers = []\n            changed = False\n            for b, e in c_powers:\n                if e.is_zero:\n                    continue\n                if e is S.One:\n                    if b.is_Number:\n                        coeff *= b\n                        continue\n                    p = b\n                if e is not S.One:\n                    p = Pow(b, e)\n                    # check to make sure that the base doesn't change\n                    # after exponentiation; to allow for unevaluated\n                    # Pow, we only do so if b is not already a Pow\n                    if p.is_Pow and not b.is_Pow:\n                        bi = b\n                        b, e = p.as_base_exp()\n                        if b != bi:\n                            changed = True\n                c_part.append(p)\n                new_c_powers.append((b, e))\n            # there might have been a change, but unless the base\n            # matches some other base, there is nothing to do"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I found the location. The problematic code is at line 424-425 where it says:\n```python\nif e.is_zero:\n    continue\n```\n\nAccording to the solution proposal, I need to insert a check after line 424 to guard against infinity before treating expr^0 as 1. Let me examine the area more carefully and then apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01R54APR5wb9VsijqYg2pWRQ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '200,230p' sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01R54APR5wb9VsijqYg2pWRQ",
+          "content": "[exit_code=0]\nreturn rv\n\n        # apply associativity, separate commutative part of seq\n        c_part = []         # out: commutative factors\n        nc_part = []        # out: non-commutative factors\n\n        nc_seq = []\n\n        coeff = S.One       # standalone term\n                            # e.g. 3 * ...\n\n        c_powers = []       # (base,exp)      n\n                            # e.g. (x,n) for x\n\n        num_exp = []        # (num-base, exp)           y\n                            # e.g.  (3, y)  for  ... * 3  * ...\n\n        neg1e = S.Zero      # exponent on -1 extracted from Number-based Pow and I\n\n        pnum_rat = {}       # (num-base, Rat-exp)          1/2\n                            # e.g.  (3, 1/2)  for  ... * 3     * ...\n\n        order_symbols = None\n\n        # --- PART 1 ---\n        #\n        # \"collect powers and coeff\":\n        #\n        # o coeff\n        # o c_powers\n        # o num_exp"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me apply the fix. I need to modify line 424 to add a check for infinity before allowing e.is_zero to continue. Let me create a Python script to make this change:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0134GkzMPxkxXktJxQZ8Lhz4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\nimport re\n\n# Read the file\nwith open('sympy/core/mul.py', 'r') as f:\n    content = f.read()\n\n# Find the target location - the loop around line 420-424\n# We need to replace the part where e.is_zero just continues\n# with a check for infinity first\n\nold_code = \"\"\"        for i in range(2):\n            new_c_powers = []\n            changed = False\n            for b, e in c_powers:\n                if e.is_zero:\n                    continue\"\"\"\n\nnew_code = \"\"\"        for i in range(2):\n            new_c_powers = []\n            changed = False\n            for b, e in c_powers:\n                if e.is_zero:\n                    # Check if base contains infinity before treating expr^0 as 1\n                    if b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity):\n                        return [S.NaN], [], None\n                    continue\"\"\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    with open('sympy/core/mul.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully applied the fix!\")\nelse:\n    print(\"Could not find the target code pattern\")\n    print(\"Looking for:\")\n    print(repr(old_code))\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0134GkzMPxkxXktJxQZ8Lhz4",
+          "content": "[exit_code=0]\nSuccessfully applied the fix!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the change was applied correctly by viewing the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014Kt5CEqGVb8RaF9dC5pMog",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '410,445p' sympy/core/mul.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014Kt5CEqGVb8RaF9dC5pMog",
+          "content": "[exit_code=0]\n# - pnum_rat:    {(1/3, [1/3, 2/3, 1/4])}\n\n        #  0             1\n        # x  -> 1       x  -> x\n\n        # this should only need to run twice; if it fails because\n        # it needs to be run more times, perhaps this should be\n        # changed to a \"while True\" loop -- the only reason it\n        # isn't such now is to allow a less-than-perfect result to\n        # be obtained rather than raising an error or entering an\n        # infinite loop\n        for i in range(2):\n            new_c_powers = []\n            changed = False\n            for b, e in c_powers:\n                if e.is_zero:\n                    # Check if base contains infinity before treating expr^0 as 1\n                    if b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity):\n                        return [S.NaN], [], None\n                    continue\n                if e is S.One:\n                    if b.is_Number:\n                        coeff *= b\n                        continue\n                    p = b\n                if e is not S.One:\n                    p = Pow(b, e)\n                    # check to make sure that the base doesn't change\n                    # after exponentiation; to allow for unevaluated\n                    # Pow, we only do so if b is not already a Pow\n                    if p.is_Pow and not b.is_Pow:\n                        bi = b\n                        b, e = p.as_base_exp()\n                        if b != bi:\n                            changed = True\n                c_part.append(p)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied correctly. Now let me run git diff to confirm the complete patch:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01LB9BTr29pKtANUj5orYtZY",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01LB9BTr29pKtANUj5orYtZY",
+          "content": "[exit_code=0]\ndiff --git a/sympy/core/mul.py b/sympy/core/mul.py\nindex 4f01eeedb..3c10ec52e 100644\n--- a/sympy/core/mul.py\n+++ b/sympy/core/mul.py\n@@ -423,6 +423,9 @@ def _gather(c_powers):\n             changed = False\n             for b, e in c_powers:\n                 if e.is_zero:\n+                    # Check if base contains infinity before treating expr^0 as 1\n+                    if b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity):\n+                        return [S.NaN], [], None\n                     continue\n                 if e is S.One:\n                     if b.is_Number:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The patch is correct and minimal, applying exactly what was specified in the solution proposal. The change adds a guard to check if the base contains any form of infinity before treating expr^0 as 1 (which is what the `continue` statement does). When infinity is detected, it returns NaN instead.\n\n```json\n{\n  \"patch\": \"diff --git a/sympy/core/mul.py b/sympy/core/mul.py\\nindex 4f01eeedb..3c10ec52e 100644\\n--- a/sympy/core/mul.py\\n+++ b/sympy/core/mul.py\\n@@ -423,6 +423,9 @@ def _gather(c_powers):\\n             changed = False\\n             for b, e in c_powers:\\n                 if e.is_zero:\\n+                    # Check if base contains infinity before treating expr^0 as 1\\n+                    if b.has(S.ComplexInfinity) or b.has(S.Infinity) or b.has(S.NegativeInfinity):\\n+                        return [S.NaN], [], None\\n                     continue\\n                 if e is S.One:\\n                     if b.is_Number:\",\n  \"implementation_notes\": \"Added infinity detection guard before treating expr^0 as 1 in the Mul.flatten method. When a base expression contains any form of infinity (ComplexInfinity, Infinity, or NegativeInfinity) and the exponent is zero, the function returns NaN instead of skipping the term, preventing incorrect cancellation of undefined expressions like (zoo+a)/(zoo+a).\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 9,
+  "timestamp": "2026-04-13T21:02:04Z"
+}

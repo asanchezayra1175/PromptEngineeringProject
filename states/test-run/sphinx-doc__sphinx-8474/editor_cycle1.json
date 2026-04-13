@@ -1,0 +1,243 @@
+{
+  "instance_id": "sphinx-doc__sphinx-8474",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sphinx/environment/collectors/toctree.py b/sphinx/environment/collectors/toctree.py\nindex 14ff4ed74..9a10b6441 100644\n--- a/sphinx/environment/collectors/toctree.py\n+++ b/sphinx/environment/collectors/toctree.py\n@@ -223,7 +223,7 @@ class TocTreeCollector(EnvironmentCollector):\n         def get_figtype(node: Node) -> str:\n             for domain in env.domains.values():\n                 figtype = domain.get_enumerable_node_type(node)\n-                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\n+                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\n                     # Skip if uncaptioned node\n                     continue",
+  "implementation_notes": "Restricted the caption check in get_figtype() to only 'figure' and 'table' types in the 'std' domain, preventing uncaptioned enumerable nodes from other extensions (like sphinx-proof and sphinx-exercise) from being skipped while maintaining the intended figure/table caption requirement.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sphinx-doc__sphinx-8474</instance_id>\n\n<problem_statement>\nv3.3 upgrade started generating \"WARNING: no number is assigned for table\" warnings\nWe've updated to Sphinx 3.3 in our documentation, and suddenly the following warning started popping up in our builds when we build either `singlehtml` or `latex`.:\r\n\r\n`WARNING: no number is assigned for table:`\r\n\r\nI looked through the changelog but it didn't seem like there was anything related to `numref` that was changed, but perhaps I missed something? Could anyone point me to a change in the numref logic so I can figure out where these warnings are coming from?\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The assign_figure_numbers method includes a check that skips uncaptioned nodes for the 'std' domain, preventing them from getting figure numbers assigned to env.toc_fignumbers. When numref later tries to reference such uncaptioned tables/figures, the get_fignumber method fails to find a number and triggers a ValueError, causing the warning to be logged.\nExploration notes: The bug is in the get_figtype function nested inside assign_figure_numbers method around line 230. The specific problematic code from commit 66dda1fc50249e9da62e79380251d8795b8e36df: before: no check for captions, after: 'if domain.name == 'std' and not domain.get_numfig_title(node): continue'. The warning is generated in sphinx/domains/std.py _resolve_numref_xref method when get_fignumber raises ValueError. The change affects how env.toc_fignumbers is populated during the figure numbering assignment phase.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PA - None/empty guard placed at wrong level: The caption check was applied too broadly to all 'std' domain enumerable nodes. The fix restricts it to only figure and table types, preserving backward compatibility for extensions while maintaining the intended figure/table caption requirement.\n\nFiles to modify: [\n  \"/testbed/sphinx/environment/collectors/toctree.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sphinx/environment/collectors/toctree.py\n  Location: TocTreeCollector.assign_figure_numbers.get_figtype, line 226\n  Change  : REPLACE line 226:\n                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\nWITH:\n                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\n  Rationale: The original condition was too broad, skipping ALL uncaptioned enumerable nodes in the 'std' domain. This broke extensions that depend on uncaptioned enumerable nodes (like sphinx-proof and sphinx-exercise). The fix restricts the caption requirement to only 'figure' and 'table' types, matching the documented behavior that figures and tables require captions for numbering, while allowing other enumerable node types to work without captions.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GzDWuwqKQSfUTDSxn8QToa",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/sphinx/environment/collectors/toctree.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GzDWuwqKQSfUTDSxn8QToa",
+          "content": "[exit_code=0]\n\"\"\"\n    sphinx.environment.collectors.toctree\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n    Toctree collector for sphinx.environment.\n\n    :copyright: Copyright 2007-2020 by the Sphinx team, see AUTHORS.\n    :license: BSD, see LICENSE for details.\n\"\"\"\n\nfrom typing import Any, Dict, List, Set, Tuple, TypeVar, cast\n\nfrom docutils import nodes\nfrom docutils.nodes import Element, Node\n\nfrom sphinx import addnodes\nfrom sphinx.application import Sphinx\nfrom sphinx.environment import BuildEnvironment\nfrom sphinx.environment.adapters.toctree import TocTree\nfrom sphinx.environment.collectors import EnvironmentCollector\nfrom sphinx.locale import __\nfrom sphinx.transforms import SphinxContentsFilter\nfrom sphinx.util import logging, url_re\n\nif False:\n    # For type annotation\n    from typing import Type  # for python3.5.1\n\n\nN = TypeVar('N')\n\nlogger = logging.getLogger(__name__)\n\n\nclass TocTreeCollector(EnvironmentCollector):\n    def clear_doc(self, app: Sphinx, env: BuildEnvironment, docname: str) -> None:\n        env.tocs.pop(docname, None)\n        env.toc_secnumbers.pop(docname, None)\n        env.toc_fignumbers.pop(docname, None)\n        env.toc_num_entries.pop(docname, None)\n        env.toctree_includes.pop(docname, None)\n        env.glob_toctrees.discard(docname)\n        env.numbered_toctrees.discard(docname)\n\n        for subfn, fnset in list(env.files_to_rebuild.items()):\n            fnset.discard(docname)\n            if not fnset:\n                del env.files_to_rebuild[subfn]\n\n    def merge_other(self, app: Sphinx, env: BuildEnvironment, docnames: Set[str],\n                    other: BuildEnvironment) -> None:\n        for docname in docnames:\n            env.tocs[docname] = other.tocs[docname]\n            env.toc_num_entries[docname] = other.toc_num_entries[docname]\n            if docname in other.toctree_includes:\n                env.toctree_includes[docname] = other.toctree_includes[docname]\n            if docname in other.glob_toctrees:\n                env.glob_toctrees.add(docname)\n            if docname in other.numbered_toctrees:\n                env.numbered_toctrees.add(docname)\n\n        for subfn, fnset in other.files_to_rebuild.items():\n            env.files_to_rebuild.setdefault(subfn, set()).update(fnset & set(docnames))\n\n    def process_doc(self, app: Sphinx, doctree: nodes.document) -> None:\n        \"\"\"Build a TOC from the doctree and store it in the inventory.\"\"\"\n        docname = app.env.docname\n        numentries = [0]  # nonlocal again...\n\n        def traverse_in_section(node: Element, cls: \"Type[N]\") -> List[N]:\n            \"\"\"Like traverse(), but stay within the same section.\"\"\"\n            result = []  # type: List[N]\n            if isinstance(node, cls):\n                result.append(node)\n            for child in node.children:\n                if isinstance(child, nodes.section):\n                    continue\n                elif isinstance(child, nodes.Element):\n                    result.extend(traverse_in_section(child, cls))\n            return result\n\n        def build_toc(node: Element, depth: int = 1) -> nodes.bullet_list:\n            entries = []  # type: List[Element]\n            for sectionnode in node:\n                # find all toctree nodes in this section and add them\n                # to the toc (just copying the toctree node which is then\n                # resolved in self.get_and_resolve_doctree)\n                if isinstance(sectionnode, nodes.section):\n                    title = sectionnode[0]\n                    # copy the contents of the section title, but without references\n                    # and unnecessary stuff\n                    visitor = SphinxContentsFilter(doctree)\n                    title.walkabout(visitor)\n                    nodetext = visitor.get_entry_text()\n                    if not numentries[0]:\n                        # for the very first toc entry, don't add an anchor\n                        # as it is the file's title anyway\n                        anchorname = ''\n                    else:\n                        anchorname = '#' + sectionnode['ids'][0]\n                    numentries[0] += 1\n                    # make these nodes:\n                    # list_item -> compact_paragraph -> reference\n                    reference = nodes.reference(\n                        '', '', internal=True, refuri=docname,\n                        anchorname=anchorname, *nodetext)\n                    para = addnodes.compact_paragraph('', '', reference)\n                    item = nodes.list_item('', para)  # type: Element\n                    sub_item = build_toc(sectionnode, depth + 1)\n                    if sub_item:\n                        item += sub_item\n                    entries.append(item)\n                elif isinstance(sectionnode, addnodes.only):\n                    onlynode = addnodes.only(expr=sectionnode['expr'])\n                    blist = build_toc(sectionnode, depth)\n                    if blist:\n                        onlynode += blist.children\n...[truncated]...\n].setdefault(figtype, {})\n            figure_id = fignode['ids'][0]\n\n            fignumbers[figure_id] = get_next_fignumber(figtype, secnum)\n\n        def _walk_doctree(docname: str, doctree: Element, secnum: Tuple[int, ...]) -> None:\n            for subnode in doctree.children:\n                if isinstance(subnode, nodes.section):\n                    next_secnum = get_section_number(docname, subnode)\n                    if next_secnum:\n                        _walk_doctree(docname, subnode, next_secnum)\n                    else:\n                        _walk_doctree(docname, subnode, secnum)\n                elif isinstance(subnode, addnodes.toctree):\n                    for title, subdocname in subnode['entries']:\n                        if url_re.match(subdocname) or subdocname == 'self':\n                            # don't mess with those\n                            continue\n\n                        _walk_doc(subdocname, secnum)\n                elif isinstance(subnode, nodes.Element):\n                    figtype = get_figtype(subnode)\n                    if figtype and subnode['ids']:\n                        register_fignumber(docname, secnum, figtype, subnode)\n\n                    _walk_doctree(docname, subnode, secnum)\n\n        def _walk_doc(docname: str, secnum: Tuple[int, ...]) -> None:\n            if docname not in assigned:\n                assigned.add(docname)\n                doctree = env.get_doctree(docname)\n                _walk_doctree(docname, doctree, secnum)\n\n        if env.config.numfig:\n            _walk_doc(env.config.master_doc, tuple())\n            for docname, fignums in env.toc_fignumbers.items():\n                if fignums != old_fignumbers.get(docname):\n                    rewrite_needed.append(docname)\n\n        return rewrite_needed\n\n\ndef setup(app: Sphinx) -> Dict[str, Any]:\n    app.add_env_collector(TocTreeCollector)\n\n    return {\n        'version': 'builtin',\n        'parallel_read_safe': True,\n        'parallel_write_safe': True,\n    }"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I need to see more of the file to find the `get_figtype` function. Let me search for it:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Agt4B2yGaJuy1unqMvvVZ5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "grep -n \"def get_figtype\" /testbed/sphinx/environment/collectors/toctree.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Agt4B2yGaJuy1unqMvvVZ5",
+          "content": "[exit_code=0]\n223:        def get_figtype(node: Node) -> str:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read the file around line 223 to see the `get_figtype` function:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01M3xhJzWBvt8PcEhvj5vstW",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '200,250p' /testbed/sphinx/environment/collectors/toctree.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01M3xhJzWBvt8PcEhvj5vstW",
+          "content": "[exit_code=0]\nfor docname in env.numbered_toctrees:\n            assigned.add(docname)\n            doctree = env.get_doctree(docname)\n            for toctreenode in doctree.traverse(addnodes.toctree):\n                depth = toctreenode.get('numbered', 0)\n                if depth:\n                    # every numbered toctree gets new numbering\n                    numstack = [0]\n                    _walk_toctree(toctreenode, depth)\n\n        return rewrite_needed\n\n    def assign_figure_numbers(self, env: BuildEnvironment) -> List[str]:\n        \"\"\"Assign a figure number to each figure under a numbered toctree.\"\"\"\n\n        rewrite_needed = []\n\n        assigned = set()  # type: Set[str]\n        old_fignumbers = env.toc_fignumbers\n        env.toc_fignumbers = {}\n        fignum_counter = {}  # type: Dict[str, Dict[Tuple[int, ...], int]]\n\n        def get_figtype(node: Node) -> str:\n            for domain in env.domains.values():\n                figtype = domain.get_enumerable_node_type(node)\n                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\n                    # Skip if uncaptioned node\n                    continue\n\n                if figtype:\n                    return figtype\n\n            return None\n\n        def get_section_number(docname: str, section: nodes.section) -> Tuple[int, ...]:\n            anchorname = '#' + section['ids'][0]\n            secnumbers = env.toc_secnumbers.get(docname, {})\n            if anchorname in secnumbers:\n                secnum = secnumbers.get(anchorname)\n            else:\n                secnum = secnumbers.get('')\n\n            return secnum or tuple()\n\n        def get_next_fignumber(figtype: str, secnum: Tuple[int, ...]) -> Tuple[int, ...]:\n            counter = fignum_counter.setdefault(figtype, {})\n\n            secnum = secnum[:env.config.numfig_secnum_depth]\n            counter[secnum] = counter.get(secnum, 0) + 1\n            return secnum + (counter[secnum],)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the issue. The problematic code is on line 226. Let me verify the exact structure:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01RVkvwx1HkNgisJ2JGMcek4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '223,235p' /testbed/sphinx/environment/collectors/toctree.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01RVkvwx1HkNgisJ2JGMcek4",
+          "content": "[exit_code=0]\ndef get_figtype(node: Node) -> str:\n            for domain in env.domains.values():\n                figtype = domain.get_enumerable_node_type(node)\n                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\n                    # Skip if uncaptioned node\n                    continue\n\n                if figtype:\n                    return figtype\n\n            return None\n\n        def get_section_number(docname: str, section: nodes.section) -> Tuple[int, ...]:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the issue. According to the solution proposal, I need to change line 226 to restrict the caption check to only 'figure' and 'table' types. The current code skips ALL uncaptioned nodes for the 'std' domain, but it should only skip uncaptioned figures and tables.\n\nLet me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012qNN63E4GwE59qtvZHCGWc",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "python3 << 'EOF'\n# Read the file\nwith open('/testbed/sphinx/environment/collectors/toctree.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the problematic line\n# Current: if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\n# New: if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\n\nold_code = \"                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\"\nnew_code = \"                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    print(\"\u2713 Replacement successful\")\nelse:\n    print(\"\u2717 Old code not found\")\n    # Try to find what's actually there\n    import re\n    matches = re.findall(r\"if domain\\.name == 'std'.*?# type: ignore\", content)\n    for match in matches:\n        print(f\"Found: {repr(match)}\")\n\n# Write the file back\nwith open('/testbed/sphinx/environment/collectors/toctree.py', 'w') as f:\n    f.write(content)\n\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012qNN63E4GwE59qtvZHCGWc",
+          "content": "[exit_code=0]\n\u2713 Replacement successful"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Great! Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FbKbCD33M2FfyhYcQ99M3y",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '223,235p' /testbed/sphinx/environment/collectors/toctree.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FbKbCD33M2FfyhYcQ99M3y",
+          "content": "[exit_code=0]\ndef get_figtype(node: Node) -> str:\n            for domain in env.domains.values():\n                figtype = domain.get_enumerable_node_type(node)\n                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\n                    # Skip if uncaptioned node\n                    continue\n\n                if figtype:\n                    return figtype\n\n            return None\n\n        def get_section_number(docname: str, section: nodes.section) -> Tuple[int, ...]:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied successfully. Now let me verify it with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Nvw377FaHhPbPFcL7aXCnE",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Nvw377FaHhPbPFcL7aXCnE",
+          "content": "[exit_code=0]\ndiff --git a/sphinx/environment/collectors/toctree.py b/sphinx/environment/collectors/toctree.py\nindex 14ff4ed74..9a10b6441 100644\n--- a/sphinx/environment/collectors/toctree.py\n+++ b/sphinx/environment/collectors/toctree.py\n@@ -223,7 +223,7 @@ class TocTreeCollector(EnvironmentCollector):\n         def get_figtype(node: Node) -> str:\n             for domain in env.domains.values():\n                 figtype = domain.get_enumerable_node_type(node)\n-                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\n+                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\n                     # Skip if uncaptioned node\n                     continue"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows exactly what we expected. The change is minimal and correct:\n\n1. The old line checked if a node in the 'std' domain lacks a caption and skipped it entirely\n2. The new line restricts this check to only 'figure' and 'table' types, which means other enumerable node types (like those from sphinx-proof or sphinx-exercise extensions) can still be processed even without captions\n\nThis matches the solution proposal perfectly.\n\n```json\n{\n  \"patch\": \"diff --git a/sphinx/environment/collectors/toctree.py b/sphinx/environment/collectors/toctree.py\\nindex 14ff4ed74..9a10b6441 100644\\n--- a/sphinx/environment/collectors/toctree.py\\n+++ b/sphinx/environment/collectors/toctree.py\\n@@ -223,7 +223,7 @@ class TocTreeCollector(EnvironmentCollector):\\n         def get_figtype(node: Node) -> str:\\n             for domain in env.domains.values():\\n                 figtype = domain.get_enumerable_node_type(node)\\n-                if domain.name == 'std' and not domain.get_numfig_title(node):  # type: ignore\\n+                if domain.name == 'std' and figtype in ('figure', 'table') and not domain.get_numfig_title(node):  # type: ignore\\n                     # Skip if uncaptioned node\\n                     continue\",\n  \"implementation_notes\": \"Restricted the caption check in get_figtype() to only 'figure' and 'table' types in the 'std' domain, preventing uncaptioned enumerable nodes from other extensions (like sphinx-proof and sphinx-exercise) from being skipped while maintaining the intended figure/table caption requirement.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 8,
+  "timestamp": "2026-04-13T19:22:22Z"
+}

@@ -1,0 +1,238 @@
+{
+  "instance_id": "sphinx-doc__sphinx-8801",
+  "status": "success",
+  "cycle": 2,
+  "attempt": 1,
+  "patch": "diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py\nindex 477aae247..80341a8de 100644\n--- a/sphinx/ext/autodoc/importer.py\n+++ b/sphinx/ext/autodoc/importer.py\n@@ -307,7 +307,7 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable\n                 analyzer = ModuleAnalyzer.for_module(modname)\n                 analyzer.analyze()\n                 for (ns, name), docstring in analyzer.attr_docs.items():\n-                    if ns == qualname and name not in members:\n+                    if ns == qualname and (name not in members or not members[name].docstring):\n                         members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\n                                                      docstring='\\n'.join(docstring))\n             except (AttributeError, PycodeError):",
+  "implementation_notes": "Modified the condition in get_class_members() function to allow updating existing members that lack docstrings. This fixes the bug where annotation-only attributes inherited from superclasses were treated as undocumented because they were initially added without docstrings and then skipped when docstrings were found in the analyzer.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sphinx-doc__sphinx-8801</instance_id>\n\n<problem_statement>\nautodoc: The annotation only member in superclass is treated as \"undocumented\"\n**Describe the bug**\r\nautodoc: The annotation only member in superclass is treated as \"undocumented\".\r\n\r\n**To Reproduce**\r\n\r\n```\r\n# example.py\r\nclass Foo:\r\n    \"\"\"docstring\"\"\"\r\n    attr1: int  #: docstring\r\n\r\n\r\nclass Bar(Foo):\r\n    \"\"\"docstring\"\"\"\r\n    attr2: str  #: docstring\r\n```\r\n```\r\n# index.rst\r\n.. autoclass:: example.Bar\r\n   :members:\r\n   :inherited-members:\r\n```\r\n\r\n`Bar.attr1` is not documented. It will be shown if I give `:undoc-members:` option to the autoclass directive call. It seems the attribute is treated as undocumented.\r\n\r\n**Expected behavior**\r\nIt should be shown.\r\n\r\n**Your project**\r\nNo\r\n\r\n**Screenshots**\r\nNo\r\n\r\n**Environment info**\r\n- OS: Mac\r\n- Python version: 3.9.1\r\n- Sphinx version: HEAD of 3.x\r\n- Sphinx extensions: sphinx.ext.autodoc\r\n- Extra tools: No\r\n\r\n**Additional context**\r\nNo\r\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The autodoc extension incorrectly treats annotation-only attributes inherited from a superclass as undocumented. When a class inherits an annotation-only attribute with an inline docstring (e.g., attr1: int #: docstring), the :inherited-members: option fails to include it in the documentation, but the :undoc-members: option does include it, indicating the attribute is classified as undocumented rather than documented.\nExploration notes: The issue involves ClassDocumenter in /testbed/sphinx/ext/autodoc/__init__.py which handles autoclass directives. The get_class_members function from sphinx.ext.autodoc.importer is imported and likely involved in member discovery. Test file /testbed/tests/test_ext_autodoc_autoclass.py contains tests for inherited members. The test target test_uninitialized_attributes suggests this relates to annotation-only attributes without initialization. Annotation-only attributes are defined in /testbed/tests/roots/test-ext-autodoc/target/annotations.py as attr1: myint with #: docstring comments.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD \u2014 Condition boundary wrong: The condition excludes valid cases where existing annotation-only members need docstring updates. Single token change from strict exclusion to conditional update, ensuring inherited annotation-only attributes get proper documentation status.\n\nFiles to modify: [\n  \"/testbed/sphinx/ext/autodoc/importer.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sphinx/ext/autodoc/importer.py\n  Location: get_class_members, line 310\n  Change  : REPLACE line 310:\n                    if ns == qualname and name not in members:\nWITH:\n                    if ns == qualname and (name not in members or not members[name].docstring):\n  Rationale: The condition excludes valid cases where existing annotation-only members need docstring updates. Annotation-only attributes from superclasses are added first without docstrings (line 301), then when docstrings are found, they are skipped because the member already exists. The fix allows updating existing members that lack docstrings.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file that needs to be modified to understand the context and apply the fix.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01SfETsf8PtqCAQhef1WuiLK",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat /testbed/sphinx/ext/autodoc/importer.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SfETsf8PtqCAQhef1WuiLK",
+          "content": "[exit_code=0]\n\"\"\"\n    sphinx.ext.autodoc.importer\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n    Importer utilities for autodoc\n\n    :copyright: Copyright 2007-2021 by the Sphinx team, see AUTHORS.\n    :license: BSD, see LICENSE for details.\n\"\"\"\n\nimport importlib\nimport traceback\nimport warnings\nfrom typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple\n\nfrom sphinx.deprecation import (RemovedInSphinx40Warning, RemovedInSphinx50Warning,\n                                deprecated_alias)\nfrom sphinx.ext.autodoc.mock import ismock, undecorate\nfrom sphinx.pycode import ModuleAnalyzer, PycodeError\nfrom sphinx.util import logging\nfrom sphinx.util.inspect import (getannotations, getmro, getslots, isclass, isenumclass,\n                                 safe_getattr)\n\nif False:\n    # For type annotation\n    from typing import Type  # NOQA\n\n    from sphinx.ext.autodoc import ObjectMember\n\nlogger = logging.getLogger(__name__)\n\n\ndef mangle(subject: Any, name: str) -> str:\n    \"\"\"mangle the given name.\"\"\"\n    try:\n        if isclass(subject) and name.startswith('__') and not name.endswith('__'):\n            return \"_%s%s\" % (subject.__name__, name)\n    except AttributeError:\n        pass\n\n    return name\n\n\ndef unmangle(subject: Any, name: str) -> Optional[str]:\n    \"\"\"unmangle the given name.\"\"\"\n    try:\n        if isclass(subject) and not name.endswith('__'):\n            prefix = \"_%s__\" % subject.__name__\n            if name.startswith(prefix):\n                return name.replace(prefix, \"__\", 1)\n            else:\n                for cls in subject.__mro__:\n                    prefix = \"_%s__\" % cls.__name__\n                    if name.startswith(prefix):\n                        # mangled attribute defined in parent class\n                        return None\n    except AttributeError:\n        pass\n\n    return name\n\n\ndef import_module(modname: str, warningiserror: bool = False) -> Any:\n    \"\"\"\n    Call importlib.import_module(modname), convert exceptions to ImportError\n    \"\"\"\n    try:\n        with warnings.catch_warnings():\n            warnings.filterwarnings(\"ignore\", category=ImportWarning)\n            with logging.skip_warningiserror(not warningiserror):\n                return importlib.import_module(modname)\n    except BaseException as exc:\n        # Importing modules may cause any side effects, including\n        # SystemExit, so we need to catch all errors.\n        raise ImportError(exc, traceback.format_exc()) from exc\n\n\ndef import_object(modname: str, objpath: List[str], objtype: str = '',\n                  attrgetter: Callable[[Any, str], Any] = safe_getattr,\n                  warningiserror: bool = False) -> Any:\n    if objpath:\n        logger.debug('[autodoc] from %s import %s', modname, '.'.join(objpath))\n    else:\n        logger.debug('[autodoc] import %s', modname)\n\n    try:\n        module = None\n        exc_on_importing = None\n        objpath = list(objpath)\n        while module is None:\n            try:\n                module = import_module(modname, warningiserror=warningiserror)\n                logger.debug('[autodoc] import %s => %r', modname, module)\n            except ImportError as exc:\n                logger.debug('[autodoc] import %s => failed', modname)\n                exc_on_importing = exc\n                if '.' in modname:\n                    # retry with parent module\n                    modname, name = modname.rsplit('.', 1)\n                    objpath.insert(0, name)\n                else:\n                    raise\n\n        obj = module\n        parent = None\n        object_name = None\n        for attrname in objpath:\n            parent = obj\n            logger.debug('[autodoc] getattr(_, %r)', attrname)\n            mangled_name = mangle(obj, attrname)\n            obj = attrgetter(obj, mangled_name)\n            logger.debug('[autodoc] => %r', obj)\n            object_name = attrname\n        return [module, parent, object_name, obj]\n    except (AttributeError, ImportError) as exc:\n        if isinstance(exc, AttributeError) and exc_on_importing:\n            # restore ImportError\n            exc = exc_on_importing\n\n        if objpath:\n            errmsg = ('autodoc: failed to import %s %r from module %r' %\n                      (objtype, '.'.join(objpath), modname))\n        else:\n            errmsg = 'autodoc: failed to import %s %r' % (objtype, modname)\n\n        if isinstance(exc, ImportError):\n            # import_module() raises ImportError having real exception obj and\n            # traceback\n            real_exc, traceback_msg = exc.args\n            if isinstance(real_exc, SystemExit):\n                errmsg += ('; the module executes module level statement '\n                           'and it might call sys.exit().')\n            elif isinstance(real_exc, ImportError) and real_exc.args:\n                errmsg += '; the following exception was raised:\\n%s' % real_exc.args[0]\n            else:\n                errmsg += '; the following exception was raised:\\n%s' % traceback_msg\n        else:\n \n...[truncated]...\nxcept AttributeError:\n            continue\n\n    try:\n        for cls in getmro(subject):\n            # annotation only member (ex. attr: int)\n            for name in getannotations(cls):\n                name = unmangle(cls, name)\n                if name and name not in members:\n                    members[name] = ObjectMember(name, INSTANCEATTR, class_=cls)\n\n            # append instance attributes (cf. self.attr1) if analyzer knows\n            try:\n                modname = safe_getattr(cls, '__module__')\n                qualname = safe_getattr(cls, '__qualname__')\n                analyzer = ModuleAnalyzer.for_module(modname)\n                analyzer.analyze()\n                for (ns, name), docstring in analyzer.attr_docs.items():\n                    if ns == qualname and name not in members:\n                        members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\n                                                     docstring='\\n'.join(docstring))\n            except (AttributeError, PycodeError):\n                pass\n    except AttributeError:\n        pass\n\n    return members\n\n\nfrom sphinx.ext.autodoc.mock import (MockFinder, MockLoader, _MockModule, _MockObject,  # NOQA\n                                     mock)\n\ndeprecated_alias('sphinx.ext.autodoc.importer',\n                 {\n                     '_MockModule': _MockModule,\n                     '_MockObject': _MockObject,\n                     'MockFinder': MockFinder,\n                     'MockLoader': MockLoader,\n                     'mock': mock,\n                 },\n                 RemovedInSphinx40Warning,\n                 {\n                     '_MockModule': 'sphinx.ext.autodoc.mock._MockModule',\n                     '_MockObject': 'sphinx.ext.autodoc.mock._MockObject',\n                     'MockFinder': 'sphinx.ext.autodoc.mock.MockFinder',\n                     'MockLoader': 'sphinx.ext.autodoc.mock.MockLoader',\n                     'mock': 'sphinx.ext.autodoc.mock.mock',\n                 })"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me look at the specific area around line 310 to better understand the context:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QepE3aiVzY59CMFJXDVNVd",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '295,320p' /testbed/sphinx/ext/autodoc/importer.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QepE3aiVzY59CMFJXDVNVd",
+          "content": "[exit_code=0]\ntry:\n        for cls in getmro(subject):\n            # annotation only member (ex. attr: int)\n            for name in getannotations(cls):\n                name = unmangle(cls, name)\n                if name and name not in members:\n                    members[name] = ObjectMember(name, INSTANCEATTR, class_=cls)\n\n            # append instance attributes (cf. self.attr1) if analyzer knows\n            try:\n                modname = safe_getattr(cls, '__module__')\n                qualname = safe_getattr(cls, '__qualname__')\n                analyzer = ModuleAnalyzer.for_module(modname)\n                analyzer.analyze()\n                for (ns, name), docstring in analyzer.attr_docs.items():\n                    if ns == qualname and name not in members:\n                        members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\n                                                     docstring='\\n'.join(docstring))\n            except (AttributeError, PycodeError):\n                pass\n    except AttributeError:\n        pass\n\n    return members"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! I can see the issue. Now let me understand the ObjectMember class to see what the docstring attribute looks like:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01UVRJ4kHAdkrwzuxuGeEPTs",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && grep -n \"class ObjectMember\" sphinx/ext/autodoc/__init__.py | head -5"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UVRJ4kHAdkrwzuxuGeEPTs",
+          "content": "[exit_code=0]\n260:class ObjectMember(tuple):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "id": "toolu_01Qg7R9bt42Z7HvyaRp3WKB9",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '260,290p' sphinx/ext/autodoc/__init__.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Qg7R9bt42Z7HvyaRp3WKB9",
+          "content": "[exit_code=0]\nclass ObjectMember(tuple):\n    \"\"\"A member of object.\n\n    This is used for the result of `Documenter.get_object_members()` to\n    represent each member of the object.\n\n    .. Note::\n\n       An instance of this class behaves as a tuple of (name, object)\n       for compatibility to old Sphinx.  The behavior will be dropped\n       in the future.  Therefore extensions should not use the tuple\n       interface.\n    \"\"\"\n\n    def __new__(cls, name: str, obj: Any, **kwargs: Any) -> Any:\n        return super().__new__(cls, (name, obj))  # type: ignore\n\n    def __init__(self, name: str, obj: Any, docstring: Optional[str] = None,\n                 class_: Any = None, skipped: bool = False) -> None:\n        self.__name__ = name\n        self.object = obj\n        self.docstring = docstring\n        self.skipped = skipped\n        self.class_ = class_\n\n\nObjectMembers = Union[List[ObjectMember], List[Tuple[str, Any]]]\n\n\nclass Documenter:\n    \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! I can see that ObjectMember has a `docstring` attribute. Now let me apply the fix. The issue is on line 310 (approximately) where the condition `name not in members` is checked. We need to also allow updating members that exist but have no docstring.\n\nLet me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01FbeDn8u53ueMGdLYJ4uz28",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\nimport re\n\n# Read the file\nwith open('/testbed/sphinx/ext/autodoc/importer.py', 'r') as f:\n    content = f.read()\n\n# Find the line to modify\nold_line = \"                    if ns == qualname and name not in members:\"\nnew_line = \"                    if ns == qualname and (name not in members or not members[name].docstring):\"\n\n# Replace the line\nif old_line in content:\n    content = content.replace(old_line, new_line)\n    print(\"Line replaced successfully!\")\nelse:\n    print(\"ERROR: Could not find the exact line to replace\")\n    # Let's look for variations\n    print(\"\\nSearching for similar patterns...\")\n    for i, line in enumerate(content.split('\\n'), 1):\n        if 'ns == qualname' in line and 'name not in members' in line:\n            print(f\"Line {i}: {line}\")\n\n# Write back\nwith open('/testbed/sphinx/ext/autodoc/importer.py', 'w') as f:\n    f.write(content)\n\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01FbeDn8u53ueMGdLYJ4uz28",
+          "content": "[exit_code=0]\nLine replaced successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013LTT3nWauavMp2JzSobWr5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '295,320p' /testbed/sphinx/ext/autodoc/importer.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013LTT3nWauavMp2JzSobWr5",
+          "content": "[exit_code=0]\ntry:\n        for cls in getmro(subject):\n            # annotation only member (ex. attr: int)\n            for name in getannotations(cls):\n                name = unmangle(cls, name)\n                if name and name not in members:\n                    members[name] = ObjectMember(name, INSTANCEATTR, class_=cls)\n\n            # append instance attributes (cf. self.attr1) if analyzer knows\n            try:\n                modname = safe_getattr(cls, '__module__')\n                qualname = safe_getattr(cls, '__qualname__')\n                analyzer = ModuleAnalyzer.for_module(modname)\n                analyzer.analyze()\n                for (ns, name), docstring in analyzer.attr_docs.items():\n                    if ns == qualname and (name not in members or not members[name].docstring):\n                        members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\n                                                     docstring='\\n'.join(docstring))\n            except (AttributeError, PycodeError):\n                pass\n    except AttributeError:\n        pass\n\n    return members"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied. Now let me verify with git diff:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01D6tr6THuFrwAEKcAkV1Vd5",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01D6tr6THuFrwAEKcAkV1Vd5",
+          "content": "[exit_code=0]\ndiff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py\nindex 477aae247..80341a8de 100644\n--- a/sphinx/ext/autodoc/importer.py\n+++ b/sphinx/ext/autodoc/importer.py\n@@ -307,7 +307,7 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable\n                 analyzer = ModuleAnalyzer.for_module(modname)\n                 analyzer.analyze()\n                 for (ns, name), docstring in analyzer.attr_docs.items():\n-                    if ns == qualname and name not in members:\n+                    if ns == qualname and (name not in members or not members[name].docstring):\n                         members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\n                                                      docstring='\\n'.join(docstring))\n             except (AttributeError, PycodeError):"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The git diff shows the exact change that was proposed. The modification is clean and minimal - only changing the condition as specified. The fix allows members that exist but lack docstrings to be updated with their docstrings found by the analyzer.\n\n```json\n{\n  \"patch\": \"diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py\\nindex 477aae247..80341a8de 100644\\n--- a/sphinx/ext/autodoc/importer.py\\n+++ b/sphinx/ext/autodoc/importer.py\\n@@ -307,7 +307,7 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable\\n                 analyzer = ModuleAnalyzer.for_module(modname)\\n                 analyzer.analyze()\\n                 for (ns, name), docstring in analyzer.attr_docs.items():\\n-                    if ns == qualname and name not in members:\\n+                    if ns == qualname and (name not in members or not members[name].docstring):\\n                         members[name] = ObjectMember(name, INSTANCEATTR, class_=cls,\\n                                                      docstring='\\\\n'.join(docstring))\\n             except (AttributeError, PycodeError):\",\n  \"implementation_notes\": \"Modified the condition in get_class_members() function to allow updating existing members that lack docstrings. This fixes the bug where annotation-only attributes inherited from superclasses were treated as undocumented because they were initially added without docstrings and then skipped when docstrings were found in the analyzer.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 8,
+  "timestamp": "2026-04-13T19:49:39Z"
+}
