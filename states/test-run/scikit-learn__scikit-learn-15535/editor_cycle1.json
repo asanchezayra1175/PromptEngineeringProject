@@ -1,0 +1,150 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-15535",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sklearn/metrics/cluster/_supervised.py b/sklearn/metrics/cluster/_supervised.py\nindex 4bddae35c..869237f56 100644\n--- a/sklearn/metrics/cluster/_supervised.py\n+++ b/sklearn/metrics/cluster/_supervised.py\n@@ -43,10 +43,10 @@ def check_clusterings(labels_true, labels_pred):\n         The predicted labels.\n     \"\"\"\n     labels_true = check_array(\n-        labels_true, ensure_2d=False, ensure_min_samples=0\n+        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\n     )\n     labels_pred = check_array(\n-        labels_pred, ensure_2d=False, ensure_min_samples=0\n+        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\n     )\n \n     # input checks",
+  "implementation_notes": "Added dtype=None parameter to both check_array() calls in the check_clusterings function to preserve original data types (including string arrays) instead of attempting numeric conversion, which was causing ValueError when string labels were passed to clustering metrics.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>scikit-learn__scikit-learn-15535</instance_id>\n\n<problem_statement>\nregression in input validation of clustering metrics\n```python\r\nfrom sklearn.metrics.cluster import mutual_info_score\r\nimport numpy as np\r\n\r\nx = np.random.choice(['a', 'b'], size=20).astype(object)\r\nmutual_info_score(x, x)\r\n```\r\nValueError: could not convert string to float: 'b'\r\n\r\nwhile\r\n```python\r\nx = np.random.choice(['a', 'b'], size=20)\r\nmutual_info_score(x, x)\r\n```\r\nworks with a warning?\r\n\r\nthis worked in 0.21.1 without a warning (as I think it should)\r\n\r\n\r\nEdit by @ogrisel: I removed the `.astype(object)` in the second code snippet.\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The check_clusterings function uses check_array() to validate input arrays. When string arrays with object dtype are passed, check_array() attempts to convert them to numeric type by default, causing a ValueError when strings cannot be converted to float.\nExploration notes: The mutual_info_score function calls check_clusterings() when contingency=None. PR #10830 changed check_clusterings from using np.asarray() to check_array(). The failing test is test_format_invariance in sklearn/metrics/cluster/tests/test_common.py which tests various input formats including string lists. The PR diff shows: before: 'labels_true = np.asarray(labels_true)' and after: 'labels_true = check_array(labels_true, ensure_2d=False)'. The same pattern was applied to labels_pred. The check_clusterings function is called by multiple clustering metrics including mutual_info_score, adjusted_mutual_info_score, adjusted_rand_score, completeness_score, homogeneity_score, normalized_mutual_info_score, v_measure_score, and fowlkes_mallows_score.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PB - Deprecated or removed API replaced with version-detection branch: Replace check_array() calls with dtype=None parameter to preserve original np.asarray() behavior for string clustering labels, avoiding numeric conversion that causes ValueError.\n\nFiles to modify: [\n  \"/testbed/sklearn/metrics/cluster/_supervised.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sklearn/metrics/cluster/_supervised.py\n  Location: check_clusterings, lines 45-49\n  Change  : REPLACE lines 45-49:\n    labels_true = check_array(\n        labels_true, ensure_2d=False, ensure_min_samples=0\n    )\n    labels_pred = check_array(\n        labels_pred, ensure_2d=False, ensure_min_samples=0\n    )\nWITH:\n    labels_true = check_array(\n        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )\n    labels_pred = check_array(\n        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )\n  Rationale: PR #10830 replaced np.asarray() with check_array() but check_array() defaults to dtype='numeric' which tries to convert string arrays to float, while np.asarray() preserved dtypes. Adding dtype=None restores the original behavior of preserving string labels for clustering metrics.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0184TfY8hsjBHrw83t7DfvFR",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/sklearn/metrics/cluster/_supervised.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0184TfY8hsjBHrw83t7DfvFR",
+          "content": "[exit_code=0]\n\"\"\"Utilities to evaluate the clustering performance of models.\n\nFunctions named as *_score return a scalar value to maximize: the higher the\nbetter.\n\"\"\"\n\n# Authors: Olivier Grisel <olivier.grisel@ensta.org>\n#          Wei LI <kuantkid@gmail.com>\n#          Diego Molla <dmolla-aliod@gmail.com>\n#          Arnaud Fouchet <foucheta@gmail.com>\n#          Thierry Guillemot <thierry.guillemot.work@gmail.com>\n#          Gregory Stupp <stuppie@gmail.com>\n#          Joel Nothman <joel.nothman@gmail.com>\n#          Arya McCarthy <arya@jhu.edu>\n# License: BSD 3 clause\n\n\nfrom math import log\n\nimport numpy as np\nfrom scipy import sparse as sp\n\nfrom ._expected_mutual_info_fast import expected_mutual_information\nfrom ...utils.validation import check_array, check_consistent_length\nfrom ...utils.fixes import comb, _astype_copy_false\n\n\ndef _comb2(n):\n    # the exact version is faster for k == 2: use it by default globally in\n    # this module instead of the float approximate variant\n    return comb(n, 2, exact=1)\n\n\ndef check_clusterings(labels_true, labels_pred):\n    \"\"\"Check that the labels arrays are 1D and of same dimension.\n\n    Parameters\n    ----------\n    labels_true : array-like of shape (n_samples,)\n        The true labels.\n\n    labels_pred : array-like of shape (n_samples,)\n        The predicted labels.\n    \"\"\"\n    labels_true = check_array(\n        labels_true, ensure_2d=False, ensure_min_samples=0\n    )\n    labels_pred = check_array(\n        labels_pred, ensure_2d=False, ensure_min_samples=0\n    )\n\n    # input checks\n    if labels_true.ndim != 1:\n        raise ValueError(\n            \"labels_true must be 1D: shape is %r\" % (labels_true.shape,))\n    if labels_pred.ndim != 1:\n        raise ValueError(\n            \"labels_pred must be 1D: shape is %r\" % (labels_pred.shape,))\n    check_consistent_length(labels_true, labels_pred)\n\n    return labels_true, labels_pred\n\n\ndef _generalized_average(U, V, average_method):\n    \"\"\"Return a particular mean of two numbers.\"\"\"\n    if average_method == \"min\":\n        return min(U, V)\n    elif average_method == \"geometric\":\n        return np.sqrt(U * V)\n    elif average_method == \"arithmetic\":\n        return np.mean([U, V])\n    elif average_method == \"max\":\n        return max(U, V)\n    else:\n        raise ValueError(\"'average_method' must be 'min', 'geometric', \"\n                         \"'arithmetic', or 'max'\")\n\n\ndef contingency_matrix(labels_true, labels_pred, eps=None, sparse=False):\n    \"\"\"Build a contingency matrix describing the relationship between labels.\n\n    Parameters\n    ----------\n    labels_true : int array, shape = [n_samples]\n        Ground truth class labels to be used as a reference\n\n    labels_pred : array-like of shape (n_samples,)\n        Cluster labels to evaluate\n\n    eps : None or float, optional.\n        If a float, that value is added to all values in the contingency\n        matrix. This helps to stop NaN propagation.\n        If ``None``, nothing is adjusted.\n\n    sparse : boolean, optional.\n        If True, return a sparse CSR continency matrix. If ``eps is not None``,\n        and ``sparse is True``, will throw ValueError.\n\n        .. versionadded:: 0.18\n\n    Returns\n    -------\n    contingency : {array-like, sparse}, shape=[n_classes_true, n_classes_pred]\n        Matrix :math:`C` such that :math:`C_{i, j}` is the number of samples in\n        true class :math:`i` and in predicted class :math:`j`. If\n        ``eps is None``, the dtype of this array will be integer. If ``eps`` is\n        given, the dtype will be float.\n        Will be a ``scipy.sparse.csr_matrix`` if ``sparse=True``.\n    \"\"\"\n\n    if eps is not None and sparse:\n        raise ValueError(\"Cannot set 'eps' when sparse=True\")\n\n    classes, class_idx = np.unique(labels_true, return_inverse=True)\n    clusters, cluster_idx = np.unique(labels_pred, return_inverse=True)\n    n_classes = classes.shape[0]\n    n_clusters = clusters.shape[0]\n    # Using coo_matrix to accelerate simple histogram calculation,\n    # i.e. bins are consecutive integers\n    # Currently, coo_matrix is faster than histogram2d for simple cases\n    contingency = sp.coo_matrix((np.ones(class_idx.shape[0]),\n                                 (class_idx, cluster_idx)),\n                                shape=(n_classes, n_clusters),\n                                dtype=np.int)\n    if sparse:\n        contingency = contingency.tocsr()\n        contingency.sum_duplicates()\n    else:\n        contingency = contingency.toarray()\n        if eps is not None:\n            # don't use += as contingency is integer\n            contingency = contingency + eps\n    return contingency\n\n\n# clustering measures\n\ndef adjusted_rand_score(labels_true, labels_pred):\n    \"\"\"Rand index adjusted for chance.\n\n    The Rand Index computes a similarity measure between two clusterings\n    by considering all pairs of samples and counting pairs that are\n    assigned in the same or different clusters in the predicted and\n    true clusterings.\n\n    The raw RI score is then \n...[truncated]...\n   Perfect labelings are both homogeneous and complete, hence have\n    score 1.0::\n\n      >>> from sklearn.metrics.cluster import fowlkes_mallows_score\n      >>> fowlkes_mallows_score([0, 0, 1, 1], [0, 0, 1, 1])\n      1.0\n      >>> fowlkes_mallows_score([0, 0, 1, 1], [1, 1, 0, 0])\n      1.0\n\n    If classes members are completely split across different clusters,\n    the assignment is totally random, hence the FMI is null::\n\n      >>> fowlkes_mallows_score([0, 0, 0, 0], [0, 1, 2, 3])\n      0.0\n\n    References\n    ----------\n    .. [1] `E. B. Fowkles and C. L. Mallows, 1983. \"A method for comparing two\n       hierarchical clusterings\". Journal of the American Statistical\n       Association\n       <http://wildfire.stat.ucla.edu/pdflibrary/fowlkes.pdf>`_\n\n    .. [2] `Wikipedia entry for the Fowlkes-Mallows Index\n           <https://en.wikipedia.org/wiki/Fowlkes-Mallows_index>`_\n    \"\"\"\n    labels_true, labels_pred = check_clusterings(labels_true, labels_pred)\n    n_samples, = labels_true.shape\n\n    c = contingency_matrix(labels_true, labels_pred,\n                           sparse=True)\n    c = c.astype(np.int64, **_astype_copy_false(c))\n    tk = np.dot(c.data, c.data) - n_samples\n    pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples\n    qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples\n    return np.sqrt(tk / pk) * np.sqrt(tk / qk) if tk != 0. else 0.\n\n\ndef entropy(labels):\n    \"\"\"Calculates the entropy for a labeling.\n\n    Parameters\n    ----------\n    labels : int array, shape = [n_samples]\n        The labels\n\n    Notes\n    -----\n    The logarithm used is the natural logarithm (base-e).\n    \"\"\"\n    if len(labels) == 0:\n        return 1.0\n    label_idx = np.unique(labels, return_inverse=True)[1]\n    pi = np.bincount(label_idx).astype(np.float64)\n    pi = pi[pi > 0]\n    pi_sum = np.sum(pi)\n    # log(a / b) should be calculated as log(a) - log(b) for\n    # possible loss of precision\n    return -np.sum((pi / pi_sum) * (np.log(pi) - log(pi_sum)))"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now I can see the `check_clusterings` function. The issue is on lines 45-49 where `check_array` is called without `dtype=None`. I need to add `dtype=None` to both calls to preserve the original dtype when strings are passed.\n\nLet me apply the fix:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01KjizATZR1R9jvJenDbvRkf",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python << 'EOF'\nimport re\n\n# Read the file\nwith open('/testbed/sklearn/metrics/cluster/_supervised.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the check_clusterings function\n# We need to add dtype=None to the two check_array calls\nold_pattern = r'''    labels_true = check_array\\(\n        labels_true, ensure_2d=False, ensure_min_samples=0\n    \\)\n    labels_pred = check_array\\(\n        labels_pred, ensure_2d=False, ensure_min_samples=0\n    \\)'''\n\nnew_pattern = '''    labels_true = check_array(\n        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )\n    labels_pred = check_array(\n        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )'''\n\n# Perform the replacement\ncontent = re.sub(old_pattern, new_pattern, content)\n\n# Write the file back\nwith open('/testbed/sklearn/metrics/cluster/_supervised.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KjizATZR1R9jvJenDbvRkf",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_0172FaWr5ENvdc8kQE2qXi5k",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '40,60p' /testbed/sklearn/metrics/cluster/_supervised.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0172FaWr5ENvdc8kQE2qXi5k",
+          "content": "[exit_code=0]\nThe true labels.\n\n    labels_pred : array-like of shape (n_samples,)\n        The predicted labels.\n    \"\"\"\n    labels_true = check_array(\n        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )\n    labels_pred = check_array(\n        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\n    )\n\n    # input checks\n    if labels_true.ndim != 1:\n        raise ValueError(\n            \"labels_true must be 1D: shape is %r\" % (labels_true.shape,))\n    if labels_pred.ndim != 1:\n        raise ValueError(\n            \"labels_pred must be 1D: shape is %r\" % (labels_pred.shape,))\n    check_consistent_length(labels_true, labels_pred)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. Now let me run git diff to see the full output:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_014YuZZfci8PoivStP6TjYX7",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_014YuZZfci8PoivStP6TjYX7",
+          "content": "[exit_code=0]\ndiff --git a/sklearn/metrics/cluster/_supervised.py b/sklearn/metrics/cluster/_supervised.py\nindex 4bddae35c..869237f56 100644\n--- a/sklearn/metrics/cluster/_supervised.py\n+++ b/sklearn/metrics/cluster/_supervised.py\n@@ -43,10 +43,10 @@ def check_clusterings(labels_true, labels_pred):\n         The predicted labels.\n     \"\"\"\n     labels_true = check_array(\n-        labels_true, ensure_2d=False, ensure_min_samples=0\n+        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\n     )\n     labels_pred = check_array(\n-        labels_pred, ensure_2d=False, ensure_min_samples=0\n+        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\n     )\n \n     # input checks"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the changes we need. The modification adds `dtype=None` to both `check_array()` calls in the `check_clusterings` function, which will preserve the original dtype of the input arrays (including string arrays) instead of trying to convert them to numeric types.\n\n```json\n{\n  \"patch\": \"diff --git a/sklearn/metrics/cluster/_supervised.py b/sklearn/metrics/cluster/_supervised.py\\nindex 4bddae35c..869237f56 100644\\n--- a/sklearn/metrics/cluster/_supervised.py\\n+++ b/sklearn/metrics/cluster/_supervised.py\\n@@ -43,10 +43,10 @@ def check_clusterings(labels_true, labels_pred):\\n         The predicted labels.\\n     \\\"\\\"\\\"\\n     labels_true = check_array(\\n-        labels_true, ensure_2d=False, ensure_min_samples=0\\n+        labels_true, ensure_2d=False, ensure_min_samples=0, dtype=None\\n     )\\n     labels_pred = check_array(\\n-        labels_pred, ensure_2d=False, ensure_min_samples=0\\n+        labels_pred, ensure_2d=False, ensure_min_samples=0, dtype=None\\n     )\\n \\n     # input checks\",\n  \"implementation_notes\": \"Added dtype=None parameter to both check_array() calls in the check_clusterings function to preserve original data types (including string arrays) instead of attempting numeric conversion, which was causing ValueError when string labels were passed to clustering metrics.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 5,
+  "timestamp": "2026-04-13T18:20:21Z"
+}
