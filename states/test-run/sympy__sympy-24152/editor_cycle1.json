@@ -1,0 +1,181 @@
+{
+  "instance_id": "sympy__sympy-24152",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sympy/physics/quantum/tensorproduct.py b/sympy/physics/quantum/tensorproduct.py\nindex 78accaf295..b32d2a4388 100644\n--- a/sympy/physics/quantum/tensorproduct.py\n+++ b/sympy/physics/quantum/tensorproduct.py\n@@ -246,9 +246,10 @@ def _eval_expand_tensorproduct(self, **hints):\n             if isinstance(args[i], Add):\n                 for aa in args[i].args:\n                     tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\n-                    if isinstance(tp, TensorProduct):\n-                        tp = tp._eval_expand_tensorproduct()\n-                    add_args.append(tp)\n+                    c_part, nc_part = tp.args_cnc()\n+                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\n+                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\n+                    add_args.append(Mul(*c_part)*Mul(*nc_part))\n                 break\n \n         if add_args:",
+  "implementation_notes": "Fixed TensorProduct._eval_expand_tensorproduct to correctly handle cases where the TensorProduct constructor returns Mul(c_factors, TensorProduct(...)) by using args_cnc() to extract and separate commutative and non-commutative parts, ensuring recursive expansion works properly when scalar factors are present.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sympy__sympy-24152</instance_id>\n\n<problem_statement>\nBug in expand of TensorProduct + Workaround + Fix\n### Error description\r\nThe expansion of a TensorProduct object stops incomplete if summands in the tensor product factors have (scalar) factors, e.g.\r\n```\r\nfrom sympy import *\r\nfrom sympy.physics.quantum import *\r\nU = Operator('U')\r\nV = Operator('V')\r\nP = TensorProduct(2*U - V, U + V)\r\nprint(P) \r\n# (2*U - V)x(U + V)\r\nprint(P.expand(tensorproduct=True)) \r\n#result: 2*Ux(U + V) - Vx(U + V) #expansion has missed 2nd tensor factor and is incomplete\r\n```\r\nThis is clearly not the expected behaviour. It also effects other functions that rely on .expand(tensorproduct=True), as e.g. qapply() .\r\n\r\n### Work around\r\nRepeat .expand(tensorproduct=True) as may times as there are tensor factors, resp. until the expanded term does no longer change. This is however only reasonable in interactive session and not in algorithms.\r\n\r\n### Code Fix\r\n.expand relies on the method TensorProduct._eval_expand_tensorproduct(). The issue arises from an inprecise check in TensorProduct._eval_expand_tensorproduct() whether a recursive call is required; it fails when the creation of a TensorProduct object returns commutative (scalar) factors up front: in that case the constructor returns a Mul(c_factors, TensorProduct(..)).\r\nI thus propose the following  code fix in TensorProduct._eval_expand_tensorproduct() in quantum/tensorproduct.py.  I have marked the four lines to be added / modified:\r\n```\r\n    def _eval_expand_tensorproduct(self, **hints):\r\n                ...\r\n                for aa in args[i].args:\r\n                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\r\n                    c_part, nc_part = tp.args_cnc() #added\r\n                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct): #modified\r\n                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), ) #modified\r\n                    add_args.append(Mul(*c_part)*Mul(*nc_part)) #modified\r\n                break\r\n                ...\r\n```\r\nThe fix splits of commutative (scalar) factors from the tp returned. The TensorProduct object will be the one nc factor in nc_part (see TensorProduct.__new__ constructor), if any. Note that the constructor will return 0 if a tensor factor is 0, so there is no guarantee that tp contains a TensorProduct object (e.g. TensorProduct(U-U, U+V).\r\n\r\n\r\n\n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _eval_expand_tensorproduct method uses isinstance(tp, TensorProduct) to check if recursive expansion is needed. When TensorProduct constructor returns commutative factors up front, it returns Mul(c_factors, TensorProduct(..)) instead of just TensorProduct, causing the isinstance check to fail and recursive expansion to be skipped.\nExploration notes: The method is at line 241 in tensorproduct.py. The TensorProduct.__new__ constructor (line 119) uses flatten() method to separate commutative and non-commutative parts, returning c_part * tp when there are scalar factors. The args_cnc() method is already used elsewhere in the file at lines 141 and 316. The test_tensor_product_expand function is in /testbed/sympy/physics/quantum/tests/test_tensorproduct.py at line 44.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PD pattern: The condition `isinstance(tp, TensorProduct)` was too specific, missing cases where tp is `Mul(c_factors, TensorProduct(...))`. Fixed by using `args_cnc()` to extract the TensorProduct from the non-commutative parts and checking that instead. This ensures recursive expansion works correctly when scalar factors are present.\n\nFiles to modify: [\n  \"/testbed/sympy/physics/quantum/tensorproduct.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sympy/physics/quantum/tensorproduct.py\n  Location: TensorProduct._eval_expand_tensorproduct, line 248\n  Change  : INSERT after line 248:\n                    c_part, nc_part = tp.args_cnc()\n  Rationale: Extract commutative and non-commutative parts to handle cases where TensorProduct constructor returns Mul(c_factors, TensorProduct(...))\n\nChange 2:\n  File    : /testbed/sympy/physics/quantum/tensorproduct.py\n  Location: TensorProduct._eval_expand_tensorproduct, line 249\n  Change  : REPLACE line 249:\n                    if isinstance(tp, TensorProduct):\nWITH:\n                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\n  Rationale: Check if there's exactly one non-commutative part that is a TensorProduct, rather than checking if tp itself is a TensorProduct\n\nChange 3:\n  File    : /testbed/sympy/physics/quantum/tensorproduct.py\n  Location: TensorProduct._eval_expand_tensorproduct, line 250\n  Change  : REPLACE line 250:\n                        tp = tp._eval_expand_tensorproduct()\nWITH:\n                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\n  Rationale: Apply recursive expansion to the TensorProduct part only, updating the non-commutative part tuple\n\nChange 4:\n  File    : /testbed/sympy/physics/quantum/tensorproduct.py\n  Location: TensorProduct._eval_expand_tensorproduct, line 251\n  Change  : REPLACE line 251:\n                    add_args.append(tp)\nWITH:\n                    add_args.append(Mul(*c_part)*Mul(*nc_part))\n  Rationale: Reconstruct the expression by multiplying the commutative and non-commutative parts back together\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current structure and then apply the proposed changes.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01QpCuLaxR61dDr8tSiJGHiv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && cat sympy/physics/quantum/tensorproduct.py | head -300"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QpCuLaxR61dDr8tSiJGHiv",
+          "content": "[exit_code=0]\n\"\"\"Abstract tensor product.\"\"\"\n\nfrom sympy.core.add import Add\nfrom sympy.core.expr import Expr\nfrom sympy.core.mul import Mul\nfrom sympy.core.power import Pow\nfrom sympy.core.sympify import sympify\nfrom sympy.matrices.dense import MutableDenseMatrix as Matrix\nfrom sympy.printing.pretty.stringpict import prettyForm\n\nfrom sympy.physics.quantum.qexpr import QuantumError\nfrom sympy.physics.quantum.dagger import Dagger\nfrom sympy.physics.quantum.commutator import Commutator\nfrom sympy.physics.quantum.anticommutator import AntiCommutator\nfrom sympy.physics.quantum.state import Ket, Bra\nfrom sympy.physics.quantum.matrixutils import (\n    numpy_ndarray,\n    scipy_sparse_matrix,\n    matrix_tensor_product\n)\nfrom sympy.physics.quantum.trace import Tr\n\n\n__all__ = [\n    'TensorProduct',\n    'tensor_product_simp'\n]\n\n#-----------------------------------------------------------------------------\n# Tensor product\n#-----------------------------------------------------------------------------\n\n_combined_printing = False\n\n\ndef combined_tensor_printing(combined):\n    \"\"\"Set flag controlling whether tensor products of states should be\n    printed as a combined bra/ket or as an explicit tensor product of different\n    bra/kets. This is a global setting for all TensorProduct class instances.\n\n    Parameters\n    ----------\n    combine : bool\n        When true, tensor product states are combined into one ket/bra, and\n        when false explicit tensor product notation is used between each\n        ket/bra.\n    \"\"\"\n    global _combined_printing\n    _combined_printing = combined\n\n\nclass TensorProduct(Expr):\n    \"\"\"The tensor product of two or more arguments.\n\n    For matrices, this uses ``matrix_tensor_product`` to compute the Kronecker\n    or tensor product matrix. For other objects a symbolic ``TensorProduct``\n    instance is returned. The tensor product is a non-commutative\n    multiplication that is used primarily with operators and states in quantum\n    mechanics.\n\n    Currently, the tensor product distinguishes between commutative and\n    non-commutative arguments.  Commutative arguments are assumed to be scalars\n    and are pulled out in front of the ``TensorProduct``. Non-commutative\n    arguments remain in the resulting ``TensorProduct``.\n\n    Parameters\n    ==========\n\n    args : tuple\n        A sequence of the objects to take the tensor product of.\n\n    Examples\n    ========\n\n    Start with a simple tensor product of SymPy matrices::\n\n        >>> from sympy import Matrix\n        >>> from sympy.physics.quantum import TensorProduct\n\n        >>> m1 = Matrix([[1,2],[3,4]])\n        >>> m2 = Matrix([[1,0],[0,1]])\n        >>> TensorProduct(m1, m2)\n        Matrix([\n        [1, 0, 2, 0],\n        [0, 1, 0, 2],\n        [3, 0, 4, 0],\n        [0, 3, 0, 4]])\n        >>> TensorProduct(m2, m1)\n        Matrix([\n        [1, 2, 0, 0],\n        [3, 4, 0, 0],\n        [0, 0, 1, 2],\n        [0, 0, 3, 4]])\n\n    We can also construct tensor products of non-commutative symbols:\n\n        >>> from sympy import Symbol\n        >>> A = Symbol('A',commutative=False)\n        >>> B = Symbol('B',commutative=False)\n        >>> tp = TensorProduct(A, B)\n        >>> tp\n        AxB\n\n    We can take the dagger of a tensor product (note the order does NOT reverse\n    like the dagger of a normal product):\n\n        >>> from sympy.physics.quantum import Dagger\n        >>> Dagger(tp)\n        Dagger(A)xDagger(B)\n\n    Expand can be used to distribute a tensor product across addition:\n\n        >>> C = Symbol('C',commutative=False)\n        >>> tp = TensorProduct(A+B,C)\n        >>> tp\n        (A + B)xC\n        >>> tp.expand(tensorproduct=True)\n        AxC + BxC\n    \"\"\"\n    is_commutative = False\n\n    def __new__(cls, *args):\n        if isinstance(args[0], (Matrix, numpy_ndarray, scipy_sparse_matrix)):\n            return matrix_tensor_product(*args)\n        c_part, new_args = cls.flatten(sympify(args))\n        c_part = Mul(*c_part)\n        if len(new_args) == 0:\n            return c_part\n        elif len(new_args) == 1:\n            return c_part * new_args[0]\n        else:\n            tp = Expr.__new__(cls, *new_args)\n            return c_part * tp\n\n    @classmethod\n    def flatten(cls, args):\n        # TODO: disallow nested TensorProducts.\n        c_part = []\n        nc_parts = []\n        for arg in args:\n            cp, ncp = arg.args_cnc()\n            c_part.extend(list(cp))\n            nc_parts.append(Mul._from_args(ncp))\n        return c_part, nc_parts\n\n    def _eval_adjoint(self):\n        return TensorProduct(*[Dagger(i) for i in self.args])\n\n    def _eval_rewrite(self, rule, args, **hints):\n        return TensorProduct(*args).expand(tensorproduct=True)\n\n    def _sympystr(self, printer, *args):\n        length = len(self.args)\n        s = ''\n        for i in range(length):\n            if isinstance(self.args[i], (Add, Pow, Mul)):\n                s = s + '('\n            s = s + printer._print(self.args[i])\n            if isinstance(self.args[i], (Add, Pow, Mul)):\n        \n...[truncated]...\n   def doit(self, **hints):\n        return TensorProduct(*[item.doit(**hints) for item in self.args])\n\n    def _eval_expand_tensorproduct(self, **hints):\n        \"\"\"Distribute TensorProducts across addition.\"\"\"\n        args = self.args\n        add_args = []\n        for i in range(len(args)):\n            if isinstance(args[i], Add):\n                for aa in args[i].args:\n                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\n                    if isinstance(tp, TensorProduct):\n                        tp = tp._eval_expand_tensorproduct()\n                    add_args.append(tp)\n                break\n\n        if add_args:\n            return Add(*add_args)\n        else:\n            return self\n\n    def _eval_trace(self, **kwargs):\n        indices = kwargs.get('indices', None)\n        exp = tensor_product_simp(self)\n\n        if indices is None or len(indices) == 0:\n            return Mul(*[Tr(arg).doit() for arg in exp.args])\n        else:\n            return Mul(*[Tr(value).doit() if idx in indices else value\n                         for idx, value in enumerate(exp.args)])\n\n\ndef tensor_product_simp_Mul(e):\n    \"\"\"Simplify a Mul with TensorProducts.\n\n    Current the main use of this is to simplify a ``Mul`` of ``TensorProduct``s\n    to a ``TensorProduct`` of ``Muls``. It currently only works for relatively\n    simple cases where the initial ``Mul`` only has scalars and raw\n    ``TensorProduct``s, not ``Add``, ``Pow``, ``Commutator``s of\n    ``TensorProduct``s.\n\n    Parameters\n    ==========\n\n    e : Expr\n        A ``Mul`` of ``TensorProduct``s to be simplified.\n\n    Returns\n    =======\n\n    e : Expr\n        A ``TensorProduct`` of ``Mul``s.\n\n    Examples\n    ========\n\n    This is an example of the type of simplification that this function\n    performs::\n\n        >>> from sympy.physics.quantum.tensorproduct import \\\n                    tensor_product_simp_Mul, TensorProduct\n        >>> from sympy import Symbol\n        >>> A = Symbol('A',commutative=False)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me read more of the file, specifically around the _eval_expand_tensorproduct method:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01Tm3VnPnBp5UhiUY4J1F9h4",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '240,260p' sympy/physics/quantum/tensorproduct.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Tm3VnPnBp5UhiUY4J1F9h4",
+          "content": "[exit_code=0]\ndef _eval_expand_tensorproduct(self, **hints):\n        \"\"\"Distribute TensorProducts across addition.\"\"\"\n        args = self.args\n        add_args = []\n        for i in range(len(args)):\n            if isinstance(args[i], Add):\n                for aa in args[i].args:\n                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\n                    if isinstance(tp, TensorProduct):\n                        tp = tp._eval_expand_tensorproduct()\n                    add_args.append(tp)\n                break\n\n        if add_args:\n            return Add(*add_args)\n        else:\n            return self\n\n    def _eval_trace(self, **kwargs):\n        indices = kwargs.get('indices', None)"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! Now I can see the exact location of the code to modify. Let me apply the changes as specified in the solution proposal:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_013SDLNVy2eWRvVf4XGwEv4f",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && python3 << 'EOF'\n# Read the file\nwith open('sympy/physics/quantum/tensorproduct.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the method and apply the fix\n# We need to modify lines around the _eval_expand_tensorproduct method\n# The method starts at line 240\n\nnew_lines = []\ni = 0\nwhile i < len(lines):\n    # Look for the exact pattern to replace\n    if i < len(lines) - 4 and \\\n       'tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])' in lines[i] and \\\n       'if isinstance(tp, TensorProduct):' in lines[i + 1] and \\\n       'tp = tp._eval_expand_tensorproduct()' in lines[i + 2] and \\\n       'add_args.append(tp)' in lines[i + 3]:\n        # This is the block we need to replace\n        # Keep the first line (TensorProduct creation)\n        new_lines.append(lines[i])  # tp = TensorProduct(...)\n        \n        # Add the new lines as specified in the fix\n        indent = '                    '\n        new_lines.append(indent + 'c_part, nc_part = tp.args_cnc()\\n')\n        new_lines.append(indent + 'if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\\n')\n        new_lines.append(indent + '    nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\\n')\n        new_lines.append(indent + 'add_args.append(Mul(*c_part)*Mul(*nc_part))\\n')\n        \n        # Skip the old lines (we've replaced them)\n        i += 4\n    else:\n        new_lines.append(lines[i])\n        i += 1\n\n# Write the modified file\nwith open('sympy/physics/quantum/tensorproduct.py', 'w') as f:\n    f.writelines(new_lines)\n\nprint(\"File modified successfully!\")\nEOF\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_013SDLNVy2eWRvVf4XGwEv4f",
+          "content": "[exit_code=0]\nFile modified successfully!"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify that the changes were applied correctly by checking the modified section:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01PtSWHaT5QsvhsGa5Ho28PZ",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && sed -n '240,265p' sympy/physics/quantum/tensorproduct.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01PtSWHaT5QsvhsGa5Ho28PZ",
+          "content": "[exit_code=0]\ndef _eval_expand_tensorproduct(self, **hints):\n        \"\"\"Distribute TensorProducts across addition.\"\"\"\n        args = self.args\n        add_args = []\n        for i in range(len(args)):\n            if isinstance(args[i], Add):\n                for aa in args[i].args:\n                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\n                    c_part, nc_part = tp.args_cnc()\n                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\n                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\n                    add_args.append(Mul(*c_part)*Mul(*nc_part))\n                break\n\n        if add_args:\n            return Add(*add_args)\n        else:\n            return self\n\n    def _eval_trace(self, **kwargs):\n        indices = kwargs.get('indices', None)\n        exp = tensor_product_simp(self)\n\n        if indices is None or len(indices) == 0:\n            return Mul(*[Tr(arg).doit() for arg in exp.args])"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The changes have been applied correctly. Let me verify with git diff to ensure everything is in order:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01DuPVVX6Mj8EfpokpRgvYMU",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DuPVVX6Mj8EfpokpRgvYMU",
+          "content": "[exit_code=0]\ndiff --git a/sympy/physics/quantum/tensorproduct.py b/sympy/physics/quantum/tensorproduct.py\nindex 78accaf295..b32d2a4388 100644\n--- a/sympy/physics/quantum/tensorproduct.py\n+++ b/sympy/physics/quantum/tensorproduct.py\n@@ -246,9 +246,10 @@ def _eval_expand_tensorproduct(self, **hints):\n             if isinstance(args[i], Add):\n                 for aa in args[i].args:\n                     tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\n-                    if isinstance(tp, TensorProduct):\n-                        tp = tp._eval_expand_tensorproduct()\n-                    add_args.append(tp)\n+                    c_part, nc_part = tp.args_cnc()\n+                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\n+                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\n+                    add_args.append(Mul(*c_part)*Mul(*nc_part))\n                 break\n \n         if add_args:"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Excellent! The diff shows exactly the changes that were proposed. The modification:\n\n1. **Added line 249**: `c_part, nc_part = tp.args_cnc()` - This extracts commutative and non-commutative parts from the TensorProduct result\n2. **Modified line 250**: Changed from `if isinstance(tp, TensorProduct):` to `if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):` - This checks if there's exactly one non-commutative part that is a TensorProduct\n3. **Modified line 251**: Changed from `tp = tp._eval_expand_tensorproduct()` to `nc_part = (nc_part[0]._eval_expand_tensorproduct(), )` - This applies recursive expansion to the TensorProduct part only\n4. **Modified line 252**: Changed from `add_args.append(tp)` to `add_args.append(Mul(*c_part)*Mul(*nc_part))` - This reconstructs the expression by multiplying the commutative and non-commutative parts back together\n\n```json\n{\n  \"patch\": \"diff --git a/sympy/physics/quantum/tensorproduct.py b/sympy/physics/quantum/tensorproduct.py\\nindex 78accaf295..b32d2a4388 100644\\n--- a/sympy/physics/quantum/tensorproduct.py\\n+++ b/sympy/physics/quantum/tensorproduct.py\\n@@ -246,9 +246,10 @@ def _eval_expand_tensorproduct(self, **hints):\\n             if isinstance(args[i], Add):\\n                 for aa in args[i].args:\\n                     tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])\\n-                    if isinstance(tp, TensorProduct):\\n-                        tp = tp._eval_expand_tensorproduct()\\n-                    add_args.append(tp)\\n+                    c_part, nc_part = tp.args_cnc()\\n+                    if len(nc_part)==1 and isinstance(nc_part[0], TensorProduct):\\n+                        nc_part = (nc_part[0]._eval_expand_tensorproduct(), )\\n+                    add_args.append(Mul(*c_part)*Mul(*nc_part))\\n                 break\\n \\n         if add_args:\",\n  \"implementation_notes\": \"Fixed TensorProduct._eval_expand_tensorproduct to correctly handle cases where the TensorProduct constructor returns Mul(c_factors, TensorProduct(...)) by using args_cnc() to extract and separate commutative and non-commutative parts, ensuring recursive expansion works properly when scalar factors are present.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-14T00:28:57Z"
+}

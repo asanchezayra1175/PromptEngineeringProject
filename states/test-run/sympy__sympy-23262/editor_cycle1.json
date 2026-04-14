@@ -1,0 +1,181 @@
+{
+  "instance_id": "sympy__sympy-23262",
+  "status": "success",
+  "cycle": 1,
+  "attempt": 1,
+  "patch": "diff --git a/sympy/printing/codeprinter.py b/sympy/printing/codeprinter.py\nindex 98f8615621..8c42c3969e 100644\n--- a/sympy/printing/codeprinter.py\n+++ b/sympy/printing/codeprinter.py\n@@ -39,7 +39,8 @@ def _convert_python_lists(arg):\n         from sympy.codegen.abstract_nodes import List\n         return List(*(_convert_python_lists(e) for e in arg))\n     elif isinstance(arg, tuple):\n-        return tuple(_convert_python_lists(e) for e in arg)\n+        from sympy import Tuple\n+        return Tuple(*(_convert_python_lists(e) for e in arg))\n     else:\n         return arg",
+  "implementation_notes": "Modified the _convert_python_lists function to convert Python tuples to SymPy Tuple objects, ensuring single-element tuples are printed with trailing commas (e.g., (1,) instead of (1)) in generated code.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Implement the following solution proposal by modifying the source files.\n\n<instance_id>sympy__sympy-23262</instance_id>\n\n<problem_statement>\nPython code printer not respecting tuple with one element\nHi,\r\n\r\nThanks for the recent updates in SymPy! I'm trying to update my code to use SymPy 1.10 but ran into an issue with the Python code printer. MWE:\r\n\r\n\r\n```python\r\nimport inspect\r\nfrom sympy import lambdify\r\n\r\ninspect.getsource(lambdify([], tuple([1])))\r\n```\r\nSymPy 1.9 and under outputs:\r\n```\r\n'def _lambdifygenerated():\\n    return (1,)\\n'\r\n```\r\n\r\nBut SymPy 1.10 gives\r\n\r\n```\r\n'def _lambdifygenerated():\\n    return (1)\\n'\r\n```\r\nNote the missing comma after `1` that causes an integer to be returned instead of a tuple. \r\n\r\nFor tuples with two or more elements, the generated code is correct:\r\n```python\r\ninspect.getsource(lambdify([], tuple([1, 2])))\r\n```\r\nIn SymPy  1.10 and under, outputs:\r\n\r\n```\r\n'def _lambdifygenerated():\\n    return (1, 2)\\n'\r\n```\r\nThis result is expected.\r\n\r\nNot sure if this is a regression. As this breaks my program which assumes the return type to always be a tuple, could you suggest a workaround from the code generation side? Thank you. \n\n</problem_statement>\n\n<localization_report>\nBug analysis: The _convert_python_lists function in codeprinter.py converts Python tuples by calling tuple(_convert_python_lists(e) for e in arg). When this tuple is later printed in Python code, single-element tuples lose their trailing comma and become just parenthesized expressions like (1) instead of (1,), causing them to evaluate as integers rather than tuples.\nExploration notes: The issue was introduced in PR #21993. The _convert_python_lists function is called from the doprint method in CodePrinter class around line 500. The function handles lists by converting to sympy.codegen.abstract_nodes.List, but tuples are kept as Python tuples. When these tuples are printed by the Python code printer, single-element tuples don't get the required trailing comma. The test_issue_14941 in /testbed/sympy/utilities/tests/test_lambdify.py tests tuple handling but not specifically single-element tuples. The lambdify function in /testbed/sympy/utilities/lambdify.py calls the code printer which uses _convert_python_lists.\n</localization_report>\n\n<solution_proposal>\nFix strategy: PE \u2014 Missing type conversion wrapping an expression: Convert Python tuple to SymPy Tuple so it prints correctly with trailing comma for single elements, ensuring generated code returns actual tuples not parenthesized expressions.\n\nFiles to modify: [\n  \"/testbed/sympy/printing/codeprinter.py\"\n]\nProposed changes:\nChange 1:\n  File    : /testbed/sympy/printing/codeprinter.py\n  Location: _convert_python_lists, line 42\n  Change  : REPLACE line 42:\n        return tuple(_convert_python_lists(e) for e in arg)\nWITH:\n        from sympy import Tuple\n        return Tuple(*(_convert_python_lists(e) for e in arg))\n  Rationale: Python tuples converted to SymPy Tuple objects will use the _print_tuple method which correctly handles single-element tuples with trailing commas. This prevents single-element tuples from being printed as (1) instead of (1,) in generated code.\n</solution_proposal>\n\nRead each file, implement the proposed changes, then run git diff and output the JSON result.\n"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "I'll start by reading the file to understand the current implementation.",
+          "type": "text"
+        },
+        {
+          "id": "toolu_011GrBEKnyjXnLpH6jSPMFnv",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat /testbed/sympy/printing/codeprinter.py | head -100"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011GrBEKnyjXnLpH6jSPMFnv",
+          "content": "[exit_code=0]\nfrom typing import Any, Dict as tDict, Set as tSet, Tuple as tTuple\n\nfrom functools import wraps\n\nfrom sympy.core import Add, Expr, Mul, Pow, S, sympify, Float\nfrom sympy.core.basic import Basic\nfrom sympy.core.expr import UnevaluatedExpr\nfrom sympy.core.function import Lambda\nfrom sympy.core.mul import _keep_coeff\nfrom sympy.core.sorting import default_sort_key\nfrom sympy.core.symbol import Symbol\nfrom sympy.functions.elementary.complexes import re\nfrom sympy.printing.str import StrPrinter\nfrom sympy.printing.precedence import precedence, PRECEDENCE\n\n\nclass requires:\n    \"\"\" Decorator for registering requirements on print methods. \"\"\"\n    def __init__(self, **kwargs):\n        self._req = kwargs\n\n    def __call__(self, method):\n        def _method_wrapper(self_, *args, **kwargs):\n            for k, v in self._req.items():\n                getattr(self_, k).update(v)\n            return method(self_, *args, **kwargs)\n        return wraps(method)(_method_wrapper)\n\n\nclass AssignmentError(Exception):\n    \"\"\"\n    Raised if an assignment variable for a loop is missing.\n    \"\"\"\n    pass\n\n\ndef _convert_python_lists(arg):\n    if isinstance(arg, list):\n        from sympy.codegen.abstract_nodes import List\n        return List(*(_convert_python_lists(e) for e in arg))\n    elif isinstance(arg, tuple):\n        return tuple(_convert_python_lists(e) for e in arg)\n    else:\n        return arg\n\n\nclass CodePrinter(StrPrinter):\n    \"\"\"\n    The base class for code-printing subclasses.\n    \"\"\"\n\n    _operators = {\n        'and': '&&',\n        'or': '||',\n        'not': '!',\n    }\n\n    _default_settings = {\n        'order': None,\n        'full_prec': 'auto',\n        'error_on_reserved': False,\n        'reserved_word_suffix': '_',\n        'human': True,\n        'inline': False,\n        'allow_unknown_functions': False,\n    }  # type: tDict[str, Any]\n\n    # Functions which are \"simple\" to rewrite to other functions that\n    # may be supported\n    # function_to_rewrite : (function_to_rewrite_to, iterable_with_other_functions_required)\n    _rewriteable_functions = {\n            'catalan': ('gamma', []),\n            'fibonacci': ('sqrt', []),\n            'lucas': ('sqrt', []),\n            'beta': ('gamma', []),\n            'sinc': ('sin', ['Piecewise']),\n            'Mod': ('floor', []),\n            'factorial': ('gamma', []),\n            'factorial2': ('gamma', ['Piecewise']),\n            'subfactorial': ('uppergamma', []),\n            'RisingFactorial': ('gamma', ['Piecewise']),\n            'FallingFactorial': ('gamma', ['Piecewise']),\n            'binomial': ('gamma', []),\n            'frac': ('floor', []),\n            'Max': ('Piecewise', []),\n            'Min': ('Piecewise', []),\n            'Heaviside': ('Piecewise', []),\n            'erf2': ('erf', []),\n            'erfc': ('erf', []),\n            'Li': ('li', []),\n            'Ei': ('li', []),\n            'dirichlet_eta': ('zeta', []),\n            'riemann_xi': ('zeta', ['gamma']),\n    }\n\n    def __init__(self, settings=None):\n\n        super().__init__(settings=settings)\n        if not hasattr(self, 'reserved_words'):\n            self.reserved_words = set()"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Let me continue reading to see the _convert_python_lists function more clearly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01GvAjt9pvSF1pz938TJSicr",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '35,50p' /testbed/sympy/printing/codeprinter.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GvAjt9pvSF1pz938TJSicr",
+          "content": "[exit_code=0]\ndef _convert_python_lists(arg):\n    if isinstance(arg, list):\n        from sympy.codegen.abstract_nodes import List\n        return List(*(_convert_python_lists(e) for e in arg))\n    elif isinstance(arg, tuple):\n        return tuple(_convert_python_lists(e) for e in arg)\n    else:\n        return arg\n\n\nclass CodePrinter(StrPrinter):\n    \"\"\"\n    The base class for code-printing subclasses.\n    \"\"\""
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Good! Now I can see the _convert_python_lists function at line 35-43. Let me apply the proposed change to convert Python tuples to SymPy Tuple objects:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_018mPJ7919Ke6exPVfyGu4wC",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cat > /tmp/fix_tuple.py << 'EOF'\nimport sys\n\n# Read the file\nwith open('/testbed/sympy/printing/codeprinter.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the _convert_python_lists function\nold_code = \"\"\"def _convert_python_lists(arg):\n    if isinstance(arg, list):\n        from sympy.codegen.abstract_nodes import List\n        return List(*(_convert_python_lists(e) for e in arg))\n    elif isinstance(arg, tuple):\n        return tuple(_convert_python_lists(e) for e in arg)\n    else:\n        return arg\"\"\"\n\nnew_code = \"\"\"def _convert_python_lists(arg):\n    if isinstance(arg, list):\n        from sympy.codegen.abstract_nodes import List\n        return List(*(_convert_python_lists(e) for e in arg))\n    elif isinstance(arg, tuple):\n        from sympy import Tuple\n        return Tuple(*(_convert_python_lists(e) for e in arg))\n    else:\n        return arg\"\"\"\n\ncontent = content.replace(old_code, new_code)\n\n# Write the file back\nwith open('/testbed/sympy/printing/codeprinter.py', 'w') as f:\n    f.write(content)\n\nprint(\"File updated successfully\")\nEOF\npython /tmp/fix_tuple.py\n"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018mPJ7919Ke6exPVfyGu4wC",
+          "content": "[exit_code=0]\nFile updated successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Now let me verify the change was applied correctly:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_01MT4q5EWDwe5M4zp7VehYtb",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "sed -n '35,50p' /testbed/sympy/printing/codeprinter.py"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MT4q5EWDwe5M4zp7VehYtb",
+          "content": "[exit_code=0]\ndef _convert_python_lists(arg):\n    if isinstance(arg, list):\n        from sympy.codegen.abstract_nodes import List\n        return List(*(_convert_python_lists(e) for e in arg))\n    elif isinstance(arg, tuple):\n        from sympy import Tuple\n        return Tuple(*(_convert_python_lists(e) for e in arg))\n    else:\n        return arg\n\n\nclass CodePrinter(StrPrinter):\n    \"\"\"\n    The base class for code-printing subclasses."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The change has been applied. Now let me run git diff to verify the changes:",
+          "type": "text"
+        },
+        {
+          "id": "toolu_012T7zUyQZqyZoMenHTA5aiw",
+          "caller": {
+            "type": "direct"
+          },
+          "input": {
+            "command": "cd /testbed && git diff"
+          },
+          "name": "bash",
+          "type": "tool_use"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012T7zUyQZqyZoMenHTA5aiw",
+          "content": "[exit_code=0]\ndiff --git a/sympy/printing/codeprinter.py b/sympy/printing/codeprinter.py\nindex 98f8615621..8c42c3969e 100644\n--- a/sympy/printing/codeprinter.py\n+++ b/sympy/printing/codeprinter.py\n@@ -39,7 +39,8 @@ def _convert_python_lists(arg):\n         from sympy.codegen.abstract_nodes import List\n         return List(*(_convert_python_lists(e) for e in arg))\n     elif isinstance(arg, tuple):\n-        return tuple(_convert_python_lists(e) for e in arg)\n+        from sympy import Tuple\n+        return Tuple(*(_convert_python_lists(e) for e in arg))\n     else:\n         return arg"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "citations": null,
+          "text": "Perfect! The git diff shows exactly the change we intended to make. The modification converts Python tuples to SymPy Tuple objects in the _convert_python_lists function, which will ensure that single-element tuples are printed with the trailing comma (e.g., (1,) instead of (1)).\n\n```json\n{\n  \"patch\": \"diff --git a/sympy/printing/codeprinter.py b/sympy/printing/codeprinter.py\\nindex 98f8615621..8c42c3969e 100644\\n--- a/sympy/printing/codeprinter.py\\n+++ b/sympy/printing/codeprinter.py\\n@@ -39,7 +39,8 @@ def _convert_python_lists(arg):\\n         from sympy.codegen.abstract_nodes import List\\n         return List(*(_convert_python_lists(e) for e in arg))\\n     elif isinstance(arg, tuple):\\n-        return tuple(_convert_python_lists(e) for e in arg)\\n+        from sympy import Tuple\\n+        return Tuple(*(_convert_python_lists(e) for e in arg))\\n     else:\\n         return arg\",\n  \"implementation_notes\": \"Modified the _convert_python_lists function to convert Python tuples to SymPy Tuple objects, ensuring single-element tuples are printed with trailing commas (e.g., (1,) instead of (1)) in generated code.\"\n}\n```",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "iterations": 6,
+  "timestamp": "2026-04-14T00:13:03Z"
+}
